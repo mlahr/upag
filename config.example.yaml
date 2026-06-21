@@ -1,0 +1,21 @@
+smtp:
+  host: smtp.example.com
+  port: 587
+  tls: starttls
+  username: alerts@example.com
+  password: change-me
+  from: alerts@example.com
+  to:
+    - ops@example.com
+
+defaults:
+  interval: 60s
+  timeout: 10s
+  failure_threshold: 3
+  history_retention: 720h
+
+monitors:
+  - id: example
+    name: Example homepage
+    url: https://example.com/
+    expected_status_code: 200

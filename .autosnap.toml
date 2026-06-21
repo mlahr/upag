@@ -1,0 +1,10 @@
+check = "npm test"
+idle_seconds = 60
+snapshot_mode = "both"
+commit_mode = "checkpoint"
+msg_source_cmd = ""
+log_max_bytes = 10485760
+
+[watch]
+mode = "recursive"
+poll_interval = "5s"
