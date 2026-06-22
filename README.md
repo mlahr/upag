@@ -11,6 +11,8 @@ transition DOWN or UP.
 - Optional exact, case-sensitive and command-based response body assertions.
 - Optional maximum full response duration checks.
 - Per-monitor intervals and timeouts with global defaults.
+- Deterministically staggered monitor scheduling to avoid synchronized probe
+  bursts.
 - SQLite persistence for monitor state, probe history, incidents, and alert
   notification attempts, with automatic startup migrations.
 - Email incident alerts through SMTP, the Mailtrap Transactional Email API, or
@@ -508,8 +510,10 @@ Reload configuration without restarting the daemon process:
 upag config reload --pid-file ./upag.pid
 ```
 
-Configuration reloads add new monitors, update monitors with matching IDs, and
-stop scheduling monitors removed from the YAML file.
+Configuration reloads add new monitors, keep unchanged monitor workers running,
+restart changed monitor workers, and stop scheduling monitors removed from the
+YAML file. New and changed monitors use a deterministic initial delay so checks
+are spread across each monitor interval.
 
 Inspect stored state:
 

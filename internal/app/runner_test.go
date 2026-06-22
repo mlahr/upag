@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -309,6 +310,249 @@ func TestProbeRecordsFailedResultAfterRetriesExhausted(t *testing.T) {
 	}
 	if ok != 0 || attemptCount != 3 {
 		t.Fatalf("stored probe ok=%d attempt_count=%d, want ok=0 attempt_count=3", ok, attemptCount)
+	}
+}
+
+func TestMonitorInitialDelayIsDeterministicAndInsideInterval(t *testing.T) {
+	interval := 250 * time.Millisecond
+	first := monitorInitialDelay("home", interval)
+	second := monitorInitialDelay("home", interval)
+	if first != second {
+		t.Fatalf("delay = %s then %s, want deterministic value", first, second)
+	}
+	if first <= 0 || first >= interval {
+		t.Fatalf("delay = %s, want > 0 and < %s", first, interval)
+	}
+	other := monitorInitialDelay("api", interval)
+	if other <= 0 || other >= interval {
+		t.Fatalf("other delay = %s, want > 0 and < %s", other, interval)
+	}
+}
+
+func TestRunMonitorWaitsForInitialStaggerDelayBeforeFirstProbe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requests, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	interval := 50 * time.Millisecond
+	monitorID := monitorIDWithMinimumDelay(t, interval, 20*time.Millisecond)
+	mon := config.MonitorConfig{
+		ID:                 monitorID,
+		Name:               "Home",
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		Interval:           config.Duration{Duration: interval},
+	}
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.emailer = &fakeIncidentSender{}
+
+	go runner.runMonitor(ctx, 1, 0, 0, mon)
+
+	time.Sleep(5 * time.Millisecond)
+	if got := atomic.LoadInt32(&requests); got != 0 {
+		t.Fatalf("requests before stagger delay = %d, want 0", got)
+	}
+
+	deadline := time.After(150 * time.Millisecond)
+	for atomic.LoadInt32(&requests) == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for first staggered probe")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+}
+
+func TestApplyConfigKeepsUnchangedWorker(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testRunnerConfig("home", "https://example.com/")
+	workerConfig := monitorWorkerConfig{
+		Monitor:           cfg.Monitors[0],
+		FailureThreshold:  cfg.Defaults.FailureThreshold,
+		ProbeRetries:      cfg.Defaults.ProbeRetries,
+		ProbeRetryBackoff: cfg.Defaults.ProbeRetryBackoff.Duration,
+	}
+	var cancelled int32
+	runner.workers["home"] = monitorWorker{
+		cancel: func() { atomic.AddInt32(&cancelled, 1) },
+		config: workerConfig,
+	}
+
+	runner.applyConfig(context.Background(), cfg)
+
+	if got := atomic.LoadInt32(&cancelled); got != 0 {
+		t.Fatalf("cancelled unchanged worker %d times, want 0", got)
+	}
+	if len(runner.workers) != 1 {
+		t.Fatalf("worker count = %d, want 1", len(runner.workers))
+	}
+}
+
+func TestApplyConfigRestartsChangedWorker(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldCfg := testRunnerConfig("home", "https://example.com/")
+	oldWorkerConfig := monitorWorkerConfig{
+		Monitor:           oldCfg.Monitors[0],
+		FailureThreshold:  oldCfg.Defaults.FailureThreshold,
+		ProbeRetries:      oldCfg.Defaults.ProbeRetries,
+		ProbeRetryBackoff: oldCfg.Defaults.ProbeRetryBackoff.Duration,
+	}
+	var cancelled int32
+	runner.workers["home"] = monitorWorker{
+		cancel: func() { atomic.AddInt32(&cancelled, 1) },
+		config: oldWorkerConfig,
+	}
+	nextCfg := testRunnerConfig("home", "https://changed.example.com/")
+
+	runner.applyConfig(parent, nextCfg)
+
+	if got := atomic.LoadInt32(&cancelled); got != 1 {
+		t.Fatalf("cancelled changed worker %d times, want 1", got)
+	}
+	worker := runner.workers["home"]
+	if worker.config.Monitor.URL != "https://changed.example.com/" {
+		t.Fatalf("worker URL = %q, want changed URL", worker.config.Monitor.URL)
+	}
+	cancelParent()
+}
+
+func TestApplyConfigRestartsWorkerWhenRelevantDefaultChanges(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldCfg := testRunnerConfig("home", "https://example.com/")
+	oldWorkerConfig := monitorWorkerConfig{
+		Monitor:           oldCfg.Monitors[0],
+		FailureThreshold:  oldCfg.Defaults.FailureThreshold,
+		ProbeRetries:      oldCfg.Defaults.ProbeRetries,
+		ProbeRetryBackoff: oldCfg.Defaults.ProbeRetryBackoff.Duration,
+	}
+	var cancelled int32
+	runner.workers["home"] = monitorWorker{
+		cancel: func() { atomic.AddInt32(&cancelled, 1) },
+		config: oldWorkerConfig,
+	}
+	nextCfg := testRunnerConfig("home", "https://example.com/")
+	nextCfg.Defaults.FailureThreshold = oldCfg.Defaults.FailureThreshold + 1
+
+	runner.applyConfig(parent, nextCfg)
+
+	if got := atomic.LoadInt32(&cancelled); got != 1 {
+		t.Fatalf("cancelled worker after default change %d times, want 1", got)
+	}
+	if runner.workers["home"].config.FailureThreshold != nextCfg.Defaults.FailureThreshold {
+		t.Fatalf("worker threshold = %d, want %d", runner.workers["home"].config.FailureThreshold, nextCfg.Defaults.FailureThreshold)
+	}
+	cancelParent()
+}
+
+func TestApplyConfigStopsRemovedWorker(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cancelled int32
+	runner.workers["removed"] = monitorWorker{
+		cancel: func() { atomic.AddInt32(&cancelled, 1) },
+		config: monitorWorkerConfig{},
+	}
+
+	runner.applyConfig(context.Background(), testRunnerConfig("home", "https://example.com/"))
+
+	if got := atomic.LoadInt32(&cancelled); got != 1 {
+		t.Fatalf("cancelled removed worker %d times, want 1", got)
+	}
+	if _, ok := runner.workers["removed"]; ok {
+		t.Fatal("removed worker still registered")
+	}
+}
+
+func monitorIDWithMinimumDelay(t *testing.T, interval time.Duration, minimum time.Duration) string {
+	t.Helper()
+	for i := 0; i < 1000; i++ {
+		id := fmt.Sprintf("monitor-%d", i)
+		if monitorInitialDelay(id, interval) >= minimum {
+			return id
+		}
+	}
+	t.Fatalf("could not find monitor ID with delay >= %s", minimum)
+	return ""
+}
+
+func testRunnerConfig(id string, url string) config.Config {
+	return config.Config{
+		Defaults: config.Defaults{
+			Interval:          config.Duration{Duration: time.Minute},
+			Timeout:           config.Duration{Duration: time.Second},
+			ProbeRetries:      2,
+			ProbeRetryBackoff: config.Duration{Duration: time.Millisecond},
+			FailureThreshold:  3,
+			HistoryRetention:  config.Duration{Duration: 24 * time.Hour},
+		},
+		Monitors: []config.MonitorConfig{
+			{
+				ID:                 id,
+				Name:               id,
+				URL:                url,
+				ExpectedStatusCode: http.StatusOK,
+				Timeout:            config.Duration{Duration: time.Second},
+				Interval:           config.Duration{Duration: time.Minute},
+			},
+		},
 	}
 }
 

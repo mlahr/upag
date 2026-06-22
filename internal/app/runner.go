@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"os/signal"
+	"reflect"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,10 +34,22 @@ type Runner struct {
 	logMu         sync.Mutex
 	cfg           config.Config
 	emailer       alert.IncidentSender
-	workers       map[string]context.CancelFunc
+	workers       map[string]monitorWorker
 	statusServer  *httpstatus.Server
 	statusAddress string
 	statusPort    int
+}
+
+type monitorWorker struct {
+	cancel context.CancelFunc
+	config monitorWorkerConfig
+}
+
+type monitorWorkerConfig struct {
+	Monitor           config.MonitorConfig
+	FailureThreshold  int
+	ProbeRetries      int
+	ProbeRetryBackoff time.Duration
 }
 
 func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
@@ -48,7 +62,7 @@ func NewRunner(configPath string, cfg config.Config, store *storage.Store, out i
 		out:        out,
 		errOut:     errOut,
 		emailer:    alert.NewIncidentSender(cfg),
-		workers:    map[string]context.CancelFunc{},
+		workers:    map[string]monitorWorker{},
 	}, nil
 }
 
@@ -110,9 +124,9 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 		desired[mon.ID] = mon
 		desiredIDs = append(desiredIDs, mon.ID)
 	}
-	for id, cancel := range r.workers {
+	for id, worker := range r.workers {
 		if _, ok := desired[id]; !ok {
-			cancel()
+			worker.cancel()
 			delete(r.workers, id)
 		}
 	}
@@ -120,12 +134,21 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 		r.logError("stale_monitor_cleanup_failed", "error=%q", err)
 	}
 	for _, mon := range cfg.Monitors {
-		if cancel, ok := r.workers[mon.ID]; ok {
-			cancel()
+		workerConfig := monitorWorkerConfig{
+			Monitor:           mon,
+			FailureThreshold:  cfg.Defaults.FailureThreshold,
+			ProbeRetries:      cfg.Defaults.ProbeRetries,
+			ProbeRetryBackoff: cfg.Defaults.ProbeRetryBackoff.Duration,
+		}
+		if worker, ok := r.workers[mon.ID]; ok {
+			if reflect.DeepEqual(worker.config, workerConfig) {
+				continue
+			}
+			worker.cancel()
 		}
 		workerCtx, cancel := context.WithCancel(parent)
-		r.workers[mon.ID] = cancel
-		go r.runMonitor(workerCtx, cfg.Defaults.FailureThreshold, cfg.Defaults.ProbeRetries, cfg.Defaults.ProbeRetryBackoff.Duration, mon)
+		r.workers[mon.ID] = monitorWorker{cancel: cancel, config: workerConfig}
+		go r.runMonitor(workerCtx, workerConfig.FailureThreshold, workerConfig.ProbeRetries, workerConfig.ProbeRetryBackoff, workerConfig.Monitor)
 	}
 	r.cfg = cfg
 	r.emailer = alert.NewIncidentSender(cfg)
@@ -209,13 +232,22 @@ func (r *Runner) statusMetadata() httpstatus.Metadata {
 func (r *Runner) stopAll() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for id, cancel := range r.workers {
-		cancel()
+	for id, worker := range r.workers {
+		worker.cancel()
 		delete(r.workers, id)
 	}
 }
 
 func (r *Runner) runMonitor(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
+	if delay := monitorInitialDelay(mon.ID, mon.Interval.Duration); delay > 0 {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
 	r.probe(ctx, threshold, probeRetries, probeRetryBackoff, mon)
 	ticker := time.NewTicker(mon.Interval.Duration)
 	defer ticker.Stop()
@@ -228,6 +260,15 @@ func (r *Runner) runMonitor(ctx context.Context, threshold int, probeRetries int
 			r.probe(ctx, threshold, probeRetries, probeRetryBackoff, mon)
 		}
 	}
+}
+
+func monitorInitialDelay(monitorID string, interval time.Duration) time.Duration {
+	if interval <= time.Nanosecond {
+		return 0
+	}
+	hash := fnv.New64a()
+	_, _ = hash.Write([]byte(monitorID))
+	return time.Duration(hash.Sum64()%uint64(interval-time.Nanosecond)) + time.Nanosecond
 }
 
 func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
