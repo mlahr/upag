@@ -8,7 +8,7 @@ transition DOWN or UP.
 ## Features
 
 - HTTP and HTTPS checks with exact expected status-code validation.
-- Optional exact, case-sensitive response body assertions.
+- Optional exact, case-sensitive and command-based response body assertions.
 - Optional maximum full response duration checks.
 - Per-monitor intervals and timeouts with global defaults.
 - SQLite persistence for monitor state, probe history, incidents, and alert
@@ -185,6 +185,8 @@ monitors:
     response_body:
       must_contain: Example Domain
       must_not_contain: Maintenance mode
+      command: ["jq", "-e", ".status == \"ok\""]
+      command_timeout: 10s
 ```
 
 ### Alert Providers
@@ -315,6 +317,10 @@ Optional monitor fields:
   response body.
 - `response_body.must_not_contain`: exact, case-sensitive string forbidden in
   the response body.
+- `response_body.command`: external command assertion expressed as an argv
+  list. The first item is the executable and remaining items are arguments.
+- `response_body.command_timeout`: maximum external command runtime. Defaults
+  to `10s` when `response_body.command` is configured.
 
 Redirects are not followed. For example, a monitor expecting `302` succeeds when
 the first response is `302`.
@@ -322,10 +328,23 @@ the first response is `302`.
 Body assertions are evaluated only after the observed status code matches
 `expected_status_code`.
 
+When `response_body.command` is configured, `upag` runs the command directly
+without a shell and writes the exact response body bytes to the command's
+standard input. Exit code `0` passes the assertion. A non-zero exit code, a
+process start error, or a `command_timeout` expiry fails the assertion. Shell
+features such as pipes, redirects, globbing, variable expansion, and `&&` are
+available only when explicitly invoking a shell, for example:
+
+```yaml
+response_body:
+  command: ["sh", "-c", "jq -e '.status == \"ok\"' | grep true"]
+```
+
 `latency_ms` in logs and stored probe history is time to response headers. When
 `max_response_time` or `response_body` is configured, `response_time_ms` is the
 full response duration, ending after the response body has been read. Otherwise,
-`response_time_ms` is `0`.
+`response_time_ms` is `0`. External response body command runtime is not
+included in `response_time_ms`.
 
 ## Operations
 

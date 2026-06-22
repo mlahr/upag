@@ -1,12 +1,14 @@
 package checker
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -55,6 +57,7 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	defer resp.Body.Close()
 
 	result.ObservedStatusCode = resp.StatusCode
+	var bodyBytes []byte
 	var bodyText string
 	if monitor.ResponseBody.Configured() || monitor.MaxResponseTime.Duration > 0 {
 		body, err := io.ReadAll(resp.Body)
@@ -63,6 +66,7 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 			result.Error = fmt.Sprintf("read response body: %v", err)
 			return result
 		}
+		bodyBytes = body
 		bodyText = string(body)
 	}
 
@@ -84,6 +88,12 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 		result.Error = fmt.Sprintf("response body contains forbidden string %q", monitor.ResponseBody.MustNotContain)
 		return result
 	}
+	if len(monitor.ResponseBody.Command) != 0 {
+		if err := runResponseBodyCommand(ctx, monitor.ResponseBody, bodyBytes); err != nil {
+			result.Error = err.Error()
+			return result
+		}
+	}
 	if monitor.MaxResponseTime.Duration > 0 && result.ResponseTime > monitor.MaxResponseTime.Duration {
 		result.Error = fmt.Sprintf("response time %s exceeded maximum %s", result.ResponseTime, monitor.MaxResponseTime.Duration)
 		return result
@@ -91,6 +101,41 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 
 	result.OK = true
 	return result
+}
+
+func runResponseBodyCommand(ctx context.Context, assertion config.ResponseBodyAssertions, body []byte) error {
+	cmdCtx, cancel := context.WithTimeout(ctx, assertion.CommandTimeout.Duration)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, assertion.Command[0], assertion.Command[1:]...)
+	cmd.Stdin = bytes.NewReader(body)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	stderrText := strings.TrimSpace(stderr.String())
+	if errors.Is(cmdCtx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("response body command %q exceeded timeout %s%s", assertion.Command[0], assertion.CommandTimeout.Duration, stderrExcerpt(stderrText))
+	}
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			return fmt.Errorf("response body command %q failed with exit status %d%s", assertion.Command[0], exitErr.ExitCode(), stderrExcerpt(stderrText))
+		}
+		return fmt.Errorf("run response body command %q: %v", assertion.Command[0], err)
+	}
+	return nil
+}
+
+func stderrExcerpt(stderr string) string {
+	if stderr == "" {
+		return ""
+	}
+	const maxStderrExcerpt = 512
+	if len(stderr) > maxStderrExcerpt {
+		stderr = stderr[:maxStderrExcerpt] + "..."
+	}
+	return fmt.Sprintf(": stderr=%q", stderr)
 }
 
 func FailureMessage(result Result) string {

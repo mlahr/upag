@@ -72,12 +72,14 @@ type MonitorConfig struct {
 }
 
 type ResponseBodyAssertions struct {
-	MustContain    string `yaml:"must_contain"`
-	MustNotContain string `yaml:"must_not_contain"`
+	MustContain    string   `yaml:"must_contain"`
+	MustNotContain string   `yaml:"must_not_contain"`
+	Command        []string `yaml:"command"`
+	CommandTimeout Duration `yaml:"command_timeout"`
 }
 
 func (a ResponseBodyAssertions) Configured() bool {
-	return a.MustContain != "" || a.MustNotContain != ""
+	return a.MustContain != "" || a.MustNotContain != "" || len(a.Command) != 0
 }
 
 type Duration struct {
@@ -155,6 +157,9 @@ func (c *Config) ApplyDefaults() {
 		}
 		if c.Monitors[i].Timeout.Duration == 0 {
 			c.Monitors[i].Timeout = c.Defaults.Timeout
+		}
+		if len(c.Monitors[i].ResponseBody.Command) != 0 && c.Monitors[i].ResponseBody.CommandTimeout.Duration == 0 {
+			c.Monitors[i].ResponseBody.CommandTimeout.Duration = 10 * time.Second
 		}
 	}
 }
@@ -270,6 +275,21 @@ func (c Config) Validate() error {
 		}
 		if monitor.MaxResponseTime.Duration < 0 {
 			errs = append(errs, fmt.Errorf("%s.max_response_time must be positive", prefix))
+		}
+		if monitor.ResponseBody.Command != nil && len(monitor.ResponseBody.Command) == 0 {
+			errs = append(errs, fmt.Errorf("%s.response_body.command must contain at least one item", prefix))
+		}
+		if len(monitor.ResponseBody.Command) == 0 {
+			if monitor.ResponseBody.CommandTimeout.Duration != 0 {
+				errs = append(errs, fmt.Errorf("%s.response_body.command_timeout requires response_body.command", prefix))
+			}
+		} else {
+			if strings.TrimSpace(monitor.ResponseBody.Command[0]) == "" {
+				errs = append(errs, fmt.Errorf("%s.response_body.command[0] is required", prefix))
+			}
+			if monitor.ResponseBody.CommandTimeout.Duration <= 0 {
+				errs = append(errs, fmt.Errorf("%s.response_body.command_timeout must be positive", prefix))
+			}
 		}
 		if monitor.Interval.Duration <= 0 {
 			errs = append(errs, fmt.Errorf("%s.interval must be positive", prefix))

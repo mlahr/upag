@@ -41,3 +41,5 @@ monitors:
     response_body:
       must_contain: Example Domain
       must_not_contain: Maintenance mode
+      command: ["jq", "-e", ".status == \"ok\""]
+      command_timeout: 10s

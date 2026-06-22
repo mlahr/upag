@@ -146,6 +146,8 @@ monitors:
     response_body:
       must_contain: "Welcome"
       must_not_contain: "Maintenance mode"
+      command: ["jq", "-e", ".ok == true"]
+      command_timeout: 2s
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -155,6 +157,34 @@ monitors:
 	}
 	if cfg.Monitors[0].ResponseBody.MustNotContain != "Maintenance mode" {
 		t.Fatalf("response_body.must_not_contain = %q, want Maintenance mode", cfg.Monitors[0].ResponseBody.MustNotContain)
+	}
+	if strings.Join(cfg.Monitors[0].ResponseBody.Command, " ") != "jq -e .ok == true" {
+		t.Fatalf("response_body.command = %#v, want jq argv", cfg.Monitors[0].ResponseBody.Command)
+	}
+	if cfg.Monitors[0].ResponseBody.CommandTimeout.Duration != 2*time.Second {
+		t.Fatalf("response_body.command_timeout = %s, want 2s", cfg.Monitors[0].ResponseBody.CommandTimeout.Duration)
+	}
+}
+
+func TestParseDefaultsResponseBodyCommandTimeout(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      command: ["jq", "-e", ".ok == true"]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Monitors[0].ResponseBody.CommandTimeout.Duration != 10*time.Second {
+		t.Fatalf("response_body.command_timeout = %s, want 10s", cfg.Monitors[0].ResponseBody.CommandTimeout.Duration)
 	}
 }
 
@@ -279,6 +309,76 @@ monitors:
 	}
 	if !strings.Contains(err.Error(), "monitors[0].max_response_time must be positive") {
 		t.Fatalf("validation error %q does not contain max_response_time", err)
+	}
+}
+
+func TestParseRejectsInvalidResponseBodyCommand(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      command: [""]
+      command_timeout: -1s
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	message := err.Error()
+	for _, want := range []string{"monitors[0].response_body.command[0] is required", "monitors[0].response_body.command_timeout must be positive"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("validation error %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestParseRejectsEmptyResponseBodyCommand(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      command: []
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "monitors[0].response_body.command must contain at least one item") {
+		t.Fatalf("validation error %q does not contain empty command", err)
+	}
+}
+
+func TestParseRejectsResponseBodyCommandTimeoutWithoutCommand(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      command_timeout: 1s
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "monitors[0].response_body.command_timeout requires response_body.command") {
+		t.Fatalf("validation error %q does not contain command_timeout dependency", err)
 	}
 }
 

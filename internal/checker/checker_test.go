@@ -2,8 +2,11 @@ package checker
 
 import (
 	"context"
+	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -151,6 +154,122 @@ func TestCheckStatusMismatchSkipsResponseBodyAssertions(t *testing.T) {
 	}
 }
 
+func TestCheckSucceedsWhenResponseBodyCommandExitsZero(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Welcome to the homepage"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("contains", "Welcome"),
+			CommandTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected response body command assertion to pass, got error %q", result.Error)
+	}
+}
+
+func TestCheckPassesExactResponseBodyBytesToCommandStdin(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	body := []byte{0xff, 'o', 'k', 0x00}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("hex", hex.EncodeToString(body)),
+			CommandTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected exact stdin bytes to pass, got error %q", result.Error)
+	}
+}
+
+func TestCheckFailsWhenResponseBodyCommandExitsNonZero(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("bad response"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("fail"),
+			CommandTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if result.OK {
+		t.Fatal("expected response body command assertion to fail")
+	}
+	if !strings.Contains(result.Error, `response body command`) || !strings.Contains(result.Error, "exit status 7") || !strings.Contains(result.Error, `stderr="helper failure"`) {
+		t.Fatalf("error = %q, want command failure with stderr", result.Error)
+	}
+}
+
+func TestCheckFailsWhenResponseBodyCommandTimesOut(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("slow command"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("sleep", "200ms"),
+			CommandTimeout: config.Duration{Duration: 20 * time.Millisecond},
+		},
+	})
+	if result.OK {
+		t.Fatal("expected response body command assertion to time out")
+	}
+	if !strings.Contains(result.Error, "exceeded timeout 20ms") {
+		t.Fatalf("error = %q, want command timeout failure", result.Error)
+	}
+}
+
+func TestCheckStatusMismatchSkipsResponseBodyCommand(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("bad response"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("fail"),
+			CommandTimeout: config.Duration{Duration: time.Second},
+		},
+	})
+	if result.OK {
+		t.Fatal("expected status mismatch to fail")
+	}
+	if result.Error != "expected HTTP status 200, observed HTTP status 503" {
+		t.Fatalf("error = %q, want status mismatch error", result.Error)
+	}
+}
+
 func TestCheckWithoutResponseBodyAssertionsKeepsStatusOnlyBehavior(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("any response body"))
@@ -185,6 +304,54 @@ func TestCheckSucceedsWhenResponseTimeIsAtOrBelowMaximum(t *testing.T) {
 	if result.ResponseTime <= 0 {
 		t.Fatalf("response time = %s, want positive duration", result.ResponseTime)
 	}
+}
+
+func helperCommand(args ...string) []string {
+	command := []string{os.Args[0], "-test.run=TestResponseBodyCommandHelperProcess", "--"}
+	return append(command, args...)
+}
+
+func TestResponseBodyCommandHelperProcess(t *testing.T) {
+	if os.Getenv("UPAG_CHECKER_HELPER_PROCESS") != "1" {
+		return
+	}
+	args := os.Args
+	for len(args) > 0 && args[0] != "--" {
+		args = args[1:]
+	}
+	if len(args) < 2 {
+		os.Exit(2)
+	}
+	body, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		_, _ = os.Stderr.WriteString(err.Error())
+		os.Exit(2)
+	}
+	switch args[1] {
+	case "contains":
+		if len(args) != 3 || !strings.Contains(string(body), args[2]) {
+			os.Exit(1)
+		}
+	case "hex":
+		if len(args) != 3 || hex.EncodeToString(body) != args[2] {
+			os.Exit(1)
+		}
+	case "fail":
+		_, _ = os.Stderr.WriteString("helper failure")
+		os.Exit(7)
+	case "sleep":
+		if len(args) != 3 {
+			os.Exit(2)
+		}
+		duration, err := time.ParseDuration(args[2])
+		if err != nil {
+			os.Exit(2)
+		}
+		time.Sleep(duration)
+	default:
+		os.Exit(2)
+	}
+	os.Exit(0)
 }
 
 func TestCheckFailsWhenResponseTimeExceedsMaximum(t *testing.T) {
