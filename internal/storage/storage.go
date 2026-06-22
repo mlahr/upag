@@ -416,6 +416,37 @@ func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertN
 	return notifications, rows.Err()
 }
 
+func (s *Store) ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]AlertNotification, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number, n.success, n.error, n.next_retry_at, n.retry_exhausted
+		FROM alert_notifications n
+		WHERE n.success = 0
+			AND NOT EXISTS (
+				SELECT 1 FROM alert_notifications newer
+				WHERE newer.incident_id = n.incident_id
+					AND newer.provider = n.provider
+					AND newer.id > n.id
+			)
+		ORDER BY n.attempted_at DESC, n.id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notifications []AlertNotification
+	for rows.Next() {
+		notification, err := scanAlertNotification(rows)
+		if err != nil {
+			return nil, err
+		}
+		notifications = append(notifications, notification)
+	}
+	return notifications, rows.Err()
+}
+
 func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Time, limit int) ([]AlertNotificationRetry, error) {
 	if limit <= 0 {
 		limit = 50
@@ -487,6 +518,24 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 		retries = append(retries, retry)
 	}
 	return retries, rows.Err()
+}
+
+func scanAlertNotification(scanner rowScanner) (AlertNotification, error) {
+	var notification AlertNotification
+	var attempted string
+	var nextRetry sql.NullString
+	var success int
+	var retryExhausted int
+	if err := scanner.Scan(&notification.ID, &notification.IncidentID, &notification.MonitorID, &notification.Provider, &attempted, &notification.AttemptNumber, &success, &notification.Error, &nextRetry, &retryExhausted); err != nil {
+		return AlertNotification{}, err
+	}
+	notification.AttemptedAt = parseTime(attempted)
+	notification.Success = intBool(success)
+	if nextRetry.Valid {
+		notification.NextRetryAt = parseTime(nextRetry.String)
+	}
+	notification.RetryExhausted = intBool(retryExhausted)
+	return notification, nil
 }
 
 func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {

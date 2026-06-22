@@ -19,6 +19,8 @@ transition DOWN or UP.
 - Foreground and background daemon commands.
 - Configuration reload by signal without restarting the daemon process.
 - CLI inspection commands for current monitor state and recent incidents.
+- Optional local HTTP endpoints for daemon health, monitor state, and alert
+  delivery failures.
 
 ## Installation
 
@@ -165,6 +167,9 @@ alerts:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
 
+http:
+  port: 0
+
 defaults:
   interval: 60s
   timeout: 10s
@@ -215,6 +220,71 @@ including the initial attempt. `alerts.notification_retries.backoff` is the list
 of retry delays. Defaults are `max_attempts: 3` and `[1m, 5m, 15m]`.
 
 Failed notification attempts are stored in SQLite and retried by the daemon.
+
+### HTTP Status Listener
+
+`http.port` controls the optional local HTTP status listener. The default is
+`0`, which disables the listener. When set to a TCP port from `1` through
+`65535`, the daemon listens on `127.0.0.1:<port>`.
+
+Endpoints:
+
+- `GET /health`: daemon liveness metadata.
+- `GET /status`: daemon metadata, monitor state, and actionable alert delivery
+  failures.
+
+Example `GET /health` response:
+
+```json
+{
+  "status": "ok",
+  "version": "dev",
+  "started_at": "2026-06-22T02:15:04.123456789Z"
+}
+```
+
+Example `GET /status` response:
+
+```json
+{
+  "status": "ok",
+  "version": "dev",
+  "started_at": "2026-06-22T02:15:04.123456789Z",
+  "config_path": "/etc/upag/config.yaml",
+  "monitor_count": 1,
+  "monitors": [
+    {
+      "id": "homepage",
+      "name": "Homepage",
+      "url": "https://example.com/",
+      "status": "UP",
+      "consecutive_failures": 0,
+      "last_checked_at": "2026-06-22T02:20:04.987654321Z",
+      "last_success_at": "2026-06-22T02:20:04.987654321Z",
+      "last_failure_at": null,
+      "last_error": "",
+      "last_observed_status_code": 200,
+      "updated_at": "2026-06-22T02:20:04.987654321Z"
+    }
+  ],
+  "alert_delivery_failures": [
+    {
+      "incident_id": 42,
+      "monitor_id": "api",
+      "provider": "smtp",
+      "attempted_at": "2026-06-22T02:20:10.111222333Z",
+      "attempt_number": 2,
+      "error": "send mail: dial tcp: lookup smtp.example.com: no such host",
+      "next_retry_at": "2026-06-22T02:25:10.111222333Z",
+      "retry_exhausted": false
+    }
+  ]
+}
+```
+
+`alert_delivery_failures` contains at most 50 latest failed delivery attempts,
+one per incident and provider, excluding failures followed by a later successful
+delivery for that same incident and provider.
 
 ### Defaults
 

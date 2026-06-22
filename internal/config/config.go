@@ -12,11 +12,16 @@ import (
 )
 
 type Config struct {
+	HTTP     HTTPConfig      `yaml:"http"`
 	Alerts   AlertsConfig    `yaml:"alerts"`
 	SMTP     SMTPConfig      `yaml:"smtp"`
 	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
+}
+
+type HTTPConfig struct {
+	Port int `yaml:"port"`
 }
 
 type AlertsConfig struct {
@@ -223,6 +228,9 @@ func (c Config) Validate() error {
 	}
 	if c.Defaults.HistoryRetention.Duration <= 0 {
 		errs = append(errs, errors.New("defaults.history_retention must be positive"))
+	}
+	if c.HTTP.Port < 0 || c.HTTP.Port > 65535 {
+		errs = append(errs, errors.New("http.port must be a TCP port number from 0 through 65535"))
 	}
 	if len(c.Monitors) == 0 {
 		errs = append(errs, errors.New("monitors must contain at least one monitor"))

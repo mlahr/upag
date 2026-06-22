@@ -101,7 +101,7 @@ func runDaemon(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runner, err := app.NewRunner(*configPath, cfg, store, out, errOut)
+	runner, err := app.NewRunner(*configPath, cfg, store, out, errOut, version)
 	if err != nil {
 		return err
 	}

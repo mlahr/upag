@@ -16,25 +16,32 @@ import (
 	"upag/internal/config"
 	"upag/internal/monitor"
 	"upag/internal/state"
+	httpstatus "upag/internal/status"
 	"upag/internal/storage"
 )
 
 type Runner struct {
 	configPath string
+	version    string
+	startedAt  time.Time
 	store      *storage.Store
 	out        io.Writer
 	errOut     io.Writer
 
-	mu      sync.Mutex
-	logMu   sync.Mutex
-	cfg     config.Config
-	emailer alert.IncidentSender
-	workers map[string]context.CancelFunc
+	mu           sync.Mutex
+	logMu        sync.Mutex
+	cfg          config.Config
+	emailer      alert.IncidentSender
+	workers      map[string]context.CancelFunc
+	statusServer *httpstatus.Server
+	statusPort   int
 }
 
-func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer) (*Runner, error) {
+func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
 	return &Runner{
 		configPath: configPath,
+		version:    version,
+		startedAt:  time.Now().UTC(),
 		cfg:        cfg,
 		store:      store,
 		out:        out,
@@ -51,6 +58,9 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logInfo("daemon_start", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	r.applyConfig(ctx, r.cfg)
+	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Port); err != nil {
+		return err
+	}
 	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	pruneTicker := time.NewTicker(time.Hour)
 	defer pruneTicker.Stop()
@@ -61,6 +71,7 @@ func (r *Runner) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			r.stopAll()
+			r.stopStatusServer()
 			r.logInfo("daemon_shutdown", "reason=%q", ctx.Err())
 			return nil
 		case <-reloadCh:
@@ -70,6 +81,10 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			r.applyConfig(ctx, cfg)
+			if err := r.applyStatusServer(ctx, cfg.HTTP.Port); err != nil {
+				r.logError("status_http_reload_failed", "port=%d error=%q", cfg.HTTP.Port, err)
+				continue
+			}
 			r.logInfo("config_reloaded", "config=%q monitors=%d", r.configPath, len(cfg.Monitors))
 		case <-pruneTicker.C:
 			r.mu.Lock()
@@ -113,6 +128,76 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	}
 	r.cfg = cfg
 	r.emailer = alert.NewIncidentSender(cfg)
+}
+
+func (r *Runner) applyStatusServer(parent context.Context, port int) error {
+	r.mu.Lock()
+	currentServer := r.statusServer
+	currentPort := r.statusPort
+	r.mu.Unlock()
+	if currentPort == port {
+		return nil
+	}
+
+	var nextServer *httpstatus.Server
+	if port > 0 {
+		var err error
+		nextServer, err = httpstatus.Start(parent, port, r.store, r.statusMetadata)
+		if err != nil {
+			return err
+		}
+	}
+
+	if currentServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := currentServer.Shutdown(shutdownCtx); err != nil {
+			cancel()
+			if nextServer != nil {
+				_ = nextServer.Shutdown(context.Background())
+			}
+			return err
+		}
+		cancel()
+	}
+
+	r.mu.Lock()
+	r.statusServer = nextServer
+	r.statusPort = port
+	r.mu.Unlock()
+	if port > 0 {
+		r.logInfo("status_http_start", "address=%q", fmt.Sprintf("127.0.0.1:%d", port))
+	} else if currentPort > 0 {
+		r.logInfo("status_http_stop", "address=%q", fmt.Sprintf("127.0.0.1:%d", currentPort))
+	}
+	return nil
+}
+
+func (r *Runner) stopStatusServer() {
+	r.mu.Lock()
+	server := r.statusServer
+	port := r.statusPort
+	r.statusServer = nil
+	r.statusPort = 0
+	r.mu.Unlock()
+	if server == nil {
+		return
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		r.logError("status_http_shutdown_failed", "port=%d error=%q", port, err)
+	}
+}
+
+func (r *Runner) statusMetadata() httpstatus.Metadata {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return httpstatus.Metadata{
+		Version:      r.version,
+		StartedAt:    r.startedAt,
+		ConfigPath:   r.configPath,
+		MonitorCount: len(r.cfg.Monitors),
+	}
 }
 
 func (r *Runner) stopAll() {

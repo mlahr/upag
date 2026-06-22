@@ -22,6 +22,10 @@ alerts:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
 
+http:
+  # Optional local status listener. Use 0 to disable.
+  port: 0
+
 defaults:
   interval: 60s
   timeout: 10s

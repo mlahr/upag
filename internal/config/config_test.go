@@ -42,6 +42,53 @@ monitors:
 	if cfg.Alerts.NotificationRetries.Backoff[0].Duration != time.Minute {
 		t.Fatalf("first retry backoff = %s, want 1m", cfg.Alerts.NotificationRetries.Backoff[0].Duration)
 	}
+	if cfg.HTTP.Port != 0 {
+		t.Fatalf("HTTP port = %d, want 0", cfg.HTTP.Port)
+	}
+}
+
+func TestParseAcceptsHTTPPort(t *testing.T) {
+	cfg, err := Parse([]byte(`
+http:
+  port: 8080
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Port != 8080 {
+		t.Fatalf("HTTP port = %d, want 8080", cfg.HTTP.Port)
+	}
+}
+
+func TestParseRejectsInvalidHTTPPort(t *testing.T) {
+	_, err := Parse([]byte(`
+http:
+  port: 65536
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "http.port must be a TCP port number from 0 through 65535") {
+		t.Fatalf("validation error %q does not contain http.port", err)
+	}
 }
 
 func TestParseAcceptsMailtrapWithoutSMTP(t *testing.T) {

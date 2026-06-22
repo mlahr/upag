@@ -436,6 +436,113 @@ func TestListDueAlertNotificationRetriesExcludesLaterSuccess(t *testing.T) {
 	}
 }
 
+func TestListActionableAlertDeliveryFailures(t *testing.T) {
+	store, incidentID, now := storeWithIncident(t)
+	defer store.Close()
+
+	if err := store.SaveAlertNotifications(context.Background(), []AlertNotification{
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary failure",
+			NextRetryAt:   now.Add(time.Minute),
+		},
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now.Add(time.Second),
+			AttemptNumber: 2,
+			Success:       false,
+			Error:         "temporary failure again",
+			NextRetryAt:   now.Add(2 * time.Minute),
+		},
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "mailtrap",
+			AttemptedAt:   now.Add(2 * time.Second),
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "invalid token",
+		},
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "mailtrap",
+			AttemptedAt:   now.Add(3 * time.Second),
+			AttemptNumber: 2,
+			Success:       true,
+		},
+		{
+			IncidentID:     incidentID,
+			MonitorID:      "home",
+			Provider:       "pager",
+			AttemptedAt:    now.Add(4 * time.Second),
+			AttemptNumber:  3,
+			Success:        false,
+			Error:          "permanent failure",
+			RetryExhausted: true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	failures, err := store.ListActionableAlertDeliveryFailures(context.Background(), 50)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 2 {
+		t.Fatalf("failure count = %d, want 2", len(failures))
+	}
+	byProvider := map[string]AlertNotification{}
+	for _, failure := range failures {
+		byProvider[failure.Provider] = failure
+	}
+	if byProvider["smtp"].AttemptNumber != 2 || byProvider["smtp"].Error != "temporary failure again" {
+		t.Fatalf("smtp failure = %+v, want latest failed attempt", byProvider["smtp"])
+	}
+	if !byProvider["pager"].RetryExhausted {
+		t.Fatalf("pager failure = %+v, want retry exhausted", byProvider["pager"])
+	}
+	if _, ok := byProvider["mailtrap"]; ok {
+		t.Fatalf("mailtrap failure included despite later success: %+v", byProvider["mailtrap"])
+	}
+}
+
+func TestListActionableAlertDeliveryFailuresAppliesLimit(t *testing.T) {
+	store, incidentID, now := storeWithIncident(t)
+	defer store.Close()
+
+	for i := 0; i < 3; i++ {
+		if err := store.SaveAlertNotifications(context.Background(), []AlertNotification{
+			{
+				IncidentID:    incidentID,
+				MonitorID:     "home",
+				Provider:      string(rune('a' + i)),
+				AttemptedAt:   now.Add(time.Duration(i) * time.Second),
+				AttemptNumber: 1,
+				Success:       false,
+				Error:         "failed",
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	failures, err := store.ListActionableAlertDeliveryFailures(context.Background(), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failures) != 2 {
+		t.Fatalf("failure count = %d, want 2", len(failures))
+	}
+}
+
 func storeWithIncident(t *testing.T) (*Store, int64, time.Time) {
 	t.Helper()
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
