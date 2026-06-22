@@ -26,7 +26,16 @@ transition DOWN or UP.
 
 ## Installation
 
-Download a release asset from:
+On Debian-based Linux amd64 systems, install the latest released Debian package:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/mlahr/upag/main/install.sh | bash
+```
+
+The installer downloads the latest GitHub Release `.deb`, verifies it against
+the release `checksums.txt`, and installs it with `apt-get`.
+
+Or download a release asset manually from:
 
 ```text
 https://github.com/mlahr/upag/releases
@@ -41,7 +50,7 @@ Current release builds publish Linux amd64 assets:
 Install the Debian package:
 
 ```sh
-sudo dpkg -i upag_*_linux_amd64.deb
+sudo apt-get install ./upag_*_linux_amd64.deb
 ```
 
 The Debian package installs:
