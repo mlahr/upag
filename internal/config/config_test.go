@@ -66,8 +66,11 @@ monitors:
 	if cfg.Observer.FailureThreshold != 3 || cfg.Observer.RecoveryThreshold != 1 || cfg.Observer.RequiredSuccesses != 1 {
 		t.Fatalf("observer thresholds = failure:%d recovery:%d required:%d, want 3, 1, 1", cfg.Observer.FailureThreshold, cfg.Observer.RecoveryThreshold, cfg.Observer.RequiredSuccesses)
 	}
-	if len(cfg.Observer.Sentinels) != 3 {
-		t.Fatalf("observer sentinel count = %d, want 3", len(cfg.Observer.Sentinels))
+	if len(cfg.Observer.Sentinels) != 4 {
+		t.Fatalf("observer sentinel count = %d, want 4", len(cfg.Observer.Sentinels))
+	}
+	if cfg.Observer.Sentinels[2].ID != "cloudflare-ip" || cfg.Observer.Sentinels[2].URL != "http://1.1.1.1/cdn-cgi/trace" || cfg.Observer.Sentinels[2].ExpectedStatusCode != 301 {
+		t.Fatalf("observer IP sentinel = %+v, want cloudflare-ip over literal IPv4 with HTTP 301", cfg.Observer.Sentinels[2])
 	}
 }
 

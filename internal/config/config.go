@@ -283,6 +283,12 @@ func BuiltInObserverSentinels() []SentinelConfig {
 			ExpectedStatusCode: 204,
 		},
 		{
+			ID:                 "cloudflare-ip",
+			Name:               "Cloudflare IPv4 connectivity check",
+			URL:                "http://1.1.1.1/cdn-cgi/trace",
+			ExpectedStatusCode: 301,
+		},
+		{
 			ID:                 "msftconnecttest",
 			Name:               "Microsoft connectivity check",
 			URL:                "http://www.msftconnecttest.com/connecttest.txt",

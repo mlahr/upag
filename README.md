@@ -443,7 +443,7 @@ whether that host can reach the wider network. When observer connectivity is
 per-monitor incidents, or count as reported downtime.
 
 By default, observer checks run every `30s`, require `1` successful sentinel out
-of `3`, transition to `OBSERVER_DOWN` after `3` consecutive unhealthy observer
+of `4`, transition to `OBSERVER_DOWN` after `3` consecutive unhealthy observer
 checks, and transition to `OBSERVER_UP` after `1` healthy observer check.
 
 Leave `observer.sentinels` omitted or empty to use built-in public connectivity
@@ -451,6 +451,8 @@ checks:
 
 - `gstatic`: `https://www.gstatic.com/generate_204`, expecting HTTP `204`
 - `cloudflare`: `https://cp.cloudflare.com/generate_204`, expecting HTTP `204`
+- `cloudflare-ip`: `http://1.1.1.1/cdn-cgi/trace`, expecting HTTP `301`;
+  this sentinel uses a literal IPv4 address to bypass DNS resolution
 - `msftconnecttest`: `http://www.msftconnecttest.com/connecttest.txt`,
   expecting HTTP `200`
 
