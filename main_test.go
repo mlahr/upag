@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"upag/internal/defaults"
 )
 
 func TestRunRecognizesDaemonStatusCommand(t *testing.T) {
@@ -129,4 +131,19 @@ func TestUsageMentionsDaemonAndMonitorCommands(t *testing.T) {
 			t.Fatalf("usage = %q, missing %q", got, want)
 		}
 	}
+}
+
+func withPackageDefaultsPath(t *testing.T, path string) {
+	t.Helper()
+	restore := defaults.SetPackageDefaultsPathForTest(path)
+	t.Cleanup(restore)
+}
+
+func writeDefaultsFile(t *testing.T, contents string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "upag.default")
+	if err := os.WriteFile(path, []byte(contents), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

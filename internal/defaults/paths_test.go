@@ -1,4 +1,4 @@
-package main
+package defaults
 
 import (
 	"flag"
@@ -7,28 +7,28 @@ import (
 	"testing"
 )
 
-func TestLoadPathDefaultsUsesStandaloneDefaultsWhenFileIsMissing(t *testing.T) {
+func TestLoadPathsUsesStandaloneDefaultsWhenFileIsMissing(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 
-	defaults, err := loadPathDefaults()
+	defaults, err := LoadPaths()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if defaults.ConfigPath != standaloneConfigPath {
-		t.Fatalf("ConfigPath = %q, want %q", defaults.ConfigPath, standaloneConfigPath)
+	if defaults.ConfigPath != StandaloneConfigPath {
+		t.Fatalf("ConfigPath = %q, want %q", defaults.ConfigPath, StandaloneConfigPath)
 	}
-	if defaults.DBPath != standaloneDBPath {
-		t.Fatalf("DBPath = %q, want %q", defaults.DBPath, standaloneDBPath)
+	if defaults.DBPath != StandaloneDBPath {
+		t.Fatalf("DBPath = %q, want %q", defaults.DBPath, StandaloneDBPath)
 	}
-	if defaults.PIDFile != standalonePIDFile {
-		t.Fatalf("PIDFile = %q, want %q", defaults.PIDFile, standalonePIDFile)
+	if defaults.PIDFile != StandalonePIDFile {
+		t.Fatalf("PIDFile = %q, want %q", defaults.PIDFile, StandalonePIDFile)
 	}
-	if defaults.LogFile != standaloneLogFile {
-		t.Fatalf("LogFile = %q, want %q", defaults.LogFile, standaloneLogFile)
+	if defaults.LogFile != StandaloneLogFile {
+		t.Fatalf("LogFile = %q, want %q", defaults.LogFile, StandaloneLogFile)
 	}
 }
 
-func TestLoadPathDefaultsReadsPackagedDefaults(t *testing.T) {
+func TestLoadPathsReadsPackagedDefaults(t *testing.T) {
 	defaultsFile := writeDefaultsFile(t, `
 # comments are ignored
 UPAG_CONFIG=/etc/upag/config.yaml
@@ -38,7 +38,7 @@ UNKNOWN_KEY=ignored
 `)
 	withPackageDefaultsPath(t, defaultsFile)
 
-	defaults, err := loadPathDefaults()
+	defaults, err := LoadPaths()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,21 +51,21 @@ UNKNOWN_KEY=ignored
 	if defaults.PIDFile != "/run/upag/upag.pid" {
 		t.Fatalf("PIDFile = %q", defaults.PIDFile)
 	}
-	if defaults.LogFile != standaloneLogFile {
-		t.Fatalf("LogFile = %q, want %q", defaults.LogFile, standaloneLogFile)
+	if defaults.LogFile != StandaloneLogFile {
+		t.Fatalf("LogFile = %q, want %q", defaults.LogFile, StandaloneLogFile)
 	}
 }
 
-func TestLoadPathDefaultsRejectsMalformedRelevantValue(t *testing.T) {
+func TestLoadPathsRejectsMalformedRelevantValue(t *testing.T) {
 	defaultsFile := writeDefaultsFile(t, `UPAG_DB="/var/lib/upag/upag.sqlite`)
 	withPackageDefaultsPath(t, defaultsFile)
 
-	if _, err := loadPathDefaults(); err == nil {
-		t.Fatal("loadPathDefaults returned nil error, want malformed value error")
+	if _, err := LoadPaths(); err == nil {
+		t.Fatal("LoadPaths returned nil error, want malformed value error")
 	}
 }
 
-func TestApplyPathDefaultsFillsOnlyUnsetFlags(t *testing.T) {
+func TestApplyPathsFillsOnlyUnsetFlags(t *testing.T) {
 	defaultsFile := writeDefaultsFile(t, `
 UPAG_CONFIG=/etc/upag/config.yaml
 UPAG_DB=/var/lib/upag/upag.sqlite
@@ -74,17 +74,17 @@ UPAG_PIDFILE=/run/upag/upag.pid
 	withPackageDefaultsPath(t, defaultsFile)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
-	configPath := fs.String("config", standaloneConfigPath, "")
-	dbPath := fs.String("db", standaloneDBPath, "")
-	pidFile := fs.String("pid-file", standalonePIDFile, "")
+	configPath := fs.String("config", StandaloneConfigPath, "")
+	dbPath := fs.String("db", StandaloneDBPath, "")
+	pidFile := fs.String("pid-file", StandalonePIDFile, "")
 	if err := fs.Parse([]string{"--db", "/tmp/explicit.sqlite"}); err != nil {
 		t.Fatal(err)
 	}
 
-	err := applyPathDefaults(fs,
-		pathDefaultTarget{FlagName: "config", Value: configPath, Default: func(d pathDefaults) string { return d.ConfigPath }},
-		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
-		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	err := ApplyPaths(fs,
+		PathTarget{FlagName: "config", Value: configPath, Default: func(d Paths) string { return d.ConfigPath }},
+		PathTarget{FlagName: "db", Value: dbPath, Default: func(d Paths) string { return d.DBPath }},
+		PathTarget{FlagName: "pid-file", Value: pidFile, Default: func(d Paths) string { return d.PIDFile }},
 	)
 	if err != nil {
 		t.Fatal(err)

@@ -1,4 +1,4 @@
-package main
+package defaults
 
 import (
 	"bufio"
@@ -10,40 +10,48 @@ import (
 )
 
 const (
-	standaloneConfigPath = "./config.yaml"
-	standaloneDBPath     = "./upag.sqlite"
-	standalonePIDFile    = "./upag.pid"
-	standaloneLogFile    = "./upag.log"
+	StandaloneConfigPath = "./config.yaml"
+	StandaloneDBPath     = "./upag.sqlite"
+	StandalonePIDFile    = "./upag.pid"
+	StandaloneLogFile    = "./upag.log"
 )
 
 var packageDefaultsPath = "/etc/default/upag"
 
-type pathDefaults struct {
+type Paths struct {
 	ConfigPath string
 	DBPath     string
 	PIDFile    string
 	LogFile    string
 }
 
-type pathDefaultTarget struct {
+type PathTarget struct {
 	FlagName string
 	Value    *string
-	Default  func(pathDefaults) string
+	Default  func(Paths) string
 }
 
-func standalonePathDefaults() pathDefaults {
-	return pathDefaults{
-		ConfigPath: standaloneConfigPath,
-		DBPath:     standaloneDBPath,
-		PIDFile:    standalonePIDFile,
-		LogFile:    standaloneLogFile,
+func SetPackageDefaultsPathForTest(path string) func() {
+	previous := packageDefaultsPath
+	packageDefaultsPath = path
+	return func() {
+		packageDefaultsPath = previous
 	}
 }
 
-func applyPathDefaults(fs *flag.FlagSet, targets ...pathDefaultTarget) error {
+func StandalonePaths() Paths {
+	return Paths{
+		ConfigPath: StandaloneConfigPath,
+		DBPath:     StandaloneDBPath,
+		PIDFile:    StandalonePIDFile,
+		LogFile:    StandaloneLogFile,
+	}
+}
+
+func ApplyPaths(fs *flag.FlagSet, targets ...PathTarget) error {
 	needsDefaults := false
 	for _, target := range targets {
-		if !flagWasSet(fs, target.FlagName) {
+		if !FlagWasSet(fs, target.FlagName) {
 			needsDefaults = true
 			break
 		}
@@ -52,19 +60,19 @@ func applyPathDefaults(fs *flag.FlagSet, targets ...pathDefaultTarget) error {
 		return nil
 	}
 
-	defaults, err := loadPathDefaults()
+	defaults, err := LoadPaths()
 	if err != nil {
 		return err
 	}
 	for _, target := range targets {
-		if !flagWasSet(fs, target.FlagName) {
+		if !FlagWasSet(fs, target.FlagName) {
 			*target.Value = target.Default(defaults)
 		}
 	}
 	return nil
 }
 
-func flagWasSet(fs *flag.FlagSet, name string) bool {
+func FlagWasSet(fs *flag.FlagSet, name string) bool {
 	wasSet := false
 	fs.Visit(func(f *flag.Flag) {
 		if f.Name == name {
@@ -74,8 +82,8 @@ func flagWasSet(fs *flag.FlagSet, name string) bool {
 	return wasSet
 }
 
-func loadPathDefaults() (pathDefaults, error) {
-	defaults := standalonePathDefaults()
+func LoadPaths() (Paths, error) {
+	defaults := StandalonePaths()
 	file, err := os.Open(packageDefaultsPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -87,7 +95,7 @@ func loadPathDefaults() (pathDefaults, error) {
 
 	scanner := bufio.NewScanner(file)
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
-		key, value, ok, err := parseDefaultsLine(scanner.Text())
+		key, value, ok, err := parseLine(scanner.Text())
 		if err != nil {
 			return defaults, fmt.Errorf("parse defaults %q line %d: %w", packageDefaultsPath, lineNumber, err)
 		}
@@ -109,7 +117,7 @@ func loadPathDefaults() (pathDefaults, error) {
 	return defaults, nil
 }
 
-func parseDefaultsLine(line string) (string, string, bool, error) {
+func parseLine(line string) (string, string, bool, error) {
 	line = strings.TrimSpace(line)
 	if line == "" || strings.HasPrefix(line, "#") {
 		return "", "", false, nil
@@ -135,7 +143,7 @@ func parseDefaultsLine(line string) (string, string, bool, error) {
 		return "", "", true, nil
 	}
 
-	parsed, err := parseDefaultsValue(value)
+	parsed, err := parseValue(value)
 	if err != nil {
 		return "", "", false, fmt.Errorf("%s: %w", key, err)
 	}
@@ -151,7 +159,7 @@ func isDefaultsKey(key string) bool {
 	}
 }
 
-func parseDefaultsValue(value string) (string, error) {
+func parseValue(value string) (string, error) {
 	if value == "" {
 		return "", nil
 	}

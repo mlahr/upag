@@ -1,6 +1,6 @@
 //go:build linux
 
-package main
+package logging
 
 import (
 	"io"
@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-type syslogLogger struct {
+type SyslogLogger struct {
 	writer *syslog.Writer
 }
 
@@ -17,23 +17,23 @@ type syslogPriorityWriter struct {
 	priority syslog.Priority
 }
 
-func openSyslog(tag string) (*syslogLogger, error) {
+func OpenSyslog(tag string) (*SyslogLogger, error) {
 	writer, err := syslog.New(syslog.LOG_DAEMON|syslog.LOG_INFO, tag)
 	if err != nil {
 		return nil, err
 	}
-	return &syslogLogger{writer: writer}, nil
+	return &SyslogLogger{writer: writer}, nil
 }
 
-func (l *syslogLogger) InfoWriter() io.Writer {
+func (l *SyslogLogger) InfoWriter() io.Writer {
 	return syslogPriorityWriter{writer: l.writer, priority: syslog.LOG_INFO}
 }
 
-func (l *syslogLogger) ErrorWriter() io.Writer {
+func (l *SyslogLogger) ErrorWriter() io.Writer {
 	return syslogPriorityWriter{writer: l.writer, priority: syslog.LOG_ERR}
 }
 
-func (l *syslogLogger) Close() error {
+func (l *SyslogLogger) Close() error {
 	return l.writer.Close()
 }
 
