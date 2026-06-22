@@ -85,6 +85,32 @@ monitors:
 	}
 }
 
+func TestParseAcceptsResponseBodyAssertions(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      must_contain: "Welcome"
+      must_not_contain: "Maintenance mode"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Monitors[0].ResponseBody.MustContain != "Welcome" {
+		t.Fatalf("response_body.must_contain = %q, want Welcome", cfg.Monitors[0].ResponseBody.MustContain)
+	}
+	if cfg.Monitors[0].ResponseBody.MustNotContain != "Maintenance mode" {
+		t.Fatalf("response_body.must_not_contain = %q, want Maintenance mode", cfg.Monitors[0].ResponseBody.MustNotContain)
+	}
+}
+
 func TestParseRejectsMissingAlertProvider(t *testing.T) {
 	_, err := Parse([]byte(`
 monitors:

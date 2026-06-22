@@ -5,7 +5,9 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"upag/internal/config"
@@ -52,12 +54,33 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	defer resp.Body.Close()
 
 	result.ObservedStatusCode = resp.StatusCode
-	if resp.StatusCode == monitor.ExpectedStatusCode {
+	if resp.StatusCode != monitor.ExpectedStatusCode {
+		result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
+		return result
+	}
+
+	if !monitor.ResponseBody.Configured() {
 		result.OK = true
 		return result
 	}
 
-	result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		result.Error = fmt.Sprintf("read response body: %v", err)
+		return result
+	}
+
+	bodyText := string(body)
+	if monitor.ResponseBody.MustContain != "" && !strings.Contains(bodyText, monitor.ResponseBody.MustContain) {
+		result.Error = fmt.Sprintf("response body does not contain required string %q", monitor.ResponseBody.MustContain)
+		return result
+	}
+	if monitor.ResponseBody.MustNotContain != "" && strings.Contains(bodyText, monitor.ResponseBody.MustNotContain) {
+		result.Error = fmt.Sprintf("response body contains forbidden string %q", monitor.ResponseBody.MustNotContain)
+		return result
+	}
+
+	result.OK = true
 	return result
 }
 

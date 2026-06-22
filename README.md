@@ -61,6 +61,18 @@ Each monitor requires:
 
 Redirects are not followed. For example, a monitor expecting `302` succeeds when the first response is `302`.
 
+Monitors can also assert exact, case-sensitive substrings in the response body:
+
+```yaml
+response_body:
+  must_contain: "Welcome"
+  must_not_contain: "Maintenance mode"
+```
+
+When `response_body` is omitted, only the HTTP status code is checked. Body
+assertions are evaluated only after the observed status code matches
+`expected_status_code`.
+
 HTTPS certificates are verified by default. Set `insecure_skip_verify: true` only for internal endpoints that intentionally use self-signed or otherwise unverifiable certificates.
 
 ## Run

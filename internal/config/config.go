@@ -55,13 +55,23 @@ type Defaults struct {
 }
 
 type MonitorConfig struct {
-	ID                 string   `yaml:"id"`
-	Name               string   `yaml:"name"`
-	URL                string   `yaml:"url"`
-	ExpectedStatusCode int      `yaml:"expected_status_code"`
-	Interval           Duration `yaml:"interval"`
-	Timeout            Duration `yaml:"timeout"`
-	InsecureSkipVerify bool     `yaml:"insecure_skip_verify"`
+	ID                 string                 `yaml:"id"`
+	Name               string                 `yaml:"name"`
+	URL                string                 `yaml:"url"`
+	ExpectedStatusCode int                    `yaml:"expected_status_code"`
+	ResponseBody       ResponseBodyAssertions `yaml:"response_body"`
+	Interval           Duration               `yaml:"interval"`
+	Timeout            Duration               `yaml:"timeout"`
+	InsecureSkipVerify bool                   `yaml:"insecure_skip_verify"`
+}
+
+type ResponseBodyAssertions struct {
+	MustContain    string `yaml:"must_contain"`
+	MustNotContain string `yaml:"must_not_contain"`
+}
+
+func (a ResponseBodyAssertions) Configured() bool {
+	return a.MustContain != "" || a.MustNotContain != ""
 }
 
 type Duration struct {

@@ -33,3 +33,6 @@ monitors:
     name: Example homepage
     url: https://example.com/
     expected_status_code: 200
+    response_body:
+      must_contain: Example Domain
+      must_not_contain: Maintenance mode
