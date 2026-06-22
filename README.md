@@ -168,6 +168,7 @@ alerts:
     backoff: [1m, 5m, 15m]
 
 http:
+  address: 127.0.0.1
   port: 0
 
 defaults:
@@ -225,9 +226,14 @@ Failed notification attempts are stored in SQLite and retried by the daemon.
 
 ### HTTP Status Listener
 
-`http.port` controls the optional local HTTP status listener. The default is
-`0`, which disables the listener. When set to a TCP port from `1` through
-`65535`, the daemon listens on `127.0.0.1:<port>`.
+`http.port` controls the optional HTTP status listener. The default is `0`,
+which disables the listener. When set to a TCP port from `1` through `65535`,
+the daemon listens on `http.address:<port>`. `http.address` defaults to
+`127.0.0.1`.
+
+Use `0.0.0.0` or `::` only when the status endpoints should be reachable from
+other hosts, and restrict access at the host, firewall, or reverse-proxy layer.
+The status endpoints do not perform authentication.
 
 Endpoints:
 

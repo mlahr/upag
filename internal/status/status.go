@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -35,11 +36,11 @@ type Server struct {
 	shutdownErr  error
 }
 
-func Start(ctx context.Context, port int, store Store, metadata MetadataProvider) (*Server, error) {
-	address := fmt.Sprintf("127.0.0.1:%d", port)
-	listener, err := net.Listen("tcp", address)
+func Start(ctx context.Context, address string, port int, store Store, metadata MetadataProvider) (*Server, error) {
+	listenAddress := ListenAddress(address, port)
+	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
-		return nil, fmt.Errorf("listen on %s: %w", address, err)
+		return nil, fmt.Errorf("listen on %s: %w", listenAddress, err)
 	}
 
 	server := &http.Server{
@@ -60,6 +61,10 @@ func Start(ctx context.Context, port int, store Store, metadata MetadataProvider
 		_ = server.Serve(listener)
 	}()
 	return statusServer, nil
+}
+
+func ListenAddress(address string, port int) string {
+	return net.JoinHostPort(address, strconv.Itoa(port))
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {

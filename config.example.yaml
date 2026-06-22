@@ -23,7 +23,8 @@ alerts:
     backoff: [1m, 5m, 15m]
 
 http:
-  # Optional local status listener. Use 0 to disable.
+  # Optional status listener. Use port 0 to disable.
+  address: 127.0.0.1
   port: 0
 
 defaults:

@@ -45,6 +45,9 @@ monitors:
 	if cfg.HTTP.Port != 0 {
 		t.Fatalf("HTTP port = %d, want 0", cfg.HTTP.Port)
 	}
+	if cfg.HTTP.Address != "127.0.0.1" {
+		t.Fatalf("HTTP address = %q, want 127.0.0.1", cfg.HTTP.Address)
+	}
 }
 
 func TestParseAcceptsHTTPPort(t *testing.T) {
@@ -67,6 +70,36 @@ monitors:
 	if cfg.HTTP.Port != 8080 {
 		t.Fatalf("HTTP port = %d, want 8080", cfg.HTTP.Port)
 	}
+	if cfg.HTTP.Address != "127.0.0.1" {
+		t.Fatalf("HTTP address = %q, want default 127.0.0.1", cfg.HTTP.Address)
+	}
+}
+
+func TestParseAcceptsHTTPAddress(t *testing.T) {
+	for _, address := range []string{"0.0.0.0", "::1", "localhost"} {
+		t.Run(address, func(t *testing.T) {
+			cfg, err := Parse([]byte(`
+http:
+  address: "` + address + `"
+  port: 8080
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.HTTP.Address != address {
+				t.Fatalf("HTTP address = %q, want %q", cfg.HTTP.Address, address)
+			}
+		})
+	}
 }
 
 func TestParseRejectsInvalidHTTPPort(t *testing.T) {
@@ -88,6 +121,39 @@ monitors:
 	}
 	if !strings.Contains(err.Error(), "http.port must be a TCP port number from 0 through 65535") {
 		t.Fatalf("validation error %q does not contain http.port", err)
+	}
+}
+
+func TestParseRejectsInvalidHTTPAddress(t *testing.T) {
+	tests := map[string]string{
+		"with-port":           "127.0.0.1:8080",
+		"ipv6-with-port":      "[::1]:8080",
+		"leading-whitespace":  " 127.0.0.1",
+		"trailing-whitespace": "127.0.0.1 ",
+	}
+	for name, address := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(`
+http:
+  address: "` + address + `"
+  port: 8080
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !strings.Contains(err.Error(), "http.address") {
+				t.Fatalf("validation error %q does not contain http.address", err)
+			}
+		})
 	}
 }
 

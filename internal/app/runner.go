@@ -28,13 +28,14 @@ type Runner struct {
 	out        io.Writer
 	errOut     io.Writer
 
-	mu           sync.Mutex
-	logMu        sync.Mutex
-	cfg          config.Config
-	emailer      alert.IncidentSender
-	workers      map[string]context.CancelFunc
-	statusServer *httpstatus.Server
-	statusPort   int
+	mu            sync.Mutex
+	logMu         sync.Mutex
+	cfg           config.Config
+	emailer       alert.IncidentSender
+	workers       map[string]context.CancelFunc
+	statusServer  *httpstatus.Server
+	statusAddress string
+	statusPort    int
 }
 
 func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
@@ -58,7 +59,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logInfo("daemon_start", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	r.applyConfig(ctx, r.cfg)
-	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Port); err != nil {
+	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Address, r.cfg.HTTP.Port); err != nil {
 		return err
 	}
 	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
@@ -81,8 +82,8 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			r.applyConfig(ctx, cfg)
-			if err := r.applyStatusServer(ctx, cfg.HTTP.Port); err != nil {
-				r.logError("status_http_reload_failed", "port=%d error=%q", cfg.HTTP.Port, err)
+			if err := r.applyStatusServer(ctx, cfg.HTTP.Address, cfg.HTTP.Port); err != nil {
+				r.logError("status_http_reload_failed", "address=%q error=%q", httpstatus.ListenAddress(cfg.HTTP.Address, cfg.HTTP.Port), err)
 				continue
 			}
 			r.logInfo("config_reloaded", "config=%q monitors=%d", r.configPath, len(cfg.Monitors))
@@ -130,19 +131,20 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	r.emailer = alert.NewIncidentSender(cfg)
 }
 
-func (r *Runner) applyStatusServer(parent context.Context, port int) error {
+func (r *Runner) applyStatusServer(parent context.Context, address string, port int) error {
 	r.mu.Lock()
 	currentServer := r.statusServer
+	currentAddress := r.statusAddress
 	currentPort := r.statusPort
 	r.mu.Unlock()
-	if currentPort == port {
+	if currentAddress == address && currentPort == port {
 		return nil
 	}
 
 	var nextServer *httpstatus.Server
 	if port > 0 {
 		var err error
-		nextServer, err = httpstatus.Start(parent, port, r.store, r.statusMetadata)
+		nextServer, err = httpstatus.Start(parent, address, port, r.store, r.statusMetadata)
 		if err != nil {
 			return err
 		}
@@ -162,12 +164,13 @@ func (r *Runner) applyStatusServer(parent context.Context, port int) error {
 
 	r.mu.Lock()
 	r.statusServer = nextServer
+	r.statusAddress = address
 	r.statusPort = port
 	r.mu.Unlock()
 	if port > 0 {
-		r.logInfo("status_http_start", "address=%q", fmt.Sprintf("127.0.0.1:%d", port))
+		r.logInfo("status_http_start", "address=%q", httpstatus.ListenAddress(address, port))
 	} else if currentPort > 0 {
-		r.logInfo("status_http_stop", "address=%q", fmt.Sprintf("127.0.0.1:%d", currentPort))
+		r.logInfo("status_http_stop", "address=%q", httpstatus.ListenAddress(currentAddress, currentPort))
 	}
 	return nil
 }
@@ -175,8 +178,10 @@ func (r *Runner) applyStatusServer(parent context.Context, port int) error {
 func (r *Runner) stopStatusServer() {
 	r.mu.Lock()
 	server := r.statusServer
+	address := r.statusAddress
 	port := r.statusPort
 	r.statusServer = nil
+	r.statusAddress = ""
 	r.statusPort = 0
 	r.mu.Unlock()
 	if server == nil {
@@ -185,7 +190,7 @@ func (r *Runner) stopStatusServer() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
-		r.logError("status_http_shutdown_failed", "port=%d error=%q", port, err)
+		r.logError("status_http_shutdown_failed", "address=%q error=%q", httpstatus.ListenAddress(address, port), err)
 	}
 }
 

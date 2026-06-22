@@ -149,3 +149,34 @@ func TestHandlerReturnsNotFound(t *testing.T) {
 		t.Fatalf("status code = %d, want 404", recorder.Code)
 	}
 }
+
+func TestListenAddressFormatsHostAndPort(t *testing.T) {
+	tests := map[string]struct {
+		address string
+		port    int
+		want    string
+	}{
+		"ipv4": {
+			address: "127.0.0.1",
+			port:    8080,
+			want:    "127.0.0.1:8080",
+		},
+		"ipv6": {
+			address: "::1",
+			port:    8080,
+			want:    "[::1]:8080",
+		},
+		"hostname": {
+			address: "localhost",
+			port:    8080,
+			want:    "localhost:8080",
+		},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := ListenAddress(test.address, test.port); got != test.want {
+				t.Fatalf("ListenAddress(%q, %d) = %q, want %q", test.address, test.port, got, test.want)
+			}
+		})
+	}
+}

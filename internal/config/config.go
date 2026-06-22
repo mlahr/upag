@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -21,7 +22,8 @@ type Config struct {
 }
 
 type HTTPConfig struct {
-	Port int `yaml:"port"`
+	Address string `yaml:"address"`
+	Port    int    `yaml:"port"`
 }
 
 type AlertsConfig struct {
@@ -120,6 +122,9 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) ApplyDefaults() {
+	if c.HTTP.Address == "" {
+		c.HTTP.Address = "127.0.0.1"
+	}
 	if c.Alerts.NotificationRetries.MaxAttempts == 0 {
 		c.Alerts.NotificationRetries.MaxAttempts = 3
 	}
@@ -237,6 +242,9 @@ func (c Config) Validate() error {
 	if c.HTTP.Port < 0 || c.HTTP.Port > 65535 {
 		errs = append(errs, errors.New("http.port must be a TCP port number from 0 through 65535"))
 	}
+	if err := validateHTTPAddress(c.HTTP.Address); err != nil {
+		errs = append(errs, fmt.Errorf("http.address: %w", err))
+	}
 	if len(c.Monitors) == 0 {
 		errs = append(errs, errors.New("monitors must contain at least one monitor"))
 	}
@@ -315,6 +323,22 @@ func validateHTTPURL(raw string) error {
 	}
 	if strings.Contains(parsed.Host, " ") {
 		return errors.New("host must not contain spaces")
+	}
+	return nil
+}
+
+func validateHTTPAddress(raw string) error {
+	if raw == "" {
+		return errors.New("address is required")
+	}
+	if raw != strings.TrimSpace(raw) {
+		return errors.New("address must not contain leading or trailing whitespace")
+	}
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return errors.New("address must not contain whitespace")
+	}
+	if _, _, err := net.SplitHostPort(raw); err == nil {
+		return errors.New("address must not include a port")
 	}
 	return nil
 }
