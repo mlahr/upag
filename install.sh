@@ -4,6 +4,7 @@ set -euo pipefail
 readonly REPO_OWNER="mlahr"
 readonly REPO_NAME="upag"
 readonly RELEASE_BASE_URL="https://github.com/${REPO_OWNER}/${REPO_NAME}/releases/latest/download"
+readonly INSTALLER_VERSION="2026-06-22.1"
 
 die() {
 	printf 'install.sh: %s\n' "$*" >&2
@@ -17,6 +18,8 @@ need_command() {
 if [ "$(uname -s)" != "Linux" ]; then
 	die "unsupported operating system: $(uname -s); this installer supports Debian-based Linux only"
 fi
+
+printf 'upag installer %s\n' "$INSTALLER_VERSION"
 
 need_command curl
 need_command dpkg
