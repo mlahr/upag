@@ -303,7 +303,7 @@ func TestListUptimeStatsAggregatesProbeResultsByWindow(t *testing.T) {
 		}
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now)
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,6 +311,12 @@ func TestListUptimeStatsAggregatesProbeResultsByWindow(t *testing.T) {
 	home := stats["home"]
 	if home.TwentyFourHour.TotalChecks != 3 || home.TwentyFourHour.SuccessfulChecks != 2 || home.TwentyFourHour.FailedChecks != 1 {
 		t.Fatalf("home 24h stats = %+v, want 3 total, 2 successful, 1 failed", home.TwentyFourHour)
+	}
+	if home.TwentyFourHour.DowntimeSeconds != 0 {
+		t.Fatalf("home 24h downtime_seconds = %d, want 0 for isolated failure below threshold", home.TwentyFourHour.DowntimeSeconds)
+	}
+	if home.TwentyFourHour.ReportableSeconds != int64((24*time.Hour)/time.Second) {
+		t.Fatalf("home 24h reportable_seconds = %d, want 86400", home.TwentyFourHour.ReportableSeconds)
 	}
 	if !home.TwentyFourHour.WindowStartedAt.Equal(now.Add(-24*time.Hour)) || !home.TwentyFourHour.WindowEndedAt.Equal(now.Add(-time.Hour)) {
 		t.Fatalf("home 24h window = %+v, want inclusive 24h boundary through latest probe", home.TwentyFourHour)
@@ -359,7 +365,7 @@ func TestListUptimeStatsUsesZeroValueForEmptyWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now)
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,6 +382,58 @@ func TestListUptimeStatsUsesZeroValueForEmptyWindows(t *testing.T) {
 	}
 	if old.Retained.TotalChecks != 1 || old.Retained.SuccessfulChecks != 0 || old.Retained.FailedChecks != 1 {
 		t.Fatalf("old retained stats = %+v, want one failed check", old.Retained)
+	}
+}
+
+func TestListUptimeStatsUsesStrictAccountingForConfirmedOutages(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, probe := range []struct {
+		checkedAt time.Time
+		ok        bool
+	}{
+		{checkedAt: now.Add(-10 * time.Minute), ok: true},
+		{checkedAt: now.Add(-5 * time.Minute), ok: false},
+		{checkedAt: now.Add(-4 * time.Minute), ok: false},
+		{checkedAt: now.Add(-3 * time.Minute), ok: false},
+		{checkedAt: now.Add(-1 * time.Minute), ok: true},
+	} {
+		status := state.Down
+		if probe.ok {
+			status = state.Up
+		}
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID: "home",
+			CheckedAt: probe.checkedAt,
+			OK:        probe.ok,
+		}, MonitorState{
+			MonitorID:     "home",
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        status,
+			LastCheckedAt: probe.checkedAt,
+			UpdatedAt:     probe.checkedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := stats["home"].Retained
+	if retained.DowntimeSeconds != int64((4*time.Minute)/time.Second) {
+		t.Fatalf("retained downtime_seconds = %d, want 240", retained.DowntimeSeconds)
+	}
+	if retained.ReportableSeconds != int64((10*time.Minute)/time.Second) {
+		t.Fatalf("retained reportable_seconds = %d, want 600", retained.ReportableSeconds)
 	}
 }
 
@@ -520,7 +578,7 @@ func TestMaintenanceProbeResultsAreExcludedFromUptimeAndSyntheticIncidents(t *te
 		}
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now)
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
 	if err != nil {
 		t.Fatal(err)
 	}

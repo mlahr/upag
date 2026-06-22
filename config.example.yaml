@@ -30,6 +30,8 @@ http:
 defaults:
   interval: 60s
   timeout: 10s
+  probe_retries: 2
+  probe_retry_backoff: 500ms
   failure_threshold: 3
   history_retention: 720h
 

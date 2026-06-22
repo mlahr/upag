@@ -125,7 +125,7 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 		}
 		workerCtx, cancel := context.WithCancel(parent)
 		r.workers[mon.ID] = cancel
-		go r.runMonitor(workerCtx, cfg.Defaults.FailureThreshold, mon)
+		go r.runMonitor(workerCtx, cfg.Defaults.FailureThreshold, cfg.Defaults.ProbeRetries, cfg.Defaults.ProbeRetryBackoff.Duration, mon)
 	}
 	r.cfg = cfg
 	r.emailer = alert.NewIncidentSender(cfg)
@@ -198,10 +198,11 @@ func (r *Runner) statusMetadata() httpstatus.Metadata {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return httpstatus.Metadata{
-		Version:      r.version,
-		StartedAt:    r.startedAt,
-		ConfigPath:   r.configPath,
-		MonitorCount: len(r.cfg.Monitors),
+		Version:          r.version,
+		StartedAt:        r.startedAt,
+		ConfigPath:       r.configPath,
+		MonitorCount:     len(r.cfg.Monitors),
+		FailureThreshold: r.cfg.Defaults.FailureThreshold,
 	}
 }
 
@@ -214,8 +215,8 @@ func (r *Runner) stopAll() {
 	}
 }
 
-func (r *Runner) runMonitor(ctx context.Context, threshold int, mon config.MonitorConfig) {
-	r.probe(ctx, threshold, mon)
+func (r *Runner) runMonitor(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
+	r.probe(ctx, threshold, probeRetries, probeRetryBackoff, mon)
 	ticker := time.NewTicker(mon.Interval.Duration)
 	defer ticker.Stop()
 
@@ -224,19 +225,19 @@ func (r *Runner) runMonitor(ctx context.Context, threshold int, mon config.Monit
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			r.probe(ctx, threshold, mon)
+			r.probe(ctx, threshold, probeRetries, probeRetryBackoff, mon)
 		}
 	}
 }
 
-func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorConfig) {
+func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
 	select {
 	case <-ctx.Done():
 		return
 	default:
 	}
 
-	result := checker.Check(ctx, mon)
+	result, attemptCount := r.checkWithRetries(ctx, mon, probeRetries, probeRetryBackoff)
 	now := result.CheckedAt
 	previous, ok, err := r.store.GetState(ctx, mon.ID)
 	if err != nil {
@@ -269,6 +270,7 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		ObservedStatusCode: result.ObservedStatusCode,
 		LatencyMS:          result.Latency.Milliseconds(),
 		ResponseTimeMS:     result.ResponseTime.Milliseconds(),
+		AttemptCount:       attemptCount,
 		Error:              result.Error,
 	}
 
@@ -340,6 +342,31 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		return
 	}
 	r.logAlertDecision("info", mon, previous.Status, next.Status, "", providers, false, alertSkipReason(previous, next, result, threshold), nil)
+}
+
+func (r *Runner) checkWithRetries(ctx context.Context, mon config.MonitorConfig, probeRetries int, probeRetryBackoff time.Duration) (checker.Result, int) {
+	if probeRetries < 0 {
+		probeRetries = 0
+	}
+	attempts := probeRetries + 1
+	var result checker.Result
+	for attempt := 1; attempt <= attempts; attempt++ {
+		result = checker.Check(ctx, mon)
+		if result.OK || attempt == attempts {
+			return result, attempt
+		}
+		if probeRetryBackoff <= 0 {
+			continue
+		}
+		timer := time.NewTimer(probeRetryBackoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return result, attempt
+		case <-timer.C:
+		}
+	}
+	return result, attempts
 }
 
 func (r *Runner) retryAlertNotifications(ctx context.Context) {

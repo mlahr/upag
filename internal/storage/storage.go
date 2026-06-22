@@ -37,6 +37,7 @@ type ProbeResult struct {
 	ObservedStatusCode  int
 	LatencyMS           int64
 	ResponseTimeMS      int64
+	AttemptCount        int
 	Error               string
 	MaintenanceWindowID int64
 }
@@ -54,6 +55,8 @@ type UptimeWindowStats struct {
 	FailedChecks            int
 	MaintenanceChecks       int
 	MaintenanceFailedChecks int
+	DowntimeSeconds         int64
+	ReportableSeconds       int64
 	WindowStartedAt         time.Time
 	WindowEndedAt           time.Time
 }
@@ -148,6 +151,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			observed_status_code INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
 			response_time_ms INTEGER NOT NULL DEFAULT 0,
+			attempt_count INTEGER NOT NULL DEFAULT 1,
 			error TEXT NOT NULL,
 			maintenance_window_id INTEGER
 		)`,
@@ -242,6 +246,7 @@ func (s *Store) ensureProbeResultColumns(ctx context.Context) error {
 	}
 	alterStatements := map[string]string{
 		"response_time_ms":      `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`,
+		"attempt_count":         `ALTER TABLE probe_results ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1`,
 		"maintenance_window_id": `ALTER TABLE probe_results ADD COLUMN maintenance_window_id INTEGER`,
 	}
 	for column, statement := range alterStatements {
@@ -320,10 +325,14 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 	}
 	defer tx.Rollback()
 
+	attemptCount := result.AttemptCount
+	if attemptCount == 0 {
+		attemptCount = 1
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, error, maintenance_window_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.Error, nullableInt64(result.MaintenanceWindowID)); err != nil {
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID)); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
@@ -418,7 +427,7 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 	return states, rows.Err()
 }
 
-func (s *Store) ListUptimeStats(ctx context.Context, now time.Time) (map[string]UptimeStats, error) {
+func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
 	stats := map[string]UptimeStats{}
 	windows := []struct {
 		name   string
@@ -448,6 +457,9 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time) (map[string]
 			}
 			stats[monitorID] = monitorStats
 		}
+	}
+	if err := s.addStrictAvailability(ctx, now.UTC(), failureThreshold, stats); err != nil {
+		return nil, err
 	}
 	return stats, nil
 }
@@ -497,6 +509,208 @@ func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (ma
 		}
 	}
 	return stats, rows.Err()
+}
+
+type uptimeProbe struct {
+	MonitorID string
+	CheckedAt time.Time
+	OK        bool
+}
+
+type timeInterval struct {
+	Start time.Time
+	End   time.Time
+}
+
+func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failureThreshold int, stats map[string]UptimeStats) error {
+	if failureThreshold <= 0 {
+		failureThreshold = 1
+	}
+	probes, err := s.listReportableUptimeProbes(ctx)
+	if err != nil {
+		return err
+	}
+	maintenance, err := s.listUncancelledMaintenanceWindows(ctx)
+	if err != nil {
+		return err
+	}
+
+	probesByMonitor := map[string][]uptimeProbe{}
+	firstProbeByMonitor := map[string]time.Time{}
+	for _, probe := range probes {
+		probesByMonitor[probe.MonitorID] = append(probesByMonitor[probe.MonitorID], probe)
+		if firstProbeByMonitor[probe.MonitorID].IsZero() {
+			firstProbeByMonitor[probe.MonitorID] = probe.CheckedAt
+		}
+		if _, ok := stats[probe.MonitorID]; !ok {
+			stats[probe.MonitorID] = UptimeStats{}
+		}
+	}
+	maintenanceByMonitor := map[string][]timeInterval{}
+	for _, window := range maintenance {
+		maintenanceByMonitor[window.MonitorID] = append(maintenanceByMonitor[window.MonitorID], timeInterval{
+			Start: window.StartsAt,
+			End:   window.EndsAt,
+		})
+	}
+
+	for monitorID, monitorStats := range stats {
+		firstProbe := firstProbeByMonitor[monitorID]
+		if firstProbe.IsZero() {
+			continue
+		}
+		outages := strictOutageIntervals(probesByMonitor[monitorID], failureThreshold, now)
+		maintenanceWindows := maintenanceByMonitor[monitorID]
+		monitorStats.TwentyFourHour = applyAvailabilityWindow(monitorStats.TwentyFourHour, firstProbe, now.Add(-24*time.Hour), now, outages, maintenanceWindows)
+		monitorStats.SevenDay = applyAvailabilityWindow(monitorStats.SevenDay, firstProbe, now.Add(-7*24*time.Hour), now, outages, maintenanceWindows)
+		monitorStats.ThirtyDay = applyAvailabilityWindow(monitorStats.ThirtyDay, firstProbe, now.Add(-30*24*time.Hour), now, outages, maintenanceWindows)
+		monitorStats.Retained = applyAvailabilityWindow(monitorStats.Retained, firstProbe, time.Time{}, now, outages, maintenanceWindows)
+		stats[monitorID] = monitorStats
+	}
+	return nil
+}
+
+func (s *Store) listReportableUptimeProbes(ctx context.Context) ([]uptimeProbe, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, checked_at, ok
+		FROM probe_results
+		WHERE maintenance_window_id IS NULL
+		ORDER BY monitor_id ASC, checked_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var probes []uptimeProbe
+	for rows.Next() {
+		var probe uptimeProbe
+		var checkedAt string
+		var ok int
+		if err := rows.Scan(&probe.MonitorID, &checkedAt, &ok); err != nil {
+			return nil, err
+		}
+		probe.CheckedAt = parseTime(checkedAt)
+		probe.OK = intBool(ok)
+		probes = append(probes, probe)
+	}
+	return probes, rows.Err()
+}
+
+func (s *Store) listUncancelledMaintenanceWindows(ctx context.Context) ([]MaintenanceWindow, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
+		cancelled_at, cancelled_by, cancellation_reason
+		FROM maintenance_windows
+		WHERE cancelled_at IS NULL
+		ORDER BY monitor_id ASC, starts_at ASC, id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var windows []MaintenanceWindow
+	for rows.Next() {
+		window, err := scanMaintenanceWindow(rows)
+		if err != nil {
+			return nil, err
+		}
+		windows = append(windows, window)
+	}
+	return windows, rows.Err()
+}
+
+func strictOutageIntervals(probes []uptimeProbe, threshold int, now time.Time) []timeInterval {
+	var intervals []timeInterval
+	consecutiveFailures := 0
+	var streakStartedAt time.Time
+	var outageStartedAt time.Time
+	for _, probe := range probes {
+		if probe.OK {
+			if !outageStartedAt.IsZero() {
+				intervals = append(intervals, timeInterval{Start: outageStartedAt, End: probe.CheckedAt})
+				outageStartedAt = time.Time{}
+			}
+			consecutiveFailures = 0
+			streakStartedAt = time.Time{}
+			continue
+		}
+		if consecutiveFailures == 0 {
+			streakStartedAt = probe.CheckedAt
+		}
+		consecutiveFailures++
+		if outageStartedAt.IsZero() && consecutiveFailures >= threshold {
+			outageStartedAt = streakStartedAt
+		}
+	}
+	if !outageStartedAt.IsZero() && now.After(outageStartedAt) {
+		intervals = append(intervals, timeInterval{Start: outageStartedAt, End: now})
+	}
+	return intervals
+}
+
+func applyAvailabilityWindow(stats UptimeWindowStats, firstProbe time.Time, cutoff time.Time, now time.Time, outages []timeInterval, maintenance []timeInterval) UptimeWindowStats {
+	start := firstProbe
+	if !cutoff.IsZero() && cutoff.After(start) {
+		start = cutoff
+	}
+	if !now.After(start) {
+		stats.ReportableSeconds = 0
+		stats.DowntimeSeconds = 0
+		return stats
+	}
+	reportable := now.Sub(start) - overlapDuration(start, now, maintenance)
+	if reportable < 0 {
+		reportable = 0
+	}
+	var downtime time.Duration
+	for _, outage := range outages {
+		overlapStart, overlapEnd, ok := clippedInterval(start, now, outage)
+		if !ok {
+			continue
+		}
+		outageDuration := overlapEnd.Sub(overlapStart) - overlapDuration(overlapStart, overlapEnd, maintenance)
+		if outageDuration > 0 {
+			downtime += outageDuration
+		}
+	}
+	if downtime > reportable {
+		downtime = reportable
+	}
+	stats.ReportableSeconds = int64(reportable / time.Second)
+	stats.DowntimeSeconds = int64(downtime / time.Second)
+	return stats
+}
+
+func overlapDuration(start time.Time, end time.Time, intervals []timeInterval) time.Duration {
+	var total time.Duration
+	for _, interval := range intervals {
+		overlapStart, overlapEnd, ok := clippedInterval(start, end, interval)
+		if ok {
+			total += overlapEnd.Sub(overlapStart)
+		}
+	}
+	return total
+}
+
+func clippedInterval(start time.Time, end time.Time, interval timeInterval) (time.Time, time.Time, bool) {
+	overlapStart := maxTime(start, interval.Start)
+	overlapEnd := minTime(end, interval.End)
+	if !overlapEnd.After(overlapStart) {
+		return time.Time{}, time.Time{}, false
+	}
+	return overlapStart, overlapEnd, true
+}
+
+func minTime(a time.Time, b time.Time) time.Time {
+	if a.Before(b) {
+		return a
+	}
+	return b
+}
+
+func maxTime(a time.Time, b time.Time) time.Time {
+	if a.After(b) {
+		return a
+	}
+	return b
 }
 
 func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error) {

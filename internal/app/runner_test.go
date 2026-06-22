@@ -2,11 +2,13 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -24,7 +26,8 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +48,7 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 	sender := &fakeIncidentSender{}
 	runner.emailer = sender
 
-	runner.probe(ctx, 1, mon)
+	runner.probe(ctx, 1, 0, 0, mon)
 	statusCode = http.StatusServiceUnavailable
 	now := time.Now().UTC()
 	if _, err := store.AddMaintenanceWindow(ctx, storage.MaintenanceWindow{
@@ -59,7 +62,7 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runner.probe(ctx, 1, mon)
+	runner.probe(ctx, 1, 0, 0, mon)
 
 	if got := sender.count(); got != 0 {
 		t.Fatalf("sent alerts = %d, want 0", got)
@@ -74,7 +77,7 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 	if current.Status != state.Maintenance {
 		t.Fatalf("status = %s, want MAINTENANCE", current.Status)
 	}
-	stats, err := store.ListUptimeStats(ctx, time.Now().UTC())
+	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +102,8 @@ func TestProbeAlertsOnFirstFailureAfterMaintenanceEnds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +124,7 @@ func TestProbeAlertsOnFirstFailureAfterMaintenanceEnds(t *testing.T) {
 	sender := &fakeIncidentSender{}
 	runner.emailer = sender
 
-	runner.probe(ctx, 3, mon)
+	runner.probe(ctx, 3, 0, 0, mon)
 	statusCode = http.StatusServiceUnavailable
 	now := time.Now().UTC()
 	windowID, err := store.AddMaintenanceWindow(ctx, storage.MaintenanceWindow{
@@ -134,12 +138,12 @@ func TestProbeAlertsOnFirstFailureAfterMaintenanceEnds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner.probe(ctx, 3, mon)
+	runner.probe(ctx, 3, 0, 0, mon)
 	if err := store.CancelMaintenanceWindow(ctx, windowID, time.Now().UTC(), "michael", "finished"); err != nil {
 		t.Fatal(err)
 	}
 
-	runner.probe(ctx, 3, mon)
+	runner.probe(ctx, 3, 0, 0, mon)
 
 	if got := sender.count(); got != 1 {
 		t.Fatalf("sent alerts = %d, want 1", got)
@@ -161,7 +165,8 @@ func TestProbeSendsRecoveryAfterPreMaintenanceDownRecoversDuringMaintenance(t *t
 	}))
 	defer server.Close()
 
-	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +187,7 @@ func TestProbeSendsRecoveryAfterPreMaintenanceDownRecoversDuringMaintenance(t *t
 	sender := &fakeIncidentSender{}
 	runner.emailer = sender
 
-	runner.probe(ctx, 1, mon)
+	runner.probe(ctx, 1, 0, 0, mon)
 	if got := sender.count(); got != 1 {
 		t.Fatalf("sent alerts after initial failure = %d, want 1", got)
 	}
@@ -199,12 +204,12 @@ func TestProbeSendsRecoveryAfterPreMaintenanceDownRecoversDuringMaintenance(t *t
 		t.Fatal(err)
 	}
 	statusCode = http.StatusOK
-	runner.probe(ctx, 1, mon)
+	runner.probe(ctx, 1, 0, 0, mon)
 	if err := store.CancelMaintenanceWindow(ctx, windowID, time.Now().UTC(), "michael", "finished"); err != nil {
 		t.Fatal(err)
 	}
 
-	runner.probe(ctx, 1, mon)
+	runner.probe(ctx, 1, 0, 0, mon)
 
 	incidents := sender.all()
 	if len(incidents) != 2 || incidents[1].Transition != state.Up {
@@ -220,6 +225,100 @@ func TestProbeSendsRecoveryAfterPreMaintenanceDownRecoversDuringMaintenance(t *t
 	if current.Status != state.Up || current.StatusBeforeMaintenance != "" {
 		t.Fatalf("state = %+v, want UP with no status_before_maintenance", current)
 	}
+}
+
+func TestProbeRetriesBeforeRecordingSuccess(t *testing.T) {
+	ctx := context.Background()
+	var requests int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&requests, 1) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mon := config.MonitorConfig{
+		ID:                 "home",
+		Name:               "Home",
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		Interval:           config.Duration{Duration: time.Minute},
+	}
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.emailer = &fakeIncidentSender{}
+
+	runner.probe(ctx, 1, 2, time.Millisecond, mon)
+
+	var ok int
+	var attemptCount int
+	if err := queryProbeAttempt(ctx, dbPath, "home", &ok, &attemptCount); err != nil {
+		t.Fatal(err)
+	}
+	if ok != 1 || attemptCount != 2 {
+		t.Fatalf("stored probe ok=%d attempt_count=%d, want ok=1 attempt_count=2", ok, attemptCount)
+	}
+}
+
+func TestProbeRecordsFailedResultAfterRetriesExhausted(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	mon := config.MonitorConfig{
+		ID:                 "home",
+		Name:               "Home",
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		Interval:           config.Duration{Duration: time.Minute},
+	}
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.emailer = &fakeIncidentSender{}
+
+	runner.probe(ctx, 3, 2, time.Millisecond, mon)
+
+	var ok int
+	var attemptCount int
+	if err := queryProbeAttempt(ctx, dbPath, "home", &ok, &attemptCount); err != nil {
+		t.Fatal(err)
+	}
+	if ok != 0 || attemptCount != 3 {
+		t.Fatalf("stored probe ok=%d attempt_count=%d, want ok=0 attempt_count=3", ok, attemptCount)
+	}
+}
+
+func queryProbeAttempt(ctx context.Context, dbPath string, monitorID string, ok *int, attemptCount *int) error {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.QueryRowContext(ctx, `SELECT ok, attempt_count FROM probe_results WHERE monitor_id = ?`, monitorID).Scan(ok, attemptCount)
 }
 
 type fakeIncidentSender struct {

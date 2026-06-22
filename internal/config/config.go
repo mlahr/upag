@@ -55,10 +55,13 @@ type MailtrapConfig struct {
 }
 
 type Defaults struct {
-	Interval         Duration `yaml:"interval"`
-	Timeout          Duration `yaml:"timeout"`
-	FailureThreshold int      `yaml:"failure_threshold"`
-	HistoryRetention Duration `yaml:"history_retention"`
+	Interval          Duration `yaml:"interval"`
+	Timeout           Duration `yaml:"timeout"`
+	ProbeRetries      int      `yaml:"probe_retries"`
+	ProbeRetryBackoff Duration `yaml:"probe_retry_backoff"`
+	FailureThreshold  int      `yaml:"failure_threshold"`
+	HistoryRetention  Duration `yaml:"history_retention"`
+	probeRetriesSet   bool
 }
 
 type MonitorConfig struct {
@@ -101,6 +104,30 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (d *Defaults) UnmarshalYAML(value *yaml.Node) error {
+	raw := struct {
+		Interval          Duration `yaml:"interval"`
+		Timeout           Duration `yaml:"timeout"`
+		ProbeRetries      *int     `yaml:"probe_retries"`
+		ProbeRetryBackoff Duration `yaml:"probe_retry_backoff"`
+		FailureThreshold  int      `yaml:"failure_threshold"`
+		HistoryRetention  Duration `yaml:"history_retention"`
+	}{}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	d.Interval = raw.Interval
+	d.Timeout = raw.Timeout
+	d.ProbeRetryBackoff = raw.ProbeRetryBackoff
+	d.FailureThreshold = raw.FailureThreshold
+	d.HistoryRetention = raw.HistoryRetention
+	if raw.ProbeRetries != nil {
+		d.ProbeRetries = *raw.ProbeRetries
+		d.probeRetriesSet = true
+	}
+	return nil
+}
+
 func LoadFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -140,6 +167,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Defaults.Timeout.Duration == 0 {
 		c.Defaults.Timeout.Duration = 10 * time.Second
+	}
+	if !c.Defaults.probeRetriesSet {
+		c.Defaults.ProbeRetries = 2
+	}
+	if c.Defaults.ProbeRetryBackoff.Duration == 0 {
+		c.Defaults.ProbeRetryBackoff.Duration = 500 * time.Millisecond
 	}
 	if c.Defaults.FailureThreshold == 0 {
 		c.Defaults.FailureThreshold = 3
@@ -232,6 +265,12 @@ func (c Config) Validate() error {
 	}
 	if c.Defaults.Timeout.Duration <= 0 {
 		errs = append(errs, errors.New("defaults.timeout must be positive"))
+	}
+	if c.Defaults.ProbeRetries < 0 {
+		errs = append(errs, errors.New("defaults.probe_retries must be non-negative"))
+	}
+	if c.Defaults.ProbeRetries > 0 && c.Defaults.ProbeRetryBackoff.Duration <= 0 {
+		errs = append(errs, errors.New("defaults.probe_retry_backoff must be positive when defaults.probe_retries is positive"))
 	}
 	if c.Defaults.FailureThreshold <= 0 {
 		errs = append(errs, errors.New("defaults.failure_threshold must be positive"))

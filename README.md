@@ -112,6 +112,8 @@ smtp:
 defaults:
   interval: 60s
   timeout: 10s
+  probe_retries: 2
+  probe_retry_backoff: 500ms
   failure_threshold: 3
   history_retention: 720h
 
@@ -290,6 +292,8 @@ Example `GET /status` response:
           "failed_checks": 0,
           "maintenance_checks": 0,
           "maintenance_failed_checks": 0,
+          "downtime_seconds": 0,
+          "reportable_seconds": 86400,
           "uptime_percent": 100,
           "window_started_at": "2026-06-21T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
@@ -300,7 +304,9 @@ Example `GET /status` response:
           "failed_checks": 1,
           "maintenance_checks": 0,
           "maintenance_failed_checks": 0,
-          "uptime_percent": 99.4,
+          "downtime_seconds": 0,
+          "reportable_seconds": 604800,
+          "uptime_percent": 100,
           "window_started_at": "2026-06-15T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
         },
@@ -310,7 +316,9 @@ Example `GET /status` response:
           "failed_checks": 2,
           "maintenance_checks": 0,
           "maintenance_failed_checks": 0,
-          "uptime_percent": 99.72,
+          "downtime_seconds": 0,
+          "reportable_seconds": 2592000,
+          "uptime_percent": 100,
           "window_started_at": "2026-05-23T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
         },
@@ -320,7 +328,9 @@ Example `GET /status` response:
           "failed_checks": 4,
           "maintenance_checks": 0,
           "maintenance_failed_checks": 0,
-          "uptime_percent": 99.72,
+          "downtime_seconds": 0,
+          "reportable_seconds": 2592000,
+          "uptime_percent": 100,
           "window_started_at": "2026-05-23T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
         }
@@ -352,12 +362,19 @@ Each monitor's `uptime` object is calculated from stored probe history. The
 `24h`, `7d`, and `30d` windows include probes whose `checked_at` timestamp is
 inside that window, inclusive of the lower boundary. `retained` includes all
 currently stored probe results after history pruning. Checks covered by a
-maintenance window are excluded from `total_checks`, `successful_checks`,
-`failed_checks`, and `uptime_percent`, but are still counted in
-`maintenance_checks` and `maintenance_failed_checks`. `uptime_percent` is
-`successful_checks / total_checks * 100`, rounded to two decimal places. For a
-window with no reportable probe results, counts are `0`, `uptime_percent` is
-`null`, and the window timestamps are `null`.
+maintenance window are excluded from `total_checks`, `successful_checks`, and
+`failed_checks`, but are still counted in `maintenance_checks` and
+`maintenance_failed_checks`.
+
+`uptime_percent` is strict-accounting availability, not raw probe success rate.
+A confirmed outage starts at the first failed probe in a consecutive failure
+streak once that streak reaches `failure_threshold`, and it ends at the first
+later successful probe. `downtime_seconds` is confirmed outage duration inside
+the window. `reportable_seconds` is the reportable window duration after
+subtracting maintenance. `uptime_percent` is
+`(reportable_seconds - downtime_seconds) / reportable_seconds * 100`, rounded
+to two decimal places. For a window with no reportable seconds,
+`uptime_percent` is `null`.
 
 ### Defaults
 
@@ -365,6 +382,10 @@ window with no reportable probe results, counts are `0`, `uptime_percent` is
 
 - `interval`: time between checks. Defaults to `60s`.
 - `timeout`: HTTP request timeout. Defaults to `10s`.
+- `probe_retries`: additional in-probe attempts before recording a failed
+  scheduled check. Defaults to `2`; set to `0` to disable retries.
+- `probe_retry_backoff`: delay between in-probe retry attempts. Defaults to
+  `500ms`.
 - `failure_threshold`: consecutive failed checks required before a monitor
   transitions DOWN. Defaults to `3`.
 - `history_retention`: retained probe history duration. Defaults to `720h`.

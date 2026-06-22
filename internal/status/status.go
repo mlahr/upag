@@ -18,16 +18,17 @@ const alertFailureLimit = 50
 
 type Store interface {
 	ListStates(ctx context.Context) ([]storage.MonitorState, error)
-	ListUptimeStats(ctx context.Context, now time.Time) (map[string]storage.UptimeStats, error)
+	ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]storage.UptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
 	ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error)
 }
 
 type Metadata struct {
-	Version      string
-	StartedAt    time.Time
-	ConfigPath   string
-	MonitorCount int
+	Version          string
+	StartedAt        time.Time
+	ConfigPath       string
+	MonitorCount     int
+	FailureThreshold int
 }
 
 type MetadataProvider func() Metadata
@@ -102,7 +103,8 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			return
 		}
 		now := time.Now().UTC()
-		uptimeStats, err := store.ListUptimeStats(ctx, now)
+		meta := metadata()
+		uptimeStats, err := store.ListUptimeStats(ctx, now, meta.FailureThreshold)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
@@ -117,7 +119,6 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
 		}
-		meta := metadata()
 		writeJSON(w, http.StatusOK, statusResponse{
 			Status:                "ok",
 			Version:               meta.Version,
@@ -177,6 +178,8 @@ type uptimeWindowResponse struct {
 	FailedChecks            int        `json:"failed_checks"`
 	MaintenanceChecks       int        `json:"maintenance_checks"`
 	MaintenanceFailedChecks int        `json:"maintenance_failed_checks"`
+	DowntimeSeconds         int64      `json:"downtime_seconds"`
+	ReportableSeconds       int64      `json:"reportable_seconds"`
 	UptimePercent           *float64   `json:"uptime_percent"`
 	WindowStartedAt         *time.Time `json:"window_started_at"`
 	WindowEndedAt           *time.Time `json:"window_ended_at"`
@@ -262,7 +265,9 @@ func uptimeWindowResponseFromStats(stats storage.UptimeWindowStats) uptimeWindow
 		FailedChecks:            stats.FailedChecks,
 		MaintenanceChecks:       stats.MaintenanceChecks,
 		MaintenanceFailedChecks: stats.MaintenanceFailedChecks,
-		UptimePercent:           uptimePercent(stats.SuccessfulChecks, stats.TotalChecks),
+		DowntimeSeconds:         stats.DowntimeSeconds,
+		ReportableSeconds:       stats.ReportableSeconds,
+		UptimePercent:           uptimePercent(stats.DowntimeSeconds, stats.ReportableSeconds),
 		WindowStartedAt:         timePtr(stats.WindowStartedAt),
 		WindowEndedAt:           timePtr(stats.WindowEndedAt),
 	}
@@ -313,11 +318,15 @@ func maintenanceResponseFromWindow(window storage.MaintenanceWindow) maintenance
 	}
 }
 
-func uptimePercent(successfulChecks int, totalChecks int) *float64 {
-	if totalChecks == 0 {
+func uptimePercent(downtimeSeconds int64, reportableSeconds int64) *float64 {
+	if reportableSeconds == 0 {
 		return nil
 	}
-	percent := float64(successfulChecks) / float64(totalChecks) * 100
+	uptimeSeconds := reportableSeconds - downtimeSeconds
+	if uptimeSeconds < 0 {
+		uptimeSeconds = 0
+	}
+	percent := float64(uptimeSeconds) / float64(reportableSeconds) * 100
 	rounded := math.Round(percent*100) / 100
 	return &rounded
 }

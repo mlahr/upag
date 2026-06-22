@@ -30,6 +30,12 @@ monitors:
 	if cfg.Defaults.Interval.Duration != time.Minute {
 		t.Fatalf("default interval = %s, want 1m", cfg.Defaults.Interval.Duration)
 	}
+	if cfg.Defaults.ProbeRetries != 2 {
+		t.Fatalf("default probe retries = %d, want 2", cfg.Defaults.ProbeRetries)
+	}
+	if cfg.Defaults.ProbeRetryBackoff.Duration != 500*time.Millisecond {
+		t.Fatalf("default probe retry backoff = %s, want 500ms", cfg.Defaults.ProbeRetryBackoff.Duration)
+	}
 	if cfg.Monitors[0].Timeout.Duration != 10*time.Second {
 		t.Fatalf("monitor timeout = %s, want 10s", cfg.Monitors[0].Timeout.Duration)
 	}
@@ -47,6 +53,50 @@ monitors:
 	}
 	if cfg.HTTP.Address != "127.0.0.1" {
 		t.Fatalf("HTTP address = %q, want 127.0.0.1", cfg.HTTP.Address)
+	}
+}
+
+func TestParseAcceptsZeroProbeRetries(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  probe_retries: 0
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Defaults.ProbeRetries != 0 {
+		t.Fatalf("probe retries = %d, want 0", cfg.Defaults.ProbeRetries)
+	}
+}
+
+func TestParseRejectsNegativeProbeRetries(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  probe_retries: -1
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "defaults.probe_retries must be non-negative") {
+		t.Fatalf("validation error %q does not contain defaults.probe_retries", err)
 	}
 }
 
