@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -17,6 +18,7 @@ const alertFailureLimit = 50
 
 type Store interface {
 	ListStates(ctx context.Context) ([]storage.MonitorState, error)
+	ListUptimeStats(ctx context.Context, now time.Time) (map[string]storage.UptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
 }
 
@@ -98,6 +100,11 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
 		}
+		uptimeStats, err := store.ListUptimeStats(ctx, time.Now().UTC())
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
 		failures, err := store.ListActionableAlertDeliveryFailures(ctx, alertFailureLimit)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
@@ -110,7 +117,7 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			StartedAt:             timePtr(meta.StartedAt),
 			ConfigPath:            meta.ConfigPath,
 			MonitorCount:          meta.MonitorCount,
-			Monitors:              monitorResponses(states),
+			Monitors:              monitorResponses(states, uptimeStats),
 			AlertDeliveryFailures: alertFailureResponses(failures),
 		})
 	})
@@ -134,17 +141,34 @@ type statusResponse struct {
 }
 
 type monitorResponse struct {
-	ID                     string     `json:"id"`
-	Name                   string     `json:"name"`
-	URL                    string     `json:"url"`
-	Status                 string     `json:"status"`
-	ConsecutiveFailures    int        `json:"consecutive_failures"`
-	LastCheckedAt          *time.Time `json:"last_checked_at"`
-	LastSuccessAt          *time.Time `json:"last_success_at"`
-	LastFailureAt          *time.Time `json:"last_failure_at"`
-	LastError              string     `json:"last_error"`
-	LastObservedStatusCode int        `json:"last_observed_status_code"`
-	UpdatedAt              *time.Time `json:"updated_at"`
+	ID                     string         `json:"id"`
+	Name                   string         `json:"name"`
+	URL                    string         `json:"url"`
+	Status                 string         `json:"status"`
+	ConsecutiveFailures    int            `json:"consecutive_failures"`
+	LastCheckedAt          *time.Time     `json:"last_checked_at"`
+	LastSuccessAt          *time.Time     `json:"last_success_at"`
+	LastFailureAt          *time.Time     `json:"last_failure_at"`
+	LastError              string         `json:"last_error"`
+	LastObservedStatusCode int            `json:"last_observed_status_code"`
+	UpdatedAt              *time.Time     `json:"updated_at"`
+	Uptime                 uptimeResponse `json:"uptime"`
+}
+
+type uptimeResponse struct {
+	TwentyFourHour uptimeWindowResponse `json:"24h"`
+	SevenDay       uptimeWindowResponse `json:"7d"`
+	ThirtyDay      uptimeWindowResponse `json:"30d"`
+	Retained       uptimeWindowResponse `json:"retained"`
+}
+
+type uptimeWindowResponse struct {
+	TotalChecks      int        `json:"total_checks"`
+	SuccessfulChecks int        `json:"successful_checks"`
+	FailedChecks     int        `json:"failed_checks"`
+	UptimePercent    *float64   `json:"uptime_percent"`
+	WindowStartedAt  *time.Time `json:"window_started_at"`
+	WindowEndedAt    *time.Time `json:"window_ended_at"`
 }
 
 type alertFailureResponse struct {
@@ -177,9 +201,10 @@ func writeJSON(w http.ResponseWriter, code int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func monitorResponses(states []storage.MonitorState) []monitorResponse {
+func monitorResponses(states []storage.MonitorState, uptimeStats map[string]storage.UptimeStats) []monitorResponse {
 	responses := make([]monitorResponse, 0, len(states))
 	for _, state := range states {
+		stats := uptimeStats[state.MonitorID]
 		responses = append(responses, monitorResponse{
 			ID:                     state.MonitorID,
 			Name:                   state.Name,
@@ -192,9 +217,39 @@ func monitorResponses(states []storage.MonitorState) []monitorResponse {
 			LastError:              state.LastError,
 			LastObservedStatusCode: state.LastObservedStatusCode,
 			UpdatedAt:              timePtr(state.UpdatedAt),
+			Uptime:                 uptimeResponseFromStats(stats),
 		})
 	}
 	return responses
+}
+
+func uptimeResponseFromStats(stats storage.UptimeStats) uptimeResponse {
+	return uptimeResponse{
+		TwentyFourHour: uptimeWindowResponseFromStats(stats.TwentyFourHour),
+		SevenDay:       uptimeWindowResponseFromStats(stats.SevenDay),
+		ThirtyDay:      uptimeWindowResponseFromStats(stats.ThirtyDay),
+		Retained:       uptimeWindowResponseFromStats(stats.Retained),
+	}
+}
+
+func uptimeWindowResponseFromStats(stats storage.UptimeWindowStats) uptimeWindowResponse {
+	return uptimeWindowResponse{
+		TotalChecks:      stats.TotalChecks,
+		SuccessfulChecks: stats.SuccessfulChecks,
+		FailedChecks:     stats.FailedChecks,
+		UptimePercent:    uptimePercent(stats.SuccessfulChecks, stats.TotalChecks),
+		WindowStartedAt:  timePtr(stats.WindowStartedAt),
+		WindowEndedAt:    timePtr(stats.WindowEndedAt),
+	}
+}
+
+func uptimePercent(successfulChecks int, totalChecks int) *float64 {
+	if totalChecks == 0 {
+		return nil
+	}
+	percent := float64(successfulChecks) / float64(totalChecks) * 100
+	rounded := math.Round(percent*100) / 100
+	return &rounded
 }
 
 func alertFailureResponses(failures []storage.AlertNotification) []alertFailureResponse {

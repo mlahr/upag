@@ -14,11 +14,16 @@ import (
 
 type fakeStore struct {
 	states   []storage.MonitorState
+	uptime   map[string]storage.UptimeStats
 	failures []storage.AlertNotification
 }
 
 func (s fakeStore) ListStates(context.Context) ([]storage.MonitorState, error) {
 	return s.states, nil
+}
+
+func (s fakeStore) ListUptimeStats(context.Context, time.Time) (map[string]storage.UptimeStats, error) {
+	return s.uptime, nil
 }
 
 func (s fakeStore) ListActionableAlertDeliveryFailures(context.Context, int) ([]storage.AlertNotification, error) {
@@ -65,6 +70,38 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 				UpdatedAt:              checkedAt,
 			},
 		},
+		uptime: map[string]storage.UptimeStats{
+			"home": {
+				TwentyFourHour: storage.UptimeWindowStats{
+					TotalChecks:      3,
+					SuccessfulChecks: 2,
+					FailedChecks:     1,
+					WindowStartedAt:  checkedAt.Add(-10 * time.Minute),
+					WindowEndedAt:    checkedAt,
+				},
+				SevenDay: storage.UptimeWindowStats{
+					TotalChecks:      4,
+					SuccessfulChecks: 3,
+					FailedChecks:     1,
+					WindowStartedAt:  checkedAt.Add(-24 * time.Hour),
+					WindowEndedAt:    checkedAt,
+				},
+				ThirtyDay: storage.UptimeWindowStats{
+					TotalChecks:      6,
+					SuccessfulChecks: 5,
+					FailedChecks:     1,
+					WindowStartedAt:  checkedAt.Add(-29 * 24 * time.Hour),
+					WindowEndedAt:    checkedAt,
+				},
+				Retained: storage.UptimeWindowStats{
+					TotalChecks:      6,
+					SuccessfulChecks: 5,
+					FailedChecks:     1,
+					WindowStartedAt:  checkedAt.Add(-48 * time.Hour),
+					WindowEndedAt:    checkedAt,
+				},
+			},
+		},
 		failures: []storage.AlertNotification{
 			{
 				IncidentID:    42,
@@ -100,6 +137,28 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 			ID            string  `json:"id"`
 			LastCheckedAt string  `json:"last_checked_at"`
 			LastFailureAt *string `json:"last_failure_at"`
+			Uptime        struct {
+				TwentyFourHour struct {
+					TotalChecks      int      `json:"total_checks"`
+					SuccessfulChecks int      `json:"successful_checks"`
+					FailedChecks     int      `json:"failed_checks"`
+					UptimePercent    *float64 `json:"uptime_percent"`
+					WindowStartedAt  string   `json:"window_started_at"`
+					WindowEndedAt    string   `json:"window_ended_at"`
+				} `json:"24h"`
+				SevenDay struct {
+					TotalChecks   int      `json:"total_checks"`
+					UptimePercent *float64 `json:"uptime_percent"`
+				} `json:"7d"`
+				ThirtyDay struct {
+					TotalChecks   int      `json:"total_checks"`
+					UptimePercent *float64 `json:"uptime_percent"`
+				} `json:"30d"`
+				Retained struct {
+					TotalChecks   int      `json:"total_checks"`
+					UptimePercent *float64 `json:"uptime_percent"`
+				} `json:"retained"`
+			} `json:"uptime"`
 		} `json:"monitors"`
 		AlertDeliveryFailures []struct {
 			IncidentID    int64  `json:"incident_id"`
@@ -119,6 +178,25 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 	}
 	if body.Monitors[0].LastFailureAt != nil {
 		t.Fatalf("last_failure_at = %#v, want null", body.Monitors[0].LastFailureAt)
+	}
+	uptime24h := body.Monitors[0].Uptime.TwentyFourHour
+	if uptime24h.TotalChecks != 3 || uptime24h.SuccessfulChecks != 2 || uptime24h.FailedChecks != 1 {
+		t.Fatalf("24h uptime counts = %+v, want 3 total, 2 successful, 1 failed", uptime24h)
+	}
+	if uptime24h.UptimePercent == nil || *uptime24h.UptimePercent != 66.67 {
+		t.Fatalf("24h uptime_percent = %#v, want 66.67", uptime24h.UptimePercent)
+	}
+	if uptime24h.WindowStartedAt != "2026-06-22T02:10:04Z" || uptime24h.WindowEndedAt != "2026-06-22T02:20:04Z" {
+		t.Fatalf("24h uptime window = %+v, want observed start and end", uptime24h)
+	}
+	if body.Monitors[0].Uptime.SevenDay.TotalChecks != 4 || body.Monitors[0].Uptime.SevenDay.UptimePercent == nil || *body.Monitors[0].Uptime.SevenDay.UptimePercent != 75 {
+		t.Fatalf("7d uptime = %+v, want 4 checks at 75 percent", body.Monitors[0].Uptime.SevenDay)
+	}
+	if body.Monitors[0].Uptime.ThirtyDay.TotalChecks != 6 || body.Monitors[0].Uptime.ThirtyDay.UptimePercent == nil || *body.Monitors[0].Uptime.ThirtyDay.UptimePercent != 83.33 {
+		t.Fatalf("30d uptime = %+v, want 6 checks at 83.33 percent", body.Monitors[0].Uptime.ThirtyDay)
+	}
+	if body.Monitors[0].Uptime.Retained.TotalChecks != 6 || body.Monitors[0].Uptime.Retained.UptimePercent == nil || *body.Monitors[0].Uptime.Retained.UptimePercent != 83.33 {
+		t.Fatalf("retained uptime = %+v, want 6 checks at 83.33 percent", body.Monitors[0].Uptime.Retained)
 	}
 	if len(body.AlertDeliveryFailures) != 1 || body.AlertDeliveryFailures[0].IncidentID != 42 || body.AlertDeliveryFailures[0].Provider != "smtp" || body.AlertDeliveryFailures[0].AttemptNumber != 2 || body.AlertDeliveryFailures[0].Error != "send failed" {
 		t.Fatalf("alert_delivery_failures = %+v, want smtp failure", body.AlertDeliveryFailures)

@@ -260,6 +260,125 @@ func TestSaveProbeAndStatePersistsResponseTime(t *testing.T) {
 	}
 }
 
+func TestListUptimeStatsAggregatesProbeResultsByWindow(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, probe := range []struct {
+		monitorID string
+		checkedAt time.Time
+		ok        bool
+	}{
+		{monitorID: "home", checkedAt: now.Add(-24 * time.Hour), ok: true},
+		{monitorID: "home", checkedAt: now.Add(-2 * time.Hour), ok: false},
+		{monitorID: "home", checkedAt: now.Add(-1 * time.Hour), ok: true},
+		{monitorID: "home", checkedAt: now.Add(-48 * time.Hour), ok: true},
+		{monitorID: "home", checkedAt: now.Add(-8 * 24 * time.Hour), ok: false},
+		{monitorID: "home", checkedAt: now.Add(-30 * 24 * time.Hour), ok: true},
+		{monitorID: "home", checkedAt: now.Add(-31 * 24 * time.Hour), ok: false},
+		{monitorID: "api", checkedAt: now.Add(-30 * time.Minute), ok: false},
+	} {
+		status := state.Down
+		if probe.ok {
+			status = state.Up
+		}
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID: probe.monitorID,
+			CheckedAt: probe.checkedAt,
+			OK:        probe.ok,
+		}, MonitorState{
+			MonitorID:     probe.monitorID,
+			Name:          probe.monitorID,
+			URL:           "https://example.com/",
+			Status:        status,
+			LastCheckedAt: probe.checkedAt,
+			UpdatedAt:     probe.checkedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := store.ListUptimeStats(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	home := stats["home"]
+	if home.TwentyFourHour.TotalChecks != 3 || home.TwentyFourHour.SuccessfulChecks != 2 || home.TwentyFourHour.FailedChecks != 1 {
+		t.Fatalf("home 24h stats = %+v, want 3 total, 2 successful, 1 failed", home.TwentyFourHour)
+	}
+	if !home.TwentyFourHour.WindowStartedAt.Equal(now.Add(-24*time.Hour)) || !home.TwentyFourHour.WindowEndedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("home 24h window = %+v, want inclusive 24h boundary through latest probe", home.TwentyFourHour)
+	}
+	if home.SevenDay.TotalChecks != 4 || home.SevenDay.SuccessfulChecks != 3 || home.SevenDay.FailedChecks != 1 {
+		t.Fatalf("home 7d stats = %+v, want 4 total, 3 successful, 1 failed", home.SevenDay)
+	}
+	if home.ThirtyDay.TotalChecks != 6 || home.ThirtyDay.SuccessfulChecks != 4 || home.ThirtyDay.FailedChecks != 2 {
+		t.Fatalf("home 30d stats = %+v, want 6 total, 4 successful, 2 failed", home.ThirtyDay)
+	}
+	if !home.ThirtyDay.WindowStartedAt.Equal(now.Add(-30*24*time.Hour)) || !home.ThirtyDay.WindowEndedAt.Equal(now.Add(-time.Hour)) {
+		t.Fatalf("home 30d window = %+v, want inclusive 30d boundary through latest probe", home.ThirtyDay)
+	}
+	if home.Retained.TotalChecks != 7 || home.Retained.SuccessfulChecks != 4 || home.Retained.FailedChecks != 3 {
+		t.Fatalf("home retained stats = %+v, want 7 total, 4 successful, 3 failed", home.Retained)
+	}
+
+	api := stats["api"]
+	if api.TwentyFourHour.TotalChecks != 1 || api.TwentyFourHour.SuccessfulChecks != 0 || api.TwentyFourHour.FailedChecks != 1 {
+		t.Fatalf("api 24h stats = %+v, want one failed check", api.TwentyFourHour)
+	}
+}
+
+func TestListUptimeStatsUsesZeroValueForEmptyWindows(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	checkedAt := now.Add(-8 * 24 * time.Hour)
+	_, err = store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID: "old",
+		CheckedAt: checkedAt,
+		OK:        false,
+	}, MonitorState{
+		MonitorID:     "old",
+		Name:          "Old",
+		URL:           "https://example.com/",
+		Status:        state.Down,
+		LastCheckedAt: checkedAt,
+		UpdatedAt:     checkedAt,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := store.ListUptimeStats(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	old := stats["old"]
+	if old.TwentyFourHour.TotalChecks != 0 || !old.TwentyFourHour.WindowStartedAt.IsZero() || !old.TwentyFourHour.WindowEndedAt.IsZero() {
+		t.Fatalf("old 24h stats = %+v, want zero-value empty window", old.TwentyFourHour)
+	}
+	if old.SevenDay.TotalChecks != 0 || !old.SevenDay.WindowStartedAt.IsZero() || !old.SevenDay.WindowEndedAt.IsZero() {
+		t.Fatalf("old 7d stats = %+v, want zero-value empty window", old.SevenDay)
+	}
+	if old.ThirtyDay.TotalChecks != 1 || old.ThirtyDay.SuccessfulChecks != 0 || old.ThirtyDay.FailedChecks != 1 {
+		t.Fatalf("old 30d stats = %+v, want one failed check", old.ThirtyDay)
+	}
+	if old.Retained.TotalChecks != 1 || old.Retained.SuccessfulChecks != 0 || old.Retained.FailedChecks != 1 {
+		t.Fatalf("old retained stats = %+v, want one failed check", old.Retained)
+	}
+}
+
 func TestSaveAlertNotificationsPersistsAttempts(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {

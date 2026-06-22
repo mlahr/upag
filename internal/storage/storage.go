@@ -39,6 +39,21 @@ type ProbeResult struct {
 	Error              string
 }
 
+type UptimeStats struct {
+	TwentyFourHour UptimeWindowStats
+	SevenDay       UptimeWindowStats
+	ThirtyDay      UptimeWindowStats
+	Retained       UptimeWindowStats
+}
+
+type UptimeWindowStats struct {
+	TotalChecks      int
+	SuccessfulChecks int
+	FailedChecks     int
+	WindowStartedAt  time.Time
+	WindowEndedAt    time.Time
+}
+
 type Incident struct {
 	ID         int64
 	MonitorID  string
@@ -339,6 +354,77 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 		states = append(states, state)
 	}
 	return states, rows.Err()
+}
+
+func (s *Store) ListUptimeStats(ctx context.Context, now time.Time) (map[string]UptimeStats, error) {
+	stats := map[string]UptimeStats{}
+	windows := []struct {
+		name   string
+		cutoff time.Time
+	}{
+		{name: "24h", cutoff: now.UTC().Add(-24 * time.Hour)},
+		{name: "7d", cutoff: now.UTC().Add(-7 * 24 * time.Hour)},
+		{name: "30d", cutoff: now.UTC().Add(-30 * 24 * time.Hour)},
+		{name: "retained"},
+	}
+	for _, window := range windows {
+		windowStats, err := s.listUptimeWindowStats(ctx, window.cutoff)
+		if err != nil {
+			return nil, err
+		}
+		for monitorID, uptime := range windowStats {
+			monitorStats := stats[monitorID]
+			switch window.name {
+			case "24h":
+				monitorStats.TwentyFourHour = uptime
+			case "7d":
+				monitorStats.SevenDay = uptime
+			case "30d":
+				monitorStats.ThirtyDay = uptime
+			case "retained":
+				monitorStats.Retained = uptime
+			}
+			stats[monitorID] = monitorStats
+		}
+	}
+	return stats, nil
+}
+
+func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
+	query := `SELECT monitor_id, COUNT(*), COALESCE(SUM(ok), 0), MIN(checked_at), MAX(checked_at)
+		FROM probe_results`
+	args := []any{}
+	if !cutoff.IsZero() {
+		query += ` WHERE checked_at >= ?`
+		args = append(args, formatTime(cutoff))
+	}
+	query += ` GROUP BY monitor_id`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	stats := map[string]UptimeWindowStats{}
+	for rows.Next() {
+		var monitorID string
+		var totalChecks int
+		var successfulChecks int
+		var startedAt string
+		var endedAt string
+		if err := rows.Scan(&monitorID, &totalChecks, &successfulChecks, &startedAt, &endedAt); err != nil {
+			return nil, err
+		}
+		stats[monitorID] = UptimeWindowStats{
+			TotalChecks:      totalChecks,
+			SuccessfulChecks: successfulChecks,
+			FailedChecks:     totalChecks - successfulChecks,
+			WindowStartedAt:  parseTime(startedAt),
+			WindowEndedAt:    parseTime(endedAt),
+		}
+	}
+	return stats, rows.Err()
 }
 
 func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error) {

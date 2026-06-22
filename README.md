@@ -238,8 +238,8 @@ The status endpoints do not perform authentication.
 Endpoints:
 
 - `GET /health`: daemon liveness metadata.
-- `GET /status`: daemon metadata, monitor state, and actionable alert delivery
-  failures.
+- `GET /status`: daemon metadata, monitor state, per-monitor uptime
+  statistics, and actionable alert delivery failures.
 
 Example `GET /health` response:
 
@@ -272,7 +272,41 @@ Example `GET /status` response:
       "last_failure_at": null,
       "last_error": "",
       "last_observed_status_code": 200,
-      "updated_at": "2026-06-22T02:20:04.987654321Z"
+      "updated_at": "2026-06-22T02:20:04.987654321Z",
+      "uptime": {
+        "24h": {
+          "total_checks": 24,
+          "successful_checks": 24,
+          "failed_checks": 0,
+          "uptime_percent": 100,
+          "window_started_at": "2026-06-21T02:20:04.987654321Z",
+          "window_ended_at": "2026-06-22T02:20:04.987654321Z"
+        },
+        "7d": {
+          "total_checks": 168,
+          "successful_checks": 167,
+          "failed_checks": 1,
+          "uptime_percent": 99.4,
+          "window_started_at": "2026-06-15T02:20:04.987654321Z",
+          "window_ended_at": "2026-06-22T02:20:04.987654321Z"
+        },
+        "30d": {
+          "total_checks": 720,
+          "successful_checks": 718,
+          "failed_checks": 2,
+          "uptime_percent": 99.72,
+          "window_started_at": "2026-05-23T02:20:04.987654321Z",
+          "window_ended_at": "2026-06-22T02:20:04.987654321Z"
+        },
+        "retained": {
+          "total_checks": 1440,
+          "successful_checks": 1436,
+          "failed_checks": 4,
+          "uptime_percent": 99.72,
+          "window_started_at": "2026-05-23T02:20:04.987654321Z",
+          "window_ended_at": "2026-06-22T02:20:04.987654321Z"
+        }
+      }
     }
   ],
   "alert_delivery_failures": [
@@ -293,6 +327,14 @@ Example `GET /status` response:
 `alert_delivery_failures` contains at most 50 latest failed delivery attempts,
 one per incident and provider, excluding failures followed by a later successful
 delivery for that same incident and provider.
+
+Each monitor's `uptime` object is calculated from stored probe history. The
+`24h`, `7d`, and `30d` windows include probes whose `checked_at` timestamp is
+inside that window, inclusive of the lower boundary. `retained` includes all
+currently stored probe results after history pruning. `uptime_percent` is
+`successful_checks / total_checks * 100`, rounded to two decimal places. For a
+window with no probe results, counts are `0`, `uptime_percent` is `null`, and
+the window timestamps are `null`.
 
 ### Defaults
 
