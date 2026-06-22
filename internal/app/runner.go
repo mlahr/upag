@@ -299,10 +299,7 @@ func alertSkipReason(previous storage.MonitorState, next storage.MonitorState, r
 		return "failure_threshold_not_reached"
 	}
 	if previous.Status == state.Down && next.Status == state.Down {
-		return "already_down"
-	}
-	if previous.Status == state.Up && next.Status == state.Up {
-		return "already_up"
+		return "alert_already_sent"
 	}
 	return "no_state_transition"
 }
