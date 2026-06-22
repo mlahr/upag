@@ -12,10 +12,20 @@ import (
 )
 
 type Config struct {
+	Alerts   AlertsConfig    `yaml:"alerts"`
 	SMTP     SMTPConfig      `yaml:"smtp"`
 	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
+}
+
+type AlertsConfig struct {
+	NotificationRetries NotificationRetriesConfig `yaml:"notification_retries"`
+}
+
+type NotificationRetriesConfig struct {
+	MaxAttempts int        `yaml:"max_attempts"`
+	Backoff     []Duration `yaml:"backoff"`
 }
 
 type SMTPConfig struct {
@@ -92,6 +102,16 @@ func Parse(data []byte) (Config, error) {
 }
 
 func (c *Config) ApplyDefaults() {
+	if c.Alerts.NotificationRetries.MaxAttempts == 0 {
+		c.Alerts.NotificationRetries.MaxAttempts = 3
+	}
+	if len(c.Alerts.NotificationRetries.Backoff) == 0 {
+		c.Alerts.NotificationRetries.Backoff = []Duration{
+			{Duration: time.Minute},
+			{Duration: 5 * time.Minute},
+			{Duration: 15 * time.Minute},
+		}
+	}
 	if c.Defaults.Interval.Duration == 0 {
 		c.Defaults.Interval.Duration = time.Minute
 	}
@@ -195,6 +215,17 @@ func (c Config) Validate() error {
 	}
 	if len(c.Monitors) == 0 {
 		errs = append(errs, errors.New("monitors must contain at least one monitor"))
+	}
+	if c.Alerts.NotificationRetries.MaxAttempts <= 0 {
+		errs = append(errs, errors.New("alerts.notification_retries.max_attempts must be positive"))
+	}
+	if len(c.Alerts.NotificationRetries.Backoff) == 0 {
+		errs = append(errs, errors.New("alerts.notification_retries.backoff must contain at least one duration"))
+	}
+	for i, backoff := range c.Alerts.NotificationRetries.Backoff {
+		if backoff.Duration <= 0 {
+			errs = append(errs, fmt.Errorf("alerts.notification_retries.backoff[%d] must be positive", i))
+		}
 	}
 
 	ids := map[string]struct{}{}

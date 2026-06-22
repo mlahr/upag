@@ -229,6 +229,26 @@ func TestMultiSenderAttemptsAllProvidersAndJoinsErrors(t *testing.T) {
 	}
 }
 
+func TestMultiSenderSendsOnlyNamedProvider(t *testing.T) {
+	first := &fakeSender{}
+	second := &fakeSender{}
+	sender := MultiSender{senders: []IncidentSender{first, secondProviderSender{name: "other", sender: second}}}
+
+	result := sender.SendProvider("other", testIncident, testMonitorState)
+	if result.Error != nil {
+		t.Fatal(result.Error)
+	}
+	if result.Provider != "other" {
+		t.Fatalf("provider = %q, want other", result.Provider)
+	}
+	if first.calls != 0 {
+		t.Fatalf("first calls = %d, want 0", first.calls)
+	}
+	if second.calls != 1 {
+		t.Fatalf("second calls = %d, want 1", second.calls)
+	}
+}
+
 type fakeSender struct {
 	calls int
 	err   error
@@ -239,8 +259,30 @@ func (s *fakeSender) SendIncident(storage.Incident, storage.MonitorState) []Send
 	return []SendResult{{Provider: "fake", Error: s.err}}
 }
 
+func (s *fakeSender) SendProvider(provider string, _ storage.Incident, _ storage.MonitorState) SendResult {
+	s.calls++
+	return SendResult{Provider: provider, Error: s.err}
+}
+
 func (s *fakeSender) Providers() []string {
 	return []string{"fake"}
+}
+
+type secondProviderSender struct {
+	name   string
+	sender *fakeSender
+}
+
+func (s secondProviderSender) SendIncident(incident storage.Incident, current storage.MonitorState) []SendResult {
+	return s.sender.SendIncident(incident, current)
+}
+
+func (s secondProviderSender) SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult {
+	return s.sender.SendProvider(provider, incident, current)
+}
+
+func (s secondProviderSender) Providers() []string {
+	return []string{s.name}
 }
 
 func startFakeSMTP(t *testing.T) (string, <-chan string, func()) {

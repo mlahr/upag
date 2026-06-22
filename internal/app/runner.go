@@ -54,6 +54,8 @@ func (r *Runner) Run(ctx context.Context) error {
 	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	pruneTicker := time.NewTicker(time.Hour)
 	defer pruneTicker.Stop()
+	retryTicker := time.NewTicker(30 * time.Second)
+	defer retryTicker.Stop()
 
 	for {
 		select {
@@ -76,6 +78,8 @@ func (r *Runner) Run(ctx context.Context) error {
 			if err := r.store.PruneProbeResults(ctx, retention, time.Now().UTC()); err != nil {
 				r.logError("history_prune_failed", "error=%q", err)
 			}
+		case <-retryTicker.C:
+			r.retryAlertNotifications(ctx)
 		}
 	}
 }
@@ -203,7 +207,7 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 	if incident != nil {
 		attemptedAt := time.Now().UTC()
 		results := emailer.SendIncident(*incident, next)
-		notifications := alertNotifications(incidentID, mon.ID, attemptedAt, results)
+		notifications := alertNotifications(incidentID, mon.ID, attemptedAt, 1, r.retryPolicy(), results)
 		if err := r.store.SaveAlertNotifications(ctx, notifications); err != nil {
 			r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d error=%q", mon.ID, incidentID, err)
 		}
@@ -215,6 +219,52 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		return
 	}
 	r.logAlertDecision("info", mon, previous.Status, next.Status, "", providers, false, alertSkipReason(previous, next, result, threshold), nil)
+}
+
+func (r *Runner) retryAlertNotifications(ctx context.Context) {
+	now := time.Now().UTC()
+	due, err := r.store.ListDueAlertNotificationRetries(ctx, now, 50)
+	if err != nil {
+		r.logError("alert_retry_query_failed", "error=%q", err)
+		return
+	}
+	if len(due) == 0 {
+		return
+	}
+
+	r.mu.Lock()
+	emailer := r.emailer
+	policy := r.cfg.Alerts.NotificationRetries
+	r.mu.Unlock()
+	providers := emailer.Providers()
+
+	for _, retry := range due {
+		attemptNumber := retry.Notification.AttemptNumber + 1
+		attemptedAt := time.Now().UTC()
+		var result alert.SendResult
+		if stringInSlice(retry.Notification.Provider, providers) {
+			result = emailer.SendProvider(retry.Notification.Provider, retry.Incident, retry.CurrentState)
+		} else {
+			result = alert.SendResult{
+				Provider: retry.Notification.Provider,
+				Error:    fmt.Errorf("alert provider %q is not configured", retry.Notification.Provider),
+			}
+		}
+		notification := alertNotification(retry.Notification.IncidentID, retry.Notification.MonitorID, attemptedAt, attemptNumber, policy, result)
+		if !stringInSlice(retry.Notification.Provider, providers) {
+			notification.RetryExhausted = true
+			notification.NextRetryAt = time.Time{}
+		}
+		if err := r.store.SaveAlertNotifications(ctx, []storage.AlertNotification{notification}); err != nil {
+			r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d provider=%q error=%q", retry.Notification.MonitorID, retry.Notification.IncidentID, retry.Notification.Provider, err)
+			continue
+		}
+		if result.Error != nil {
+			r.logError("alert_retry_failed", "monitor_id=%q incident_id=%d provider=%q attempt_number=%d error=%q", retry.Notification.MonitorID, retry.Notification.IncidentID, retry.Notification.Provider, attemptNumber, result.Error)
+			continue
+		}
+		r.logInfo("alert_retry_succeeded", "monitor_id=%q incident_id=%d provider=%q attempt_number=%d", retry.Notification.MonitorID, retry.Notification.IncidentID, retry.Notification.Provider, attemptNumber)
+	}
 }
 
 func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, status string) {
@@ -257,23 +307,65 @@ func alertSkipReason(previous storage.MonitorState, next storage.MonitorState, r
 	return "no_state_transition"
 }
 
-func alertNotifications(incidentID int64, monitorID string, attemptedAt time.Time, results []alert.SendResult) []storage.AlertNotification {
+func alertNotifications(incidentID int64, monitorID string, attemptedAt time.Time, attemptNumber int, policy config.NotificationRetriesConfig, results []alert.SendResult) []storage.AlertNotification {
 	notifications := make([]storage.AlertNotification, 0, len(results))
 	for _, result := range results {
-		errorText := ""
-		if result.Error != nil {
-			errorText = result.Error.Error()
-		}
-		notifications = append(notifications, storage.AlertNotification{
-			IncidentID:  incidentID,
-			MonitorID:   monitorID,
-			Provider:    result.Provider,
-			AttemptedAt: attemptedAt,
-			Success:     result.Error == nil,
-			Error:       errorText,
-		})
+		notifications = append(notifications, alertNotification(incidentID, monitorID, attemptedAt, attemptNumber, policy, result))
 	}
 	return notifications
+}
+
+func alertNotification(incidentID int64, monitorID string, attemptedAt time.Time, attemptNumber int, policy config.NotificationRetriesConfig, result alert.SendResult) storage.AlertNotification {
+	errorText := ""
+	if result.Error != nil {
+		errorText = result.Error.Error()
+	}
+	notification := storage.AlertNotification{
+		IncidentID:    incidentID,
+		MonitorID:     monitorID,
+		Provider:      result.Provider,
+		AttemptedAt:   attemptedAt,
+		AttemptNumber: attemptNumber,
+		Success:       result.Error == nil,
+		Error:         errorText,
+	}
+	if result.Error != nil {
+		if attemptNumber >= policy.MaxAttempts {
+			notification.RetryExhausted = true
+		} else {
+			notification.NextRetryAt = attemptedAt.Add(retryBackoff(policy, attemptNumber))
+		}
+	}
+	return notification
+}
+
+func retryBackoff(policy config.NotificationRetriesConfig, attemptNumber int) time.Duration {
+	if len(policy.Backoff) == 0 {
+		return 0
+	}
+	index := attemptNumber - 1
+	if index < 0 {
+		index = 0
+	}
+	if index >= len(policy.Backoff) {
+		index = len(policy.Backoff) - 1
+	}
+	return policy.Backoff[index].Duration
+}
+
+func (r *Runner) retryPolicy() config.NotificationRetriesConfig {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.cfg.Alerts.NotificationRetries
+}
+
+func stringInSlice(value string, values []string) bool {
+	for _, candidate := range values {
+		if candidate == value {
+			return true
+		}
+	}
+	return false
 }
 
 func (r *Runner) logInfo(event string, format string, args ...any) {

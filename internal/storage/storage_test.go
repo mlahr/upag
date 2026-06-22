@@ -205,19 +205,22 @@ func TestSaveAlertNotificationsPersistsAttempts(t *testing.T) {
 
 	err = store.SaveAlertNotifications(context.Background(), []AlertNotification{
 		{
-			IncidentID:  incidentID,
-			MonitorID:   "home",
-			Provider:    "smtp",
-			AttemptedAt: now,
-			Success:     true,
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       true,
 		},
 		{
-			IncidentID:  incidentID,
-			MonitorID:   "home",
-			Provider:    "mailtrap",
-			AttemptedAt: now,
-			Success:     false,
-			Error:       "invalid token",
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "mailtrap",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "invalid token",
+			NextRetryAt:   now.Add(time.Minute),
 		},
 	})
 	if err != nil {
@@ -241,4 +244,139 @@ func TestSaveAlertNotificationsPersistsAttempts(t *testing.T) {
 	if byProvider["mailtrap"].IncidentID != incidentID || byProvider["mailtrap"].Success || byProvider["mailtrap"].Error != "invalid token" {
 		t.Fatalf("mailtrap notification = %+v, want failure linked to incident %d", byProvider["mailtrap"], incidentID)
 	}
+	if byProvider["mailtrap"].AttemptNumber != 1 || !byProvider["mailtrap"].NextRetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("mailtrap retry metadata = %+v, want attempt 1 with next retry", byProvider["mailtrap"])
+	}
+}
+
+func TestListDueAlertNotificationRetries(t *testing.T) {
+	store, incidentID, now := storeWithIncident(t)
+	defer store.Close()
+
+	if err := store.SaveAlertNotifications(context.Background(), []AlertNotification{
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary failure",
+			NextRetryAt:   now.Add(-time.Minute),
+		},
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "mailtrap",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "rate limited",
+			NextRetryAt:   now.Add(time.Minute),
+		},
+		{
+			IncidentID:     incidentID,
+			MonitorID:      "home",
+			Provider:       "pager",
+			AttemptedAt:    now,
+			AttemptNumber:  3,
+			Success:        false,
+			Error:          "permanent failure",
+			RetryExhausted: true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retries, err := store.ListDueAlertNotificationRetries(context.Background(), now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retries) != 1 {
+		t.Fatalf("retry count = %d, want 1", len(retries))
+	}
+	if retries[0].Notification.Provider != "smtp" {
+		t.Fatalf("provider = %q, want smtp", retries[0].Notification.Provider)
+	}
+	if retries[0].Incident.ID != incidentID {
+		t.Fatalf("incident id = %d, want %d", retries[0].Incident.ID, incidentID)
+	}
+	if retries[0].CurrentState.MonitorID != "home" || retries[0].CurrentState.URL == "" {
+		t.Fatalf("current state = %+v, want home state", retries[0].CurrentState)
+	}
+}
+
+func TestListDueAlertNotificationRetriesExcludesLaterSuccess(t *testing.T) {
+	store, incidentID, now := storeWithIncident(t)
+	defer store.Close()
+
+	if err := store.SaveAlertNotifications(context.Background(), []AlertNotification{
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary failure",
+			NextRetryAt:   now.Add(-time.Minute),
+		},
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "home",
+			Provider:      "smtp",
+			AttemptedAt:   now.Add(time.Second),
+			AttemptNumber: 2,
+			Success:       true,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retries, err := store.ListDueAlertNotificationRetries(context.Background(), now.Add(2*time.Second), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retries) != 0 {
+		t.Fatalf("retry count = %d, want 0", len(retries))
+	}
+}
+
+func storeWithIncident(t *testing.T) (*Store, int64, time.Time) {
+	t.Helper()
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	next := MonitorState{
+		MonitorID:              "home",
+		Name:                   "Home",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 state.Down,
+		ConsecutiveFailures:    3,
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "timeout",
+		LastObservedStatusCode: 0,
+		UpdatedAt:              now,
+	}
+	incidentID, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID: "home",
+		CheckedAt: now,
+		OK:        false,
+		Error:     "timeout",
+	}, next, &Incident{
+		MonitorID:  "home",
+		Name:       "Home",
+		Transition: state.Down,
+		ObservedAt: now,
+		Error:      "timeout",
+	})
+	if err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store, incidentID, now
 }

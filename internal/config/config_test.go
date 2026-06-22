@@ -33,6 +33,15 @@ monitors:
 	if cfg.Monitors[0].Timeout.Duration != 10*time.Second {
 		t.Fatalf("monitor timeout = %s, want 10s", cfg.Monitors[0].Timeout.Duration)
 	}
+	if cfg.Alerts.NotificationRetries.MaxAttempts != 3 {
+		t.Fatalf("retry max attempts = %d, want 3", cfg.Alerts.NotificationRetries.MaxAttempts)
+	}
+	if len(cfg.Alerts.NotificationRetries.Backoff) != 3 {
+		t.Fatalf("retry backoff count = %d, want 3", len(cfg.Alerts.NotificationRetries.Backoff))
+	}
+	if cfg.Alerts.NotificationRetries.Backoff[0].Duration != time.Minute {
+		t.Fatalf("first retry backoff = %s, want 1m", cfg.Alerts.NotificationRetries.Backoff[0].Duration)
+	}
 }
 
 func TestParseAcceptsMailtrapWithoutSMTP(t *testing.T) {
@@ -152,6 +161,33 @@ monitors:
 	}
 	message := err.Error()
 	for _, want := range []string{"scheme must be http or https", "expected_status_code"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("validation error %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestParseRejectsInvalidNotificationRetries(t *testing.T) {
+	_, err := Parse([]byte(`
+alerts:
+  notification_retries:
+    max_attempts: -1
+    backoff: [0s]
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	message := err.Error()
+	for _, want := range []string{"alerts.notification_retries.max_attempts must be positive", "alerts.notification_retries.backoff[0] must be positive"} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("validation error %q does not contain %q", message, want)
 		}

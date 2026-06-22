@@ -17,6 +17,11 @@ smtp:
 #   to:
 #     - ops@example.com
 
+alerts:
+  notification_retries:
+    max_attempts: 3
+    backoff: [1m, 5m, 15m]
+
 defaults:
   interval: 60s
   timeout: 10s

@@ -40,6 +40,18 @@ mailtrap:
 When `mailtrap.endpoint` is omitted, it defaults to
 `https://send.api.mailtrap.io/api/send`.
 
+Failed alert notification attempts are retried by the daemon. Retry policy is
+global:
+
+```yaml
+alerts:
+  notification_retries:
+    max_attempts: 3
+    backoff: [1m, 5m, 15m]
+```
+
+`max_attempts` includes the initial send attempt.
+
 Each monitor requires:
 
 - `id`: stable identifier used as the SQLite primary key for monitor state.

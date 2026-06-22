@@ -19,6 +19,7 @@ import (
 
 type IncidentSender interface {
 	SendIncident(incident storage.Incident, current storage.MonitorState) []SendResult
+	SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult
 	Providers() []string
 }
 
@@ -60,6 +61,17 @@ func (s MultiSender) SendIncident(incident storage.Incident, current storage.Mon
 	return results
 }
 
+func (s MultiSender) SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult {
+	for _, sender := range s.senders {
+		for _, senderProvider := range sender.Providers() {
+			if senderProvider == provider {
+				return sender.SendProvider(provider, incident, current)
+			}
+		}
+	}
+	return SendResult{Provider: provider, Error: fmt.Errorf("alert provider %q is not configured", provider)}
+}
+
 func (s MultiSender) Providers() []string {
 	providers := make([]string, 0, len(s.senders))
 	for _, sender := range s.senders {
@@ -81,6 +93,13 @@ func (e *Emailer) Providers() []string {
 }
 
 func (e *Emailer) SendIncident(incident storage.Incident, current storage.MonitorState) []SendResult {
+	return []SendResult{e.SendProvider("smtp", incident, current)}
+}
+
+func (e *Emailer) SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult {
+	if provider != "smtp" {
+		return SendResult{Provider: provider, Error: fmt.Errorf("smtp sender cannot send provider %q", provider)}
+	}
 	subject, body := buildIncidentContent(incident, current)
 	message := buildMessage(e.cfg.From, e.cfg.To, subject, body)
 	addr := net.JoinHostPort(e.cfg.Host, fmt.Sprintf("%d", e.cfg.Port))
@@ -92,13 +111,13 @@ func (e *Emailer) SendIncident(incident storage.Incident, current storage.Monito
 
 	switch e.cfg.TLS {
 	case "tls":
-		return []SendResult{{Provider: "smtp", Error: e.sendTLS(addr, auth, message)}}
+		return SendResult{Provider: "smtp", Error: e.sendTLS(addr, auth, message)}
 	case "starttls":
-		return []SendResult{{Provider: "smtp", Error: e.sendStartTLS(addr, auth, message)}}
+		return SendResult{Provider: "smtp", Error: e.sendStartTLS(addr, auth, message)}
 	case "none":
-		return []SendResult{{Provider: "smtp", Error: smtp.SendMail(addr, auth, e.cfg.From, e.cfg.To, message)}}
+		return SendResult{Provider: "smtp", Error: smtp.SendMail(addr, auth, e.cfg.From, e.cfg.To, message)}
 	default:
-		return []SendResult{{Provider: "smtp", Error: fmt.Errorf("unsupported smtp.tls mode %q", e.cfg.TLS)}}
+		return SendResult{Provider: "smtp", Error: fmt.Errorf("unsupported smtp.tls mode %q", e.cfg.TLS)}
 	}
 }
 
@@ -196,8 +215,14 @@ func (e *MailtrapEmailer) Providers() []string {
 }
 
 func (e *MailtrapEmailer) SendIncident(incident storage.Incident, current storage.MonitorState) []SendResult {
-	err := e.sendIncident(incident, current)
-	return []SendResult{{Provider: "mailtrap", Error: err}}
+	return []SendResult{e.SendProvider("mailtrap", incident, current)}
+}
+
+func (e *MailtrapEmailer) SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult {
+	if provider != "mailtrap" {
+		return SendResult{Provider: provider, Error: fmt.Errorf("mailtrap sender cannot send provider %q", provider)}
+	}
+	return SendResult{Provider: "mailtrap", Error: e.sendIncident(incident, current)}
 }
 
 func (e *MailtrapEmailer) sendIncident(incident storage.Incident, current storage.MonitorState) error {

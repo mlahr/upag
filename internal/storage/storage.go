@@ -49,13 +49,22 @@ type Incident struct {
 }
 
 type AlertNotification struct {
-	ID          int64
-	IncidentID  int64
-	MonitorID   string
-	Provider    string
-	AttemptedAt time.Time
-	Success     bool
-	Error       string
+	ID             int64
+	IncidentID     int64
+	MonitorID      string
+	Provider       string
+	AttemptedAt    time.Time
+	AttemptNumber  int
+	Success        bool
+	Error          string
+	NextRetryAt    time.Time
+	RetryExhausted bool
+}
+
+type AlertNotificationRetry struct {
+	Notification AlertNotification
+	Incident     Incident
+	CurrentState MonitorState
 }
 
 func Open(path string) (*Store, error) {
@@ -121,8 +130,11 @@ func (s *Store) migrate(ctx context.Context) error {
 			monitor_id TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			attempted_at TEXT NOT NULL,
+			attempt_number INTEGER NOT NULL DEFAULT 1,
 			success INTEGER NOT NULL,
 			error TEXT NOT NULL,
+			next_retry_at TEXT,
+			retry_exhausted INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (incident_id) REFERENCES incidents(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident
@@ -137,7 +149,53 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate sqlite database: %w", err)
 		}
 	}
+	if err := s.ensureAlertNotificationColumns(ctx); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureAlertNotificationColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "alert_notifications")
+	if err != nil {
+		return err
+	}
+	alterStatements := map[string]string{
+		"attempt_number":  `ALTER TABLE alert_notifications ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1`,
+		"next_retry_at":   `ALTER TABLE alert_notifications ADD COLUMN next_retry_at TEXT`,
+		"retry_exhausted": `ALTER TABLE alert_notifications ADD COLUMN retry_exhausted INTEGER NOT NULL DEFAULT 0`,
+	}
+	for column, statement := range alterStatements {
+		if !columns[column] {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate alert_notifications.%s: %w", column, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name string
+		var typ string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		columns[name] = true
+	}
+	return columns, rows.Err()
 }
 
 func (s *Store) GetState(ctx context.Context, monitorID string) (MonitorState, bool, error) {
@@ -222,11 +280,16 @@ func (s *Store) SaveAlertNotifications(ctx context.Context, notifications []Aler
 	}
 	defer tx.Rollback()
 	for _, notification := range notifications {
+		attemptNumber := notification.AttemptNumber
+		if attemptNumber == 0 {
+			attemptNumber = 1
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO alert_notifications
-			(incident_id, monitor_id, provider, attempted_at, success, error)
-			VALUES (?, ?, ?, ?, ?, ?)`,
+			(incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			notification.IncidentID, notification.MonitorID, notification.Provider, formatTime(notification.AttemptedAt),
-			boolInt(notification.Success), notification.Error); err != nil {
+			attemptNumber, boolInt(notification.Success), notification.Error, formatTime(notification.NextRetryAt),
+			boolInt(notification.RetryExhausted)); err != nil {
 			return fmt.Errorf("insert alert notification: %w", err)
 		}
 	}
@@ -301,7 +364,7 @@ func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertN
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT
-		id, incident_id, monitor_id, provider, attempted_at, success, error
+		id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted
 		FROM alert_notifications
 		ORDER BY attempted_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
@@ -313,15 +376,94 @@ func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertN
 	for rows.Next() {
 		var notification AlertNotification
 		var attempted string
+		var nextRetry sql.NullString
 		var success int
-		if err := rows.Scan(&notification.ID, &notification.IncidentID, &notification.MonitorID, &notification.Provider, &attempted, &success, &notification.Error); err != nil {
+		var retryExhausted int
+		if err := rows.Scan(&notification.ID, &notification.IncidentID, &notification.MonitorID, &notification.Provider, &attempted, &notification.AttemptNumber, &success, &notification.Error, &nextRetry, &retryExhausted); err != nil {
 			return nil, err
 		}
 		notification.AttemptedAt = parseTime(attempted)
 		notification.Success = intBool(success)
+		if nextRetry.Valid {
+			notification.NextRetryAt = parseTime(nextRetry.String)
+		}
+		notification.RetryExhausted = intBool(retryExhausted)
 		notifications = append(notifications, notification)
 	}
 	return notifications, rows.Err()
+}
+
+func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Time, limit int) ([]AlertNotificationRetry, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number,
+		n.success, n.error, n.next_retry_at, n.retry_exhausted,
+		i.id, i.monitor_id, i.name, i.transition, i.observed_at, i.error, i.status_code,
+		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.consecutive_failures,
+		s.last_checked_at, s.last_success_at, s.last_failure_at, s.last_error,
+		s.last_observed_status_code, s.updated_at
+		FROM alert_notifications n
+		INNER JOIN incidents i ON i.id = n.incident_id
+		INNER JOIN monitor_states s ON s.monitor_id = n.monitor_id
+		WHERE n.success = 0
+			AND n.retry_exhausted = 0
+			AND n.next_retry_at != ''
+			AND n.next_retry_at <= ?
+			AND NOT EXISTS (
+				SELECT 1 FROM alert_notifications newer
+				WHERE newer.incident_id = n.incident_id
+					AND newer.provider = n.provider
+					AND newer.id > n.id
+			)
+			AND NOT EXISTS (
+				SELECT 1 FROM alert_notifications successful
+				WHERE successful.incident_id = n.incident_id
+					AND successful.provider = n.provider
+					AND successful.success = 1
+					AND successful.id > n.id
+			)
+		ORDER BY n.next_retry_at ASC, n.id ASC LIMIT ?`, formatTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var retries []AlertNotificationRetry
+	for rows.Next() {
+		var retry AlertNotificationRetry
+		var notificationAttempted string
+		var notificationNextRetry sql.NullString
+		var notificationSuccess, retryExhausted int
+		var incidentObserved string
+		var stateLastChecked, stateLastSuccess, stateLastFailure, stateUpdated string
+		if err := rows.Scan(
+			&retry.Notification.ID, &retry.Notification.IncidentID, &retry.Notification.MonitorID, &retry.Notification.Provider,
+			&notificationAttempted, &retry.Notification.AttemptNumber, &notificationSuccess, &retry.Notification.Error,
+			&notificationNextRetry, &retryExhausted,
+			&retry.Incident.ID, &retry.Incident.MonitorID, &retry.Incident.Name, &retry.Incident.Transition,
+			&incidentObserved, &retry.Incident.Error, &retry.Incident.StatusCode,
+			&retry.CurrentState.MonitorID, &retry.CurrentState.Name, &retry.CurrentState.URL, &retry.CurrentState.ExpectedStatusCode,
+			&retry.CurrentState.Status, &retry.CurrentState.ConsecutiveFailures, &stateLastChecked, &stateLastSuccess,
+			&stateLastFailure, &retry.CurrentState.LastError, &retry.CurrentState.LastObservedStatusCode, &stateUpdated,
+		); err != nil {
+			return nil, err
+		}
+		retry.Notification.AttemptedAt = parseTime(notificationAttempted)
+		retry.Notification.Success = intBool(notificationSuccess)
+		if notificationNextRetry.Valid {
+			retry.Notification.NextRetryAt = parseTime(notificationNextRetry.String)
+		}
+		retry.Notification.RetryExhausted = intBool(retryExhausted)
+		retry.Incident.ObservedAt = parseTime(incidentObserved)
+		retry.CurrentState.LastCheckedAt = parseTime(stateLastChecked)
+		retry.CurrentState.LastSuccessAt = parseTime(stateLastSuccess)
+		retry.CurrentState.LastFailureAt = parseTime(stateLastFailure)
+		retry.CurrentState.UpdatedAt = parseTime(stateUpdated)
+		retries = append(retries, retry)
+	}
+	return retries, rows.Err()
 }
 
 func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
