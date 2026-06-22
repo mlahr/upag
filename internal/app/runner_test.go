@@ -313,6 +313,80 @@ func TestProbeRecordsFailedResultAfterRetriesExhausted(t *testing.T) {
 	}
 }
 
+func TestProbeSuppressesMonitorTransitionWhenObserverDown(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	if _, err := store.SaveObserverCheck(ctx, storage.ObserverState{
+		Status:              state.ObserverDown,
+		ConsecutiveFailures: 3,
+		LastCheckedAt:       now,
+		LastFailureAt:       now,
+		LastError:           "observer timeout",
+		UpdatedAt:           now,
+	}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	mon := config.MonitorConfig{
+		ID:                 "home",
+		Name:               "Home",
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		Interval:           config.Duration{Duration: time.Minute},
+	}
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := &fakeIncidentSender{}
+	runner.emailer = sender
+
+	runner.probe(ctx, 1, 0, 0, mon)
+
+	if got := sender.count(); got != 0 {
+		t.Fatalf("sent alerts = %d, want 0", got)
+	}
+	if _, ok, err := store.GetState(ctx, "home"); err != nil {
+		t.Fatal(err)
+	} else if ok {
+		t.Fatal("monitor state exists, want suppressed probe without state transition")
+	}
+	var ok int
+	var suppressed int
+	if err := queryProbeSuppression(ctx, dbPath, "home", &ok, &suppressed); err != nil {
+		t.Fatal(err)
+	}
+	if ok != 0 || suppressed != 1 {
+		t.Fatalf("stored probe ok=%d observer_suppressed=%d, want 0 and 1", ok, suppressed)
+	}
+	incidents, err := store.ListIncidents(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 0 {
+		t.Fatalf("incidents = %+v, want none", incidents)
+	}
+	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retained := stats["home"].Retained; retained.TotalChecks != 0 || retained.FailedChecks != 0 || retained.DowntimeSeconds != 0 {
+		t.Fatalf("retained uptime = %+v, want suppressed probe excluded", retained)
+	}
+}
+
 func TestMonitorInitialDelayIsDeterministicAndInsideInterval(t *testing.T) {
 	interval := 250 * time.Millisecond
 	first := monitorInitialDelay("home", interval)
@@ -563,6 +637,15 @@ func queryProbeAttempt(ctx context.Context, dbPath string, monitorID string, ok 
 	}
 	defer db.Close()
 	return db.QueryRowContext(ctx, `SELECT ok, attempt_count FROM probe_results WHERE monitor_id = ?`, monitorID).Scan(ok, attemptCount)
+}
+
+func queryProbeSuppression(ctx context.Context, dbPath string, monitorID string, ok *int, suppressed *int) error {
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.QueryRowContext(ctx, `SELECT ok, observer_suppressed FROM probe_results WHERE monitor_id = ?`, monitorID).Scan(ok, suppressed)
 }
 
 type fakeIncidentSender struct {

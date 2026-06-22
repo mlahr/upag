@@ -13,6 +13,8 @@ transition DOWN or UP.
 - Per-monitor intervals and timeouts with global defaults.
 - Deterministically staggered monitor scheduling to avoid synchronized probe
   bursts.
+- Observer connectivity checks that suppress per-monitor DOWN transitions when
+  the monitoring host itself loses outbound network connectivity.
 - SQLite persistence for monitor state, probe history, incidents, and alert
   notification attempts, with automatic startup migrations.
 - Email incident alerts through SMTP, the Mailtrap Transactional Email API, or
@@ -194,6 +196,14 @@ http:
   address: 127.0.0.1
   port: 0
 
+observer:
+  enabled: true
+  interval: 30s
+  timeout: 5s
+  failure_threshold: 3
+  recovery_threshold: 1
+  required_successes: 1
+
 defaults:
   interval: 60s
   timeout: 10s
@@ -261,8 +271,8 @@ The status endpoints do not perform authentication.
 Endpoints:
 
 - `GET /health`: daemon liveness metadata.
-- `GET /status`: daemon metadata, monitor state, per-monitor uptime
-  statistics, and actionable alert delivery failures.
+- `GET /status`: daemon metadata, observer connectivity, monitor state,
+  per-monitor uptime statistics, and actionable alert delivery failures.
 
 Example `GET /health` response:
 
@@ -283,6 +293,29 @@ Example `GET /status` response:
   "started_at": "2026-06-22T02:15:04.123456789Z",
   "config_path": "/etc/upag/config.yaml",
   "monitor_count": 1,
+  "observer": {
+    "status": "OBSERVER_UP",
+    "consecutive_failures": 0,
+    "consecutive_successes": 12,
+    "last_checked_at": "2026-06-22T02:20:00.123456789Z",
+    "last_success_at": "2026-06-22T02:20:00.123456789Z",
+    "last_failure_at": null,
+    "last_error": "",
+    "updated_at": "2026-06-22T02:20:00.123456789Z",
+    "sentinels": [
+      {
+        "id": "gstatic",
+        "name": "Google connectivity check",
+        "url": "https://www.gstatic.com/generate_204",
+        "ok": true,
+        "expected_status_code": 204,
+        "observed_status_code": 204,
+        "latency_ms": 12,
+        "error": "",
+        "checked_at": "2026-06-22T02:20:00.123456789Z"
+      }
+    ]
+  },
   "monitors": [
     {
       "id": "homepage",
@@ -400,6 +433,47 @@ to two decimal places. For a window with no reportable seconds,
 - `failure_threshold`: consecutive failed checks required before a monitor
   transitions DOWN. Defaults to `3`.
 - `history_retention`: retained probe history duration. Defaults to `720h`.
+
+### Observer Connectivity
+
+The observer is the `upag` host itself. Observer connectivity checks determine
+whether that host can reach the wider network. When observer connectivity is
+`OBSERVER_DOWN`, failed monitor probes are stored with
+`observer_suppressed=true`, but they do not change monitor state, create
+per-monitor incidents, or count as reported downtime.
+
+By default, observer checks run every `30s`, require `1` successful sentinel out
+of `3`, transition to `OBSERVER_DOWN` after `3` consecutive unhealthy observer
+checks, and transition to `OBSERVER_UP` after `1` healthy observer check.
+
+Leave `observer.sentinels` omitted or empty to use built-in public connectivity
+checks:
+
+- `gstatic`: `https://www.gstatic.com/generate_204`, expecting HTTP `204`
+- `cloudflare`: `https://cp.cloudflare.com/generate_204`, expecting HTTP `204`
+- `msftconnecttest`: `http://www.msftconnecttest.com/connecttest.txt`,
+  expecting HTTP `200`
+
+Configure `observer.sentinels` to replace the built-ins:
+
+```yaml
+observer:
+  enabled: true
+  interval: 30s
+  timeout: 5s
+  failure_threshold: 3
+  recovery_threshold: 1
+  required_successes: 1
+  sentinels:
+    - id: edge
+      name: Edge connectivity
+      url: https://example.com/health
+      expected_status_code: 200
+```
+
+Observer transitions create incidents with monitor ID `__observer__` and
+transitions `OBSERVER_DOWN` or `OBSERVER_UP`. They use the same alert providers
+and alert retry policy as monitor incidents.
 
 ### Monitors
 

@@ -17,6 +17,7 @@ type Config struct {
 	Alerts   AlertsConfig    `yaml:"alerts"`
 	SMTP     SMTPConfig      `yaml:"smtp"`
 	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
+	Observer ObserverConfig  `yaml:"observer"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
 }
@@ -52,6 +53,24 @@ type MailtrapConfig struct {
 	From     string   `yaml:"from"`
 	FromName string   `yaml:"from_name"`
 	To       []string `yaml:"to"`
+}
+
+type ObserverConfig struct {
+	Enabled           bool             `yaml:"enabled"`
+	Interval          Duration         `yaml:"interval"`
+	Timeout           Duration         `yaml:"timeout"`
+	FailureThreshold  int              `yaml:"failure_threshold"`
+	RecoveryThreshold int              `yaml:"recovery_threshold"`
+	RequiredSuccesses int              `yaml:"required_successes"`
+	Sentinels         []SentinelConfig `yaml:"sentinels"`
+	enabledSet        bool
+}
+
+type SentinelConfig struct {
+	ID                 string `yaml:"id"`
+	Name               string `yaml:"name"`
+	URL                string `yaml:"url"`
+	ExpectedStatusCode int    `yaml:"expected_status_code"`
 }
 
 type Defaults struct {
@@ -128,6 +147,32 @@ func (d *Defaults) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func (o *ObserverConfig) UnmarshalYAML(value *yaml.Node) error {
+	raw := struct {
+		Enabled           *bool            `yaml:"enabled"`
+		Interval          Duration         `yaml:"interval"`
+		Timeout           Duration         `yaml:"timeout"`
+		FailureThreshold  int              `yaml:"failure_threshold"`
+		RecoveryThreshold int              `yaml:"recovery_threshold"`
+		RequiredSuccesses int              `yaml:"required_successes"`
+		Sentinels         []SentinelConfig `yaml:"sentinels"`
+	}{}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.Enabled != nil {
+		o.Enabled = *raw.Enabled
+		o.enabledSet = true
+	}
+	o.Interval = raw.Interval
+	o.Timeout = raw.Timeout
+	o.FailureThreshold = raw.FailureThreshold
+	o.RecoveryThreshold = raw.RecoveryThreshold
+	o.RequiredSuccesses = raw.RequiredSuccesses
+	o.Sentinels = raw.Sentinels
+	return nil
+}
+
 func LoadFile(path string) (Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -189,6 +234,27 @@ func (c *Config) ApplyDefaults() {
 	if c.Mailtrap.Endpoint == "" {
 		c.Mailtrap.Endpoint = "https://send.api.mailtrap.io/api/send"
 	}
+	if !c.Observer.enabledSet {
+		c.Observer.Enabled = true
+	}
+	if c.Observer.Interval.Duration == 0 {
+		c.Observer.Interval.Duration = 30 * time.Second
+	}
+	if c.Observer.Timeout.Duration == 0 {
+		c.Observer.Timeout.Duration = 5 * time.Second
+	}
+	if c.Observer.FailureThreshold == 0 {
+		c.Observer.FailureThreshold = 3
+	}
+	if c.Observer.RecoveryThreshold == 0 {
+		c.Observer.RecoveryThreshold = 1
+	}
+	if c.Observer.RequiredSuccesses == 0 {
+		c.Observer.RequiredSuccesses = 1
+	}
+	if c.Observer.Enabled && len(c.Observer.Sentinels) == 0 {
+		c.Observer.Sentinels = BuiltInObserverSentinels()
+	}
 	for i := range c.Monitors {
 		if c.Monitors[i].Interval.Duration == 0 {
 			c.Monitors[i].Interval = c.Defaults.Interval
@@ -199,6 +265,29 @@ func (c *Config) ApplyDefaults() {
 		if len(c.Monitors[i].ResponseBody.Command) != 0 && c.Monitors[i].ResponseBody.CommandTimeout.Duration == 0 {
 			c.Monitors[i].ResponseBody.CommandTimeout.Duration = 10 * time.Second
 		}
+	}
+}
+
+func BuiltInObserverSentinels() []SentinelConfig {
+	return []SentinelConfig{
+		{
+			ID:                 "gstatic",
+			Name:               "Google connectivity check",
+			URL:                "https://www.gstatic.com/generate_204",
+			ExpectedStatusCode: 204,
+		},
+		{
+			ID:                 "cloudflare",
+			Name:               "Cloudflare connectivity check",
+			URL:                "https://cp.cloudflare.com/generate_204",
+			ExpectedStatusCode: 204,
+		},
+		{
+			ID:                 "msftconnecttest",
+			Name:               "Microsoft connectivity check",
+			URL:                "http://www.msftconnecttest.com/connecttest.txt",
+			ExpectedStatusCode: 200,
+		},
 	}
 }
 
@@ -283,6 +372,51 @@ func (c Config) Validate() error {
 	}
 	if err := validateHTTPAddress(c.HTTP.Address); err != nil {
 		errs = append(errs, fmt.Errorf("http.address: %w", err))
+	}
+	if c.Observer.Interval.Duration <= 0 {
+		errs = append(errs, errors.New("observer.interval must be positive"))
+	}
+	if c.Observer.Timeout.Duration <= 0 {
+		errs = append(errs, errors.New("observer.timeout must be positive"))
+	}
+	if c.Observer.FailureThreshold <= 0 {
+		errs = append(errs, errors.New("observer.failure_threshold must be positive"))
+	}
+	if c.Observer.RecoveryThreshold <= 0 {
+		errs = append(errs, errors.New("observer.recovery_threshold must be positive"))
+	}
+	if c.Observer.RequiredSuccesses <= 0 {
+		errs = append(errs, errors.New("observer.required_successes must be positive"))
+	}
+	if c.Observer.Enabled {
+		if len(c.Observer.Sentinels) == 0 {
+			errs = append(errs, errors.New("observer.sentinels must contain at least one sentinel when observer is enabled"))
+		}
+		if c.Observer.RequiredSuccesses > len(c.Observer.Sentinels) {
+			errs = append(errs, errors.New("observer.required_successes must be less than or equal to the number of observer.sentinels"))
+		}
+	}
+	sentinelIDs := map[string]struct{}{}
+	for i, sentinel := range c.Observer.Sentinels {
+		prefix := fmt.Sprintf("observer.sentinels[%d]", i)
+		if sentinel.ID == "" {
+			errs = append(errs, fmt.Errorf("%s.id is required", prefix))
+		}
+		if _, ok := sentinelIDs[sentinel.ID]; sentinel.ID != "" && ok {
+			errs = append(errs, fmt.Errorf("%s.id %q is duplicated", prefix, sentinel.ID))
+		}
+		sentinelIDs[sentinel.ID] = struct{}{}
+		if sentinel.Name == "" {
+			errs = append(errs, fmt.Errorf("%s.name is required", prefix))
+		}
+		if sentinel.URL == "" {
+			errs = append(errs, fmt.Errorf("%s.url is required", prefix))
+		} else if err := validateHTTPURL(sentinel.URL); err != nil {
+			errs = append(errs, fmt.Errorf("%s.url: %w", prefix, err))
+		}
+		if sentinel.ExpectedStatusCode < 100 || sentinel.ExpectedStatusCode > 599 {
+			errs = append(errs, fmt.Errorf("%s.expected_status_code must be from 100 through 599", prefix))
+		}
 	}
 	if len(c.Monitors) == 0 {
 		errs = append(errs, errors.New("monitors must contain at least one monitor"))

@@ -810,6 +810,59 @@ func TestListDueAlertNotificationRetries(t *testing.T) {
 	}
 }
 
+func TestListDueAlertNotificationRetriesIncludesObserverIncident(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	incident := &Incident{
+		MonitorID:  "__observer__",
+		Name:       "Observer Connectivity",
+		Transition: state.ObserverDown,
+		ObservedAt: now,
+		Error:      "observer timeout",
+	}
+	incidentID, err := store.SaveObserverCheck(context.Background(), ObserverState{
+		Status:              state.ObserverDown,
+		ConsecutiveFailures: 3,
+		LastCheckedAt:       now,
+		LastFailureAt:       now,
+		LastError:           "observer timeout",
+		UpdatedAt:           now,
+	}, nil, incident)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAlertNotifications(context.Background(), []AlertNotification{
+		{
+			IncidentID:    incidentID,
+			MonitorID:     "__observer__",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary failure",
+			NextRetryAt:   now.Add(-time.Minute),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	retries, err := store.ListDueAlertNotificationRetries(context.Background(), now, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retries) != 1 {
+		t.Fatalf("retry count = %d, want 1", len(retries))
+	}
+	if retries[0].CurrentState.MonitorID != "__observer__" || retries[0].CurrentState.Status != state.ObserverDown || retries[0].CurrentState.LastError != "observer timeout" {
+		t.Fatalf("current state = %+v, want observer state", retries[0].CurrentState)
+	}
+}
+
 func TestListDueAlertNotificationRetriesExcludesLaterSuccess(t *testing.T) {
 	store, incidentID, now := storeWithIncident(t)
 	defer store.Close()

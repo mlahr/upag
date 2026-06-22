@@ -45,6 +45,30 @@ type ProbeResult struct {
 	AttemptCount        int
 	Error               string
 	MaintenanceWindowID int64
+	ObserverSuppressed  bool
+}
+
+type ObserverState struct {
+	Status               string
+	ConsecutiveFailures  int
+	ConsecutiveSuccesses int
+	LastCheckedAt        time.Time
+	LastSuccessAt        time.Time
+	LastFailureAt        time.Time
+	LastError            string
+	UpdatedAt            time.Time
+}
+
+type ObserverSentinelResult struct {
+	SentinelID         string
+	Name               string
+	URL                string
+	ExpectedStatusCode int
+	OK                 bool
+	ObservedStatusCode int
+	LatencyMS          int64
+	Error              string
+	CheckedAt          time.Time
 }
 
 type UptimeStats struct {
@@ -162,6 +186,7 @@ func migrations() []migration {
 		{ID: "0004_monitor_status_before_maintenance", Fn: migrateMonitorStatusBeforeMaintenance},
 		{ID: "0005_probe_response_time_and_maintenance", Fn: migrateProbeResponseTimeAndMaintenance},
 		{ID: "0006_probe_attempt_count", Fn: migrateProbeAttemptCount},
+		{ID: "0007_observer_health", Fn: migrateObserverHealth},
 	}
 }
 
@@ -310,6 +335,36 @@ func migrateProbeAttemptCount(ctx context.Context, tx *sql.Tx) error {
 	return addColumnIfMissing(ctx, tx, "probe_results", "attempt_count", `ALTER TABLE probe_results ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1`)
 }
 
+func migrateObserverHealth(ctx context.Context, tx *sql.Tx) error {
+	if err := addColumnIfMissing(ctx, tx, "probe_results", "observer_suppressed", `ALTER TABLE probe_results ADD COLUMN observer_suppressed INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	return execMigrationStatements(ctx, tx, []string{
+		`CREATE TABLE IF NOT EXISTS observer_state (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			status TEXT NOT NULL,
+			consecutive_failures INTEGER NOT NULL,
+			consecutive_successes INTEGER NOT NULL,
+			last_checked_at TEXT,
+			last_success_at TEXT,
+			last_failure_at TEXT,
+			last_error TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS observer_sentinel_results (
+			sentinel_id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			expected_status_code INTEGER NOT NULL,
+			ok INTEGER NOT NULL,
+			observed_status_code INTEGER NOT NULL,
+			latency_ms INTEGER NOT NULL,
+			error TEXT NOT NULL,
+			checked_at TEXT NOT NULL
+		)`,
+	})
+}
+
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -392,9 +447,9 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		attemptCount = 1
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID)); err != nil {
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed)); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
@@ -420,6 +475,112 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		formatTime(next.LastCheckedAt), formatTime(next.LastSuccessAt), formatTime(next.LastFailureAt), next.LastError,
 		next.LastObservedStatusCode, formatTime(next.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
+	}
+
+	var incidentID int64
+	if incident != nil {
+		result, err := tx.ExecContext(ctx, `INSERT INTO incidents
+			(monitor_id, name, transition, observed_at, error, status_code)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			incident.MonitorID, incident.Name, incident.Transition, formatTime(incident.ObservedAt), incident.Error, incident.StatusCode)
+		if err != nil {
+			return 0, fmt.Errorf("insert incident: %w", err)
+		}
+		incidentID, err = result.LastInsertId()
+		if err != nil {
+			return 0, fmt.Errorf("get incident id: %w", err)
+		}
+		incident.ID = incidentID
+	}
+
+	return incidentID, tx.Commit()
+}
+
+func (s *Store) SaveProbeResult(ctx context.Context, result ProbeResult) error {
+	attemptCount := result.AttemptCount
+	if attemptCount == 0 {
+		attemptCount = 1
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO probe_results
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed))
+	if err != nil {
+		return fmt.Errorf("insert probe result: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetObserverState(ctx context.Context) (ObserverState, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT
+		status, consecutive_failures, consecutive_successes, last_checked_at,
+		last_success_at, last_failure_at, last_error, updated_at
+		FROM observer_state WHERE id = 1`)
+	state, err := scanObserverState(row)
+	if err == sql.ErrNoRows {
+		return ObserverState{}, false, nil
+	}
+	if err != nil {
+		return ObserverState{}, false, err
+	}
+	return state, true, nil
+}
+
+func (s *Store) ListObserverSentinelResults(ctx context.Context) ([]ObserverSentinelResult, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
+		latency_ms, error, checked_at
+		FROM observer_sentinel_results ORDER BY sentinel_id ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ObserverSentinelResult
+	for rows.Next() {
+		result, err := scanObserverSentinelResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) SaveObserverCheck(ctx context.Context, state ObserverState, results []ObserverSentinelResult, incident *Incident) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `INSERT INTO observer_state
+		(id, status, consecutive_failures, consecutive_successes, last_checked_at,
+		 last_success_at, last_failure_at, last_error, updated_at)
+		VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET
+			status = excluded.status,
+			consecutive_failures = excluded.consecutive_failures,
+			consecutive_successes = excluded.consecutive_successes,
+			last_checked_at = excluded.last_checked_at,
+			last_success_at = excluded.last_success_at,
+			last_failure_at = excluded.last_failure_at,
+			last_error = excluded.last_error,
+			updated_at = excluded.updated_at`,
+		state.Status, state.ConsecutiveFailures, state.ConsecutiveSuccesses, formatTime(state.LastCheckedAt),
+		formatTime(state.LastSuccessAt), formatTime(state.LastFailureAt), state.LastError, formatTime(state.UpdatedAt)); err != nil {
+		return 0, fmt.Errorf("save observer state: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM observer_sentinel_results`); err != nil {
+		return 0, fmt.Errorf("replace observer sentinel results: %w", err)
+	}
+	for _, result := range results {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO observer_sentinel_results
+			(sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, boolInt(result.OK),
+			result.ObservedStatusCode, result.LatencyMS, result.Error, formatTime(result.CheckedAt)); err != nil {
+			return 0, fmt.Errorf("save observer sentinel result: %w", err)
+		}
 	}
 
 	var incidentID int64
@@ -528,12 +689,12 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThres
 
 func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
 	query := `SELECT monitor_id,
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL THEN ok ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0),
-			MIN(CASE WHEN maintenance_window_id IS NULL THEN checked_at ELSE NULL END),
-			MAX(CASE WHEN maintenance_window_id IS NULL THEN checked_at ELSE NULL END)
+			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END),
+			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END)
 		FROM probe_results`
 	args := []any{}
 	if !cutoff.IsZero() {
@@ -636,6 +797,7 @@ func (s *Store) listReportableUptimeProbes(ctx context.Context) ([]uptimeProbe, 
 	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, checked_at, ok
 		FROM probe_results
 		WHERE maintenance_window_id IS NULL
+			AND observer_suppressed = 0
 		ORDER BY monitor_id ASC, checked_at ASC, id ASC`)
 	if err != nil {
 		return nil, err
@@ -792,6 +954,7 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 			LEFT JOIN monitor_states ON monitor_states.monitor_id = probe_results.monitor_id
 			WHERE probe_results.ok = 0
 				AND probe_results.maintenance_window_id IS NULL
+				AND probe_results.observer_suppressed = 0
 				AND NOT EXISTS (
 					SELECT 1 FROM incidents
 					WHERE incidents.monitor_id = probe_results.monitor_id
@@ -890,12 +1053,15 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number,
 		n.success, n.error, n.next_retry_at, n.retry_exhausted,
 		i.id, i.monitor_id, i.name, i.transition, i.observed_at, i.error, i.status_code,
-		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.status_before_maintenance, s.consecutive_failures,
-		s.last_checked_at, s.last_success_at, s.last_failure_at, s.last_error,
-		s.last_observed_status_code, s.updated_at
+		COALESCE(s.monitor_id, i.monitor_id), COALESCE(s.name, i.name), COALESCE(s.url, ''), COALESCE(s.expected_status_code, 0),
+		COALESCE(s.status, o.status, ''), COALESCE(s.status_before_maintenance, ''), COALESCE(s.consecutive_failures, o.consecutive_failures, 0),
+		COALESCE(s.last_checked_at, o.last_checked_at, ''), COALESCE(s.last_success_at, o.last_success_at, ''),
+		COALESCE(s.last_failure_at, o.last_failure_at, ''), COALESCE(s.last_error, o.last_error, ''),
+		COALESCE(s.last_observed_status_code, 0), COALESCE(s.updated_at, o.updated_at, '')
 		FROM alert_notifications n
 		INNER JOIN incidents i ON i.id = n.incident_id
-		INNER JOIN monitor_states s ON s.monitor_id = n.monitor_id
+		LEFT JOIN monitor_states s ON s.monitor_id = n.monitor_id
+		LEFT JOIN observer_state o ON n.monitor_id = '__observer__'
 		WHERE n.success = 0
 			AND n.retry_exhausted = 0
 			AND n.next_retry_at != ''
@@ -1174,6 +1340,39 @@ func scanState(scanner rowScanner) (MonitorState, error) {
 	state.LastFailureAt = parseTime(lastFailure)
 	state.UpdatedAt = parseTime(updated)
 	return state, nil
+}
+
+func scanObserverState(scanner rowScanner) (ObserverState, error) {
+	var state ObserverState
+	var lastChecked, lastSuccess, lastFailure, updated string
+	err := scanner.Scan(
+		&state.Status, &state.ConsecutiveFailures, &state.ConsecutiveSuccesses,
+		&lastChecked, &lastSuccess, &lastFailure, &state.LastError, &updated,
+	)
+	if err != nil {
+		return ObserverState{}, err
+	}
+	state.LastCheckedAt = parseTime(lastChecked)
+	state.LastSuccessAt = parseTime(lastSuccess)
+	state.LastFailureAt = parseTime(lastFailure)
+	state.UpdatedAt = parseTime(updated)
+	return state, nil
+}
+
+func scanObserverSentinelResult(scanner rowScanner) (ObserverSentinelResult, error) {
+	var result ObserverSentinelResult
+	var ok int
+	var checkedAt string
+	err := scanner.Scan(
+		&result.SentinelID, &result.Name, &result.URL, &result.ExpectedStatusCode,
+		&ok, &result.ObservedStatusCode, &result.LatencyMS, &result.Error, &checkedAt,
+	)
+	if err != nil {
+		return ObserverSentinelResult{}, err
+	}
+	result.OK = intBool(ok)
+	result.CheckedAt = parseTime(checkedAt)
+	return result, nil
 }
 
 func formatTime(t time.Time) string {

@@ -17,6 +17,7 @@ import (
 	"upag/internal/checker"
 	"upag/internal/config"
 	"upag/internal/monitor"
+	"upag/internal/observer"
 	"upag/internal/state"
 	httpstatus "upag/internal/status"
 	"upag/internal/storage"
@@ -35,6 +36,7 @@ type Runner struct {
 	cfg           config.Config
 	emailer       alert.IncidentSender
 	workers       map[string]monitorWorker
+	observer      observerWorker
 	statusServer  *httpstatus.Server
 	statusAddress string
 	statusPort    int
@@ -50,6 +52,11 @@ type monitorWorkerConfig struct {
 	FailureThreshold  int
 	ProbeRetries      int
 	ProbeRetryBackoff time.Duration
+}
+
+type observerWorker struct {
+	cancel context.CancelFunc
+	config config.ObserverConfig
 }
 
 func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
@@ -150,6 +157,19 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 		r.workers[mon.ID] = monitorWorker{cancel: cancel, config: workerConfig}
 		go r.runMonitor(workerCtx, workerConfig.FailureThreshold, workerConfig.ProbeRetries, workerConfig.ProbeRetryBackoff, workerConfig.Monitor)
 	}
+	if cfg.Observer.Enabled {
+		if r.observer.cancel == nil || !reflect.DeepEqual(r.observer.config, cfg.Observer) {
+			if r.observer.cancel != nil {
+				r.observer.cancel()
+			}
+			observerCtx, cancel := context.WithCancel(parent)
+			r.observer = observerWorker{cancel: cancel, config: cfg.Observer}
+			go r.runObserver(observerCtx, cfg.Observer)
+		}
+	} else if r.observer.cancel != nil {
+		r.observer.cancel()
+		r.observer = observerWorker{}
+	}
 	r.cfg = cfg
 	r.emailer = alert.NewIncidentSender(cfg)
 }
@@ -236,6 +256,68 @@ func (r *Runner) stopAll() {
 		worker.cancel()
 		delete(r.workers, id)
 	}
+	if r.observer.cancel != nil {
+		r.observer.cancel()
+		r.observer = observerWorker{}
+	}
+}
+
+func (r *Runner) runObserver(ctx context.Context, cfg config.ObserverConfig) {
+	r.probeObserver(ctx, cfg)
+	ticker := time.NewTicker(cfg.Interval.Duration)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			r.probeObserver(ctx, cfg)
+		}
+	}
+}
+
+func (r *Runner) probeObserver(ctx context.Context, cfg config.ObserverConfig) {
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+	now := time.Now().UTC()
+	previous, ok, err := r.store.GetObserverState(ctx)
+	if err != nil {
+		r.logError("observer_state_read_failed", "error=%q", err)
+		return
+	}
+	check := observer.Check(ctx, cfg, previous, ok, now)
+	var incident *storage.Incident
+	if check.IncidentTransition != "" {
+		incident = &storage.Incident{
+			MonitorID:  observer.MonitorID,
+			Name:       observer.Name,
+			Transition: check.IncidentTransition,
+			ObservedAt: now,
+			Error:      check.State.LastError,
+		}
+	}
+	incidentID, err := r.store.SaveObserverCheck(ctx, check.State, check.SentinelResults, incident)
+	if err != nil {
+		r.logError("observer_state_write_failed", "error=%q", err)
+		return
+	}
+	healthy := check.State.Status != state.ObserverDown
+	r.logInfo("observer_check", "status=%q healthy=%t consecutive_failures=%d consecutive_successes=%d error=%q", check.State.Status, healthy, check.State.ConsecutiveFailures, check.State.ConsecutiveSuccesses, check.State.LastError)
+	if incident == nil {
+		return
+	}
+	r.logInfo("observer_transition", "transition=%q error=%q", incident.Transition, incident.Error)
+	current := storage.MonitorState{
+		MonitorID: observer.MonitorID,
+		Name:      observer.Name,
+		Status:    check.State.Status,
+		LastError: check.State.LastError,
+		UpdatedAt: now,
+	}
+	r.sendIncidentNotifications(ctx, incidentID, *incident, current)
 }
 
 func (r *Runner) runMonitor(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
@@ -315,6 +397,22 @@ func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, pro
 		Error:              result.Error,
 	}
 
+	observerState, observerKnown, err := r.store.GetObserverState(ctx)
+	if err != nil {
+		r.logError("observer_state_read_failed", "monitor_id=%q error=%q", mon.ID, err)
+		return
+	}
+	if observerKnown && observerState.Status == state.ObserverDown && !result.OK {
+		probeResult.ObserverSuppressed = true
+		if err := r.store.SaveProbeResult(ctx, probeResult); err != nil {
+			r.logError("probe_result_write_failed", "monitor_id=%q error=%q", mon.ID, err)
+			return
+		}
+		r.logProbe(mon, result, previous.Status)
+		r.logInfo("probe_suppressed_observer_down", "monitor_id=%q name=%q observer_status=%q error=%q", mon.ID, mon.Name, observerState.Status, observerState.LastError)
+		return
+	}
+
 	if inMaintenance {
 		next := maintenanceState(previous, result, mon, now)
 		probeResult.MaintenanceWindowID = activeMaintenance.ID
@@ -369,13 +467,7 @@ func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, pro
 	providers := strings.Join(emailer.Providers(), ",")
 	r.mu.Unlock()
 	if incident != nil {
-		attemptedAt := time.Now().UTC()
-		results := emailer.SendIncident(*incident, next)
-		notifications := alertNotifications(incidentID, mon.ID, attemptedAt, 1, r.retryPolicy(), results)
-		if err := r.store.SaveAlertNotifications(ctx, notifications); err != nil {
-			r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d error=%q", mon.ID, incidentID, err)
-		}
-		if err := alert.SendResultsError(results); err != nil {
+		if err := r.sendIncidentNotifications(ctx, incidentID, *incident, next); err != nil {
 			r.logAlertDecision("error", mon, previous.Status, next.Status, evaluation.IncidentTransition, providers, false, "", err)
 			return
 		}
@@ -383,6 +475,22 @@ func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, pro
 		return
 	}
 	r.logAlertDecision("info", mon, previous.Status, next.Status, "", providers, false, alertSkipReason(previous, next, result, threshold), nil)
+}
+
+func (r *Runner) sendIncidentNotifications(ctx context.Context, incidentID int64, incident storage.Incident, current storage.MonitorState) error {
+	r.mu.Lock()
+	emailer := r.emailer
+	r.mu.Unlock()
+	attemptedAt := time.Now().UTC()
+	results := emailer.SendIncident(incident, current)
+	notifications := alertNotifications(incidentID, incident.MonitorID, attemptedAt, 1, r.retryPolicy(), results)
+	if err := r.store.SaveAlertNotifications(ctx, notifications); err != nil {
+		r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d error=%q", incident.MonitorID, incidentID, err)
+	}
+	if err := alert.SendResultsError(results); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *Runner) checkWithRetries(ctx context.Context, mon config.MonitorConfig, probeRetries int, probeRetryBackoff time.Duration) (checker.Result, int) {

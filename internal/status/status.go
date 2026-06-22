@@ -21,6 +21,8 @@ type Store interface {
 	ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]storage.UptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
 	ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error)
+	GetObserverState(ctx context.Context) (storage.ObserverState, bool, error)
+	ListObserverSentinelResults(ctx context.Context) ([]storage.ObserverSentinelResult, error)
 }
 
 type Metadata struct {
@@ -119,12 +121,23 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
 		}
+		observerState, observerKnown, err := store.GetObserverState(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
+		observerSentinels, err := store.ListObserverSentinelResults(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
 		writeJSON(w, http.StatusOK, statusResponse{
 			Status:                "ok",
 			Version:               meta.Version,
 			StartedAt:             timePtr(meta.StartedAt),
 			ConfigPath:            meta.ConfigPath,
 			MonitorCount:          meta.MonitorCount,
+			Observer:              observerResponseFromState(observerState, observerKnown, observerSentinels),
 			Monitors:              monitorResponses(states, uptimeStats, maintenance, now),
 			AlertDeliveryFailures: alertFailureResponses(failures),
 		})
@@ -144,8 +157,33 @@ type statusResponse struct {
 	StartedAt             *time.Time             `json:"started_at"`
 	ConfigPath            string                 `json:"config_path"`
 	MonitorCount          int                    `json:"monitor_count"`
+	Observer              observerResponse       `json:"observer"`
 	Monitors              []monitorResponse      `json:"monitors"`
 	AlertDeliveryFailures []alertFailureResponse `json:"alert_delivery_failures"`
+}
+
+type observerResponse struct {
+	Status               string                     `json:"status"`
+	ConsecutiveFailures  int                        `json:"consecutive_failures"`
+	ConsecutiveSuccesses int                        `json:"consecutive_successes"`
+	LastCheckedAt        *time.Time                 `json:"last_checked_at"`
+	LastSuccessAt        *time.Time                 `json:"last_success_at"`
+	LastFailureAt        *time.Time                 `json:"last_failure_at"`
+	LastError            string                     `json:"last_error"`
+	UpdatedAt            *time.Time                 `json:"updated_at"`
+	Sentinels            []observerSentinelResponse `json:"sentinels"`
+}
+
+type observerSentinelResponse struct {
+	ID                 string     `json:"id"`
+	Name               string     `json:"name"`
+	URL                string     `json:"url"`
+	OK                 bool       `json:"ok"`
+	ExpectedStatusCode int        `json:"expected_status_code"`
+	ObservedStatusCode int        `json:"observed_status_code"`
+	LatencyMS          int64      `json:"latency_ms"`
+	Error              string     `json:"error"`
+	CheckedAt          *time.Time `json:"checked_at"`
 }
 
 type monitorResponse struct {
@@ -244,6 +282,42 @@ func monitorResponses(states []storage.MonitorState, uptimeStats map[string]stor
 			Uptime:                 uptimeResponseFromStats(stats),
 			ActiveMaintenance:      maintenanceResponsePtr(active[state.MonitorID]),
 			UpcomingMaintenance:    maintenanceResponses(upcoming[state.MonitorID]),
+		})
+	}
+	return responses
+}
+
+func observerResponseFromState(state storage.ObserverState, known bool, sentinels []storage.ObserverSentinelResult) observerResponse {
+	status := "UNKNOWN"
+	if known {
+		status = state.Status
+	}
+	return observerResponse{
+		Status:               status,
+		ConsecutiveFailures:  state.ConsecutiveFailures,
+		ConsecutiveSuccesses: state.ConsecutiveSuccesses,
+		LastCheckedAt:        timePtr(state.LastCheckedAt),
+		LastSuccessAt:        timePtr(state.LastSuccessAt),
+		LastFailureAt:        timePtr(state.LastFailureAt),
+		LastError:            state.LastError,
+		UpdatedAt:            timePtr(state.UpdatedAt),
+		Sentinels:            observerSentinelResponses(sentinels),
+	}
+}
+
+func observerSentinelResponses(results []storage.ObserverSentinelResult) []observerSentinelResponse {
+	responses := make([]observerSentinelResponse, 0, len(results))
+	for _, result := range results {
+		responses = append(responses, observerSentinelResponse{
+			ID:                 result.SentinelID,
+			Name:               result.Name,
+			URL:                result.URL,
+			OK:                 result.OK,
+			ExpectedStatusCode: result.ExpectedStatusCode,
+			ObservedStatusCode: result.ObservedStatusCode,
+			LatencyMS:          result.LatencyMS,
+			Error:              result.Error,
+			CheckedAt:          timePtr(result.CheckedAt),
 		})
 	}
 	return responses

@@ -27,6 +27,22 @@ http:
   address: 127.0.0.1
   port: 0
 
+observer:
+  # Checks whether this upag host can reach the wider network. When observer
+  # connectivity is down, monitor DOWN transitions are suppressed.
+  enabled: true
+  interval: 30s
+  timeout: 5s
+  failure_threshold: 3
+  recovery_threshold: 1
+  required_successes: 1
+  # Leave sentinels omitted or empty to use built-in public connectivity checks.
+  # sentinels:
+  #   - id: edge
+  #     name: Edge connectivity
+  #     url: https://example.com/health
+  #     expected_status_code: 200
+
 defaults:
   interval: 60s
   timeout: 10s

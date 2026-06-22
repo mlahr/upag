@@ -54,6 +54,21 @@ monitors:
 	if cfg.HTTP.Address != "127.0.0.1" {
 		t.Fatalf("HTTP address = %q, want 127.0.0.1", cfg.HTTP.Address)
 	}
+	if !cfg.Observer.Enabled {
+		t.Fatal("observer enabled = false, want true")
+	}
+	if cfg.Observer.Interval.Duration != 30*time.Second {
+		t.Fatalf("observer interval = %s, want 30s", cfg.Observer.Interval.Duration)
+	}
+	if cfg.Observer.Timeout.Duration != 5*time.Second {
+		t.Fatalf("observer timeout = %s, want 5s", cfg.Observer.Timeout.Duration)
+	}
+	if cfg.Observer.FailureThreshold != 3 || cfg.Observer.RecoveryThreshold != 1 || cfg.Observer.RequiredSuccesses != 1 {
+		t.Fatalf("observer thresholds = failure:%d recovery:%d required:%d, want 3, 1, 1", cfg.Observer.FailureThreshold, cfg.Observer.RecoveryThreshold, cfg.Observer.RequiredSuccesses)
+	}
+	if len(cfg.Observer.Sentinels) != 3 {
+		t.Fatalf("observer sentinel count = %d, want 3", len(cfg.Observer.Sentinels))
+	}
 }
 
 func TestParseAcceptsZeroProbeRetries(t *testing.T) {
@@ -97,6 +112,55 @@ monitors:
 	}
 	if !strings.Contains(err.Error(), "defaults.probe_retries must be non-negative") {
 		t.Fatalf("validation error %q does not contain defaults.probe_retries", err)
+	}
+}
+
+func TestParseAcceptsDisabledObserverWithoutSentinels(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+observer:
+  enabled: false
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Observer.Enabled {
+		t.Fatal("observer enabled = true, want false")
+	}
+}
+
+func TestParseRejectsObserverQuorumLargerThanSentinels(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+observer:
+  required_successes: 2
+  sentinels:
+    - id: one
+      name: One
+      url: https://example.com/
+      expected_status_code: 200
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "observer.required_successes") {
+		t.Fatalf("validation error %q does not contain observer.required_successes", err)
 	}
 }
 

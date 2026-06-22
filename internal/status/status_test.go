@@ -17,6 +17,9 @@ type fakeStore struct {
 	uptime      map[string]storage.UptimeStats
 	failures    []storage.AlertNotification
 	maintenance []storage.MaintenanceWindow
+	observer    storage.ObserverState
+	observerOK  bool
+	sentinels   []storage.ObserverSentinelResult
 }
 
 func (s fakeStore) ListStates(context.Context) ([]storage.MonitorState, error) {
@@ -33,6 +36,14 @@ func (s fakeStore) ListActionableAlertDeliveryFailures(context.Context, int) ([]
 
 func (s fakeStore) ListMaintenanceWindows(context.Context, storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error) {
 	return s.maintenance, nil
+}
+
+func (s fakeStore) GetObserverState(context.Context) (storage.ObserverState, bool, error) {
+	return s.observer, s.observerOK, nil
+}
+
+func (s fakeStore) ListObserverSentinelResults(context.Context) ([]storage.ObserverSentinelResult, error) {
+	return s.sentinels, nil
 }
 
 func TestHealthReturnsLivenessJSON(t *testing.T) {
@@ -149,6 +160,26 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 				CreatedAt: now,
 			},
 		},
+		observer: storage.ObserverState{
+			Status:               "OBSERVER_UP",
+			ConsecutiveSuccesses: 2,
+			LastCheckedAt:        checkedAt,
+			LastSuccessAt:        checkedAt,
+			UpdatedAt:            checkedAt,
+		},
+		observerOK: true,
+		sentinels: []storage.ObserverSentinelResult{
+			{
+				SentinelID:         "gstatic",
+				Name:               "Google connectivity check",
+				URL:                "https://www.gstatic.com/generate_204",
+				ExpectedStatusCode: 204,
+				OK:                 true,
+				ObservedStatusCode: 204,
+				LatencyMS:          12,
+				CheckedAt:          checkedAt,
+			},
+		},
 	}, func() Metadata {
 		return Metadata{
 			Version:      "test",
@@ -169,7 +200,19 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 		Version      string `json:"version"`
 		ConfigPath   string `json:"config_path"`
 		MonitorCount int    `json:"monitor_count"`
-		Monitors     []struct {
+		Observer     struct {
+			Status               string `json:"status"`
+			ConsecutiveSuccesses int    `json:"consecutive_successes"`
+			LastCheckedAt        string `json:"last_checked_at"`
+			Sentinels            []struct {
+				ID                 string `json:"id"`
+				OK                 bool   `json:"ok"`
+				ExpectedStatusCode int    `json:"expected_status_code"`
+				ObservedStatusCode int    `json:"observed_status_code"`
+				LatencyMS          int64  `json:"latency_ms"`
+			} `json:"sentinels"`
+		} `json:"observer"`
+		Monitors []struct {
 			ID            string  `json:"id"`
 			LastCheckedAt string  `json:"last_checked_at"`
 			LastFailureAt *string `json:"last_failure_at"`
@@ -220,6 +263,12 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 	}
 	if body.Status != "ok" || body.Version != "test" || body.ConfigPath != "/etc/upag/config.yaml" || body.MonitorCount != 1 {
 		t.Fatalf("status metadata = %+v, want configured metadata", body)
+	}
+	if body.Observer.Status != "OBSERVER_UP" || body.Observer.ConsecutiveSuccesses != 2 || body.Observer.LastCheckedAt != "2026-06-22T02:20:04Z" {
+		t.Fatalf("observer = %+v, want observer up with last check", body.Observer)
+	}
+	if len(body.Observer.Sentinels) != 1 || body.Observer.Sentinels[0].ID != "gstatic" || !body.Observer.Sentinels[0].OK || body.Observer.Sentinels[0].ExpectedStatusCode != 204 || body.Observer.Sentinels[0].ObservedStatusCode != 204 || body.Observer.Sentinels[0].LatencyMS != 12 {
+		t.Fatalf("observer sentinels = %+v, want gstatic success", body.Observer.Sentinels)
 	}
 	if len(body.Monitors) != 1 || body.Monitors[0].ID != "home" || body.Monitors[0].LastCheckedAt != "2026-06-22T02:20:04Z" {
 		t.Fatalf("monitors = %+v, want home with last_checked_at", body.Monitors)

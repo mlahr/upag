@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"upag/internal/config"
+	"upag/internal/observer"
 	"upag/internal/storage"
 )
 
@@ -282,6 +283,16 @@ func mailtrapRecipients(recipients []string) []mailtrapAddress {
 
 func buildIncidentContent(incident storage.Incident, current storage.MonitorState) (string, string) {
 	subject := fmt.Sprintf("[upag] %s %s", current.Name, incident.Transition)
+	if current.MonitorID == observer.MonitorID {
+		body := strings.Join([]string{
+			fmt.Sprintf("Monitor: %s (%s)", current.Name, current.MonitorID),
+			fmt.Sprintf("Transition: %s", incident.Transition),
+			fmt.Sprintf("Observed at: %s", incident.ObservedAt.Format(time.RFC3339)),
+			fmt.Sprintf("Error: %s", incident.Error),
+			"",
+		}, "\r\n")
+		return subject, body
+	}
 	body := strings.Join([]string{
 		fmt.Sprintf("Monitor: %s (%s)", current.Name, current.MonitorID),
 		fmt.Sprintf("Transition: %s", incident.Transition),

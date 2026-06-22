@@ -6,4 +6,7 @@ const (
 	Up          = "UP"
 	Down        = "DOWN"
 	Maintenance = "MAINTENANCE"
+
+	ObserverUp   = "OBSERVER_UP"
+	ObserverDown = "OBSERVER_DOWN"
 )
