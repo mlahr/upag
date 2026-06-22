@@ -66,3 +66,25 @@ func TestReadPIDRejectsInvalidPIDFile(t *testing.T) {
 		t.Fatal("ReadPID returned nil error, want invalid PID error")
 	}
 }
+
+func TestValidateStartOptionsAllowsSyslogWithoutLogFile(t *testing.T) {
+	err := validateStartOptions(Options{
+		PIDFile: filepath.Join(t.TempDir(), "upag.pid"),
+		Syslog:  true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateStartOptionsRequiresLogFileWithoutSyslog(t *testing.T) {
+	err := validateStartOptions(Options{
+		PIDFile: filepath.Join(t.TempDir(), "upag.pid"),
+	})
+	if err == nil {
+		t.Fatal("validateStartOptions returned nil error, want missing log file error")
+	}
+	if err.Error() != "log file path is required" {
+		t.Fatalf("error = %q, want missing log file error", err.Error())
+	}
+}

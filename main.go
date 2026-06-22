@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -61,8 +62,21 @@ func runDaemon(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
 	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	out := io.Writer(os.Stdout)
+	errOut := io.Writer(os.Stderr)
+	if *useSyslog {
+		logger, err := openSyslog("upag")
+		if err != nil {
+			return err
+		}
+		defer logger.Close()
+		out = logger.InfoWriter()
+		errOut = logger.ErrorWriter()
 	}
 
 	cfg, err := config.LoadFile(*configPath)
@@ -79,7 +93,7 @@ func runDaemon(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	runner, err := app.NewRunner(*configPath, cfg, store, os.Stdout, os.Stderr)
+	runner, err := app.NewRunner(*configPath, cfg, store, out, errOut)
 	if err != nil {
 		return err
 	}
@@ -92,6 +106,7 @@ func runStart(args []string) error {
 	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
 	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
 	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -101,6 +116,7 @@ func runStart(args []string) error {
 		DBPath:     *dbPath,
 		PIDFile:    *pidFile,
 		LogFile:    *logFile,
+		Syslog:     *useSyslog,
 	})
 	if err != nil {
 		return err
@@ -149,6 +165,7 @@ func runRestart(args []string) error {
 	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
 	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
 	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -161,6 +178,7 @@ func runRestart(args []string) error {
 		DBPath:     *dbPath,
 		PIDFile:    *pidFile,
 		LogFile:    *logFile,
+		Syslog:     *useSyslog,
 	})
 	if err != nil {
 		return err

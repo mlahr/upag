@@ -40,6 +40,36 @@ Install the Debian package:
 sudo dpkg -i upag_*_linux_amd64.deb
 ```
 
+The Debian package installs:
+
+- `/usr/bin/upag`
+- `/etc/upag/config.yaml`
+- `/etc/default/upag`
+- `/var/lib/upag/`
+- `/lib/systemd/system/upag.service`
+- `/etc/init.d/upag`
+
+Edit `/etc/upag/config.yaml`, then enable service startup in
+`/etc/default/upag`:
+
+```sh
+sudoedit /etc/upag/config.yaml
+sudoedit /etc/default/upag
+```
+
+Set:
+
+```sh
+UPAG_ENABLED=true
+```
+
+Start the service on a systemd-based system:
+
+```sh
+sudo systemctl start upag
+sudo systemctl status upag
+```
+
 Or install from the tarball:
 
 ```sh
@@ -229,6 +259,51 @@ full response duration, ending after the response body has been read. Otherwise,
 
 ## Operations
 
+### Debian package
+
+When installed from the Debian package, `upag` runs as the `upag` system user.
+Configuration lives in `/etc/upag/config.yaml`, service defaults live in
+`/etc/default/upag`, and SQLite state lives in `/var/lib/upag/upag.sqlite`.
+
+Enable the packaged service only after configuring real alert credentials and
+monitors:
+
+```sh
+sudoedit /etc/upag/config.yaml
+sudoedit /etc/default/upag
+sudo systemctl start upag
+```
+
+The systemd unit is enabled during package installation but gated by
+`UPAG_ENABLED=false` in `/etc/default/upag`. Set `UPAG_ENABLED=true` when the
+configuration is ready.
+
+Manage the service:
+
+```sh
+sudo systemctl status upag
+sudo systemctl reload upag
+sudo systemctl restart upag
+sudo systemctl stop upag
+```
+
+Inspect service logs:
+
+```sh
+journalctl -u upag
+```
+
+On non-systemd systems, use the SysV init script:
+
+```sh
+sudo /etc/init.d/upag start
+sudo /etc/init.d/upag status
+sudo /etc/init.d/upag reload
+sudo /etc/init.d/upag stop
+```
+
+### Manual daemon
+
 Run in the foreground:
 
 ```sh
@@ -267,7 +342,8 @@ upag --version
 ```
 
 The daemon writes line-oriented logs to stdout and stderr. When started with
-`start`, both streams are appended to `--log-file`.
+`start`, both streams are appended to `--log-file`. On Linux, pass `--syslog`
+to `run`, `start`, or `restart` to write daemon logs to syslog instead.
 
 ## Development
 
@@ -295,6 +371,7 @@ go test ./...
 ## Release
 
 Releases are built by GitHub Actions using GoReleaser on tag pushes.
+The Debian package is assembled with GoReleaser's nFPM integration.
 
 Create and push a version tag:
 

@@ -1,0 +1,4 @@
+UPAG_ENABLED=false
+UPAG_CONFIG=/etc/upag/config.yaml
+UPAG_DB=/var/lib/upag/upag.sqlite
+UPAG_PIDFILE=/run/upag/upag.pid

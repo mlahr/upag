@@ -38,7 +38,43 @@ nfpms:
     maintainer: "Michael Lahr"
     description: "Internal HTTP(S) uptime monitor with SQLite state storage and email alerts."
     homepage: "https://github.com/mlahr/upag"
+    section: net
+    priority: optional
     bindir: /usr/bin
+    dependencies:
+      - adduser
+      - lsb-base
+    contents:
+      - src: config.example.yaml
+        dst: /etc/upag/config.yaml
+        type: config|noreplace
+        file_info:
+          mode: 0640
+      - src: packaging/debian/upag.default
+        dst: /etc/default/upag
+        type: config|noreplace
+        file_info:
+          mode: 0644
+      - src: packaging/debian/upag.init
+        dst: /etc/init.d/upag
+        file_info:
+          mode: 0755
+      - src: packaging/debian/upag.service
+        dst: /lib/systemd/system/upag.service
+        file_info:
+          mode: 0644
+      - dst: /var/lib/upag
+        type: dir
+        file_info:
+          mode: 0750
+      - dst: /run/upag
+        type: dir
+        file_info:
+          mode: 0755
+    scripts:
+      postinstall: packaging/debian/postinstall.sh
+      preremove: packaging/debian/preremove.sh
+      postremove: packaging/debian/postremove.sh
 
 release:
   github:

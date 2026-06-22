@@ -1,0 +1,29 @@
+[Unit]
+Description=upag HTTP(S) uptime monitor
+Documentation=https://github.com/mlahr/upag
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/upag
+ExecStart=/bin/sh -c 'if [ "$UPAG_ENABLED" != "true" ]; then echo "upag is disabled in /etc/default/upag"; exit 0; fi; exec /usr/bin/upag run --config "$UPAG_CONFIG" --db "$UPAG_DB"'
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=10s
+User=upag
+Group=upag
+StateDirectory=upag
+RuntimeDirectory=upag
+ConfigurationDirectory=upag
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/upag /run/upag
+SyslogIdentifier=upag
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

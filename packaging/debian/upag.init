@@ -1,0 +1,78 @@
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          upag
+# Required-Start:    $remote_fs $network
+# Required-Stop:     $remote_fs $network
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: upag HTTP(S) uptime monitor
+# Description:       Starts the upag HTTP(S) uptime monitor daemon.
+### END INIT INFO
+
+set -e
+
+NAME=upag
+DESC="upag HTTP(S) uptime monitor"
+DAEMON=/usr/bin/upag
+DEFAULTS=/etc/default/upag
+USER=upag
+GROUP=upag
+
+UPAG_ENABLED=false
+UPAG_CONFIG=/etc/upag/config.yaml
+UPAG_DB=/var/lib/upag/upag.sqlite
+UPAG_PIDFILE=/run/upag/upag.pid
+
+[ -r "$DEFAULTS" ] && . "$DEFAULTS"
+
+. /lib/lsb/init-functions
+
+ensure_runtime_dir() {
+	install -d -o "$USER" -g "$GROUP" -m 0755 /run/upag
+}
+
+case "$1" in
+	start)
+		if [ "$UPAG_ENABLED" != "true" ]; then
+			log_warning_msg "$DESC is disabled in $DEFAULTS"
+			exit 0
+		fi
+		ensure_runtime_dir
+		log_daemon_msg "Starting $DESC" "$NAME"
+		if start-stop-daemon --start --quiet --chuid "$USER:$GROUP" --exec "$DAEMON" -- \
+			start --config "$UPAG_CONFIG" --db "$UPAG_DB" --pid-file "$UPAG_PIDFILE" --syslog; then
+			log_end_msg 0
+		else
+			log_end_msg 1
+		fi
+		;;
+	stop)
+		log_daemon_msg "Stopping $DESC" "$NAME"
+		if "$DAEMON" stop --pid-file "$UPAG_PIDFILE"; then
+			log_end_msg 0
+		else
+			log_end_msg 1
+		fi
+		;;
+	reload|force-reload)
+		log_daemon_msg "Reloading $DESC" "$NAME"
+		if "$DAEMON" config reload --pid-file "$UPAG_PIDFILE"; then
+			log_end_msg 0
+		else
+			log_end_msg 1
+		fi
+		;;
+	restart)
+		"$0" stop || true
+		"$0" start
+		;;
+	status)
+		"$DAEMON" status --pid-file "$UPAG_PIDFILE"
+		;;
+	*)
+		echo "Usage: /etc/init.d/$NAME {start|stop|reload|force-reload|restart|status}" >&2
+		exit 2
+		;;
+esac
+
+exit 0

@@ -18,6 +18,7 @@ type Options struct {
 	DBPath     string
 	PIDFile    string
 	LogFile    string
+	Syslog     bool
 }
 
 type Status struct {
@@ -28,11 +29,8 @@ type Status struct {
 }
 
 func Start(opts Options) (int, error) {
-	if opts.PIDFile == "" {
-		return 0, errors.New("pid file path is required")
-	}
-	if opts.LogFile == "" {
-		return 0, errors.New("log file path is required")
+	if err := validateStartOptions(opts); err != nil {
+		return 0, err
 	}
 
 	status, err := Inspect(opts.PIDFile)
@@ -48,9 +46,19 @@ func Start(opts Options) (int, error) {
 		}
 	}
 
-	logFile, err := os.OpenFile(opts.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return 0, fmt.Errorf("open log file %q: %w", opts.LogFile, err)
+	var logFile *os.File
+	if opts.Syslog {
+		var err error
+		logFile, err = os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+		if err != nil {
+			return 0, fmt.Errorf("open %s: %w", os.DevNull, err)
+		}
+	} else {
+		var err error
+		logFile, err = os.OpenFile(opts.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return 0, fmt.Errorf("open log file %q: %w", opts.LogFile, err)
+		}
 	}
 	defer logFile.Close()
 
@@ -58,7 +66,11 @@ func Start(opts Options) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve executable path: %w", err)
 	}
-	cmd := exec.Command(exe, "run", "--config", opts.ConfigPath, "--db", opts.DBPath)
+	cmdArgs := []string{"run", "--config", opts.ConfigPath, "--db", opts.DBPath}
+	if opts.Syslog {
+		cmdArgs = append(cmdArgs, "--syslog")
+	}
+	cmd := exec.Command(exe, cmdArgs...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -75,6 +87,16 @@ func Start(opts Options) (int, error) {
 		return 0, fmt.Errorf("write pid file %q: %w", opts.PIDFile, err)
 	}
 	return pid, nil
+}
+
+func validateStartOptions(opts Options) error {
+	if opts.PIDFile == "" {
+		return errors.New("pid file path is required")
+	}
+	if opts.LogFile == "" && !opts.Syslog {
+		return errors.New("log file path is required")
+	}
+	return nil
 }
 
 func Stop(pidFile string, timeout time.Duration) error {
