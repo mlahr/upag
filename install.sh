@@ -41,6 +41,7 @@ else
 fi
 
 tmp_dir="$(mktemp -d)"
+chmod 0755 "$tmp_dir"
 cleanup() {
 	rm -rf "$tmp_dir"
 }
@@ -50,7 +51,7 @@ checksums_file="$tmp_dir/checksums.txt"
 curl -fsSL "$RELEASE_BASE_URL/checksums.txt" -o "$checksums_file"
 
 asset_name="$(
-	awk -v pattern="upag_.*_linux_${asset_arch}\\.deb$" '$2 ~ pattern { print $2 }' "$checksums_file"
+	awk -v pattern="upag_.*_linux_${asset_arch}[.]deb$" '$2 ~ pattern { print $2 }' "$checksums_file"
 )"
 
 if [ -z "$asset_name" ]; then
@@ -63,10 +64,15 @@ fi
 
 deb_file="$tmp_dir/$asset_name"
 curl -fsSL "$RELEASE_BASE_URL/$asset_name" -o "$deb_file"
+chmod 0644 "$deb_file"
 
 (
 	cd "$tmp_dir"
 	grep -F "  $asset_name" checksums.txt | sha256sum -c -
 )
 
-"${sudo_cmd[@]}" apt-get install -y "$deb_file"
+if [ ! -r /dev/tty ]; then
+	die "interactive package installation requires a controlling terminal"
+fi
+
+"${sudo_cmd[@]}" apt-get install -y "$deb_file" </dev/tty
