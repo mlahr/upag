@@ -1,0 +1,45 @@
+version: 2
+
+project_name: upag
+
+builds:
+  - id: upag
+    main: ./main.go
+    binary: upag
+    env:
+      - CGO_ENABLED=1
+    goos:
+      - linux
+    goarch:
+      - amd64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: tarball
+    builds:
+      - upag
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+nfpms:
+  - id: deb
+    package_name: upag
+    builds:
+      - upag
+    formats:
+      - deb
+    maintainer: "Michael Lahr"
+    description: "Internal HTTP(S) uptime monitor with SQLite state storage and email alerts."
+    homepage: "https://github.com/mlahr/upag"
+    bindir: /usr/bin
+
+release:
+  github:
+    owner: mlahr
+    name: upag

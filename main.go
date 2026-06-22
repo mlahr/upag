@@ -16,6 +16,8 @@ import (
 	"upag/internal/storage"
 )
 
+var version = "dev"
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -26,6 +28,11 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		return usage()
+	}
+
+	if args[0] == "--version" {
+		fmt.Fprintln(os.Stdout, "upag", version)
+		return nil
 	}
 
 	switch args[0] {
@@ -230,5 +237,5 @@ func runIncidents(args []string) error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag <run|start|stop|status|restart|config|monitors|incidents> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents> [flags]")
 }
