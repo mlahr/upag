@@ -379,6 +379,167 @@ func TestListUptimeStatsUsesZeroValueForEmptyWindows(t *testing.T) {
 	}
 }
 
+func TestMaintenanceWindowsRejectOverlapAndCanBeCancelled(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	saveTestState(t, store, "home", now)
+
+	id, err := store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now.Add(time.Hour),
+		EndsAt:    now.Add(2 * time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "michael",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id == 0 {
+		t.Fatal("maintenance id = 0, want nonzero")
+	}
+	_, err = store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now.Add(90 * time.Minute),
+		EndsAt:    now.Add(3 * time.Hour),
+		Reason:    "overlap",
+		CreatedBy: "michael",
+		CreatedAt: now,
+	})
+	if err == nil {
+		t.Fatal("overlapping maintenance window succeeded, want error")
+	}
+	if err := store.CancelMaintenanceWindow(context.Background(), id, now.Add(10*time.Minute), "michael", "done"); err != nil {
+		t.Fatal(err)
+	}
+	nextID, err := store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now.Add(90 * time.Minute),
+		EndsAt:    now.Add(3 * time.Hour),
+		Reason:    "replacement",
+		CreatedBy: "michael",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("add after cancellation: %v", err)
+	}
+	if nextID == id {
+		t.Fatalf("replacement id = %d, want different id", nextID)
+	}
+}
+
+func TestActiveMaintenanceWindowUsesInclusiveStartExclusiveEnd(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	saveTestState(t, store, "home", now)
+	id, err := store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now,
+		EndsAt:    now.Add(time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "michael",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	window, ok, err := store.ActiveMaintenanceWindow(context.Background(), "home", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || window.ID != id {
+		t.Fatalf("active at start = %+v ok=%t, want id %d", window, ok, id)
+	}
+	_, ok, err = store.ActiveMaintenanceWindow(context.Background(), "home", now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatal("active at exclusive end = true, want false")
+	}
+}
+
+func TestMaintenanceProbeResultsAreExcludedFromUptimeAndSyntheticIncidents(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	saveTestState(t, store, "home", now)
+	maintenanceID, err := store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now.Add(-time.Hour),
+		EndsAt:    now.Add(time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "michael",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, probe := range []struct {
+		checkedAt           time.Time
+		ok                  bool
+		maintenanceWindowID int64
+	}{
+		{checkedAt: now.Add(-30 * time.Minute), ok: false, maintenanceWindowID: maintenanceID},
+		{checkedAt: now.Add(-10 * time.Minute), ok: true},
+	} {
+		status := state.Down
+		if probe.ok {
+			status = state.Up
+		}
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID:           "home",
+			CheckedAt:           probe.checkedAt,
+			OK:                  probe.ok,
+			Error:               "timeout",
+			MaintenanceWindowID: probe.maintenanceWindowID,
+		}, MonitorState{
+			MonitorID:     "home",
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        status,
+			LastCheckedAt: probe.checkedAt,
+			UpdatedAt:     probe.checkedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := store.ListUptimeStats(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := stats["home"].Retained
+	if retained.TotalChecks != 2 || retained.SuccessfulChecks != 2 || retained.FailedChecks != 0 {
+		t.Fatalf("retained stats = %+v, want two reportable successful checks", retained)
+	}
+	if retained.MaintenanceChecks != 1 || retained.MaintenanceFailedChecks != 1 {
+		t.Fatalf("maintenance stats = %+v, want one failed maintenance check", retained)
+	}
+	incidents, err := store.ListIncidents(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 0 {
+		t.Fatalf("incidents = %+v, want no synthetic incidents for maintenance-covered failure", incidents)
+	}
+}
+
 func TestSaveAlertNotificationsPersistsAttempts(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
@@ -659,6 +820,28 @@ func TestListActionableAlertDeliveryFailuresAppliesLimit(t *testing.T) {
 	}
 	if len(failures) != 2 {
 		t.Fatalf("failure count = %d, want 2", len(failures))
+	}
+}
+
+func saveTestState(t *testing.T, store *Store, monitorID string, now time.Time) {
+	t.Helper()
+	_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID: monitorID,
+		CheckedAt: now,
+		OK:        true,
+	}, MonitorState{
+		MonitorID:              monitorID,
+		Name:                   monitorID,
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 state.Up,
+		LastCheckedAt:          now,
+		LastSuccessAt:          now,
+		LastObservedStatusCode: 200,
+		UpdatedAt:              now,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

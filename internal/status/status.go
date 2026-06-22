@@ -20,6 +20,7 @@ type Store interface {
 	ListStates(ctx context.Context) ([]storage.MonitorState, error)
 	ListUptimeStats(ctx context.Context, now time.Time) (map[string]storage.UptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
+	ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error)
 }
 
 type Metadata struct {
@@ -100,7 +101,13 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
 		}
-		uptimeStats, err := store.ListUptimeStats(ctx, time.Now().UTC())
+		now := time.Now().UTC()
+		uptimeStats, err := store.ListUptimeStats(ctx, now)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
+		maintenance, err := store.ListMaintenanceWindows(ctx, storage.MaintenanceWindowFilter{Now: now})
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return
@@ -117,7 +124,7 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			StartedAt:             timePtr(meta.StartedAt),
 			ConfigPath:            meta.ConfigPath,
 			MonitorCount:          meta.MonitorCount,
-			Monitors:              monitorResponses(states, uptimeStats),
+			Monitors:              monitorResponses(states, uptimeStats, maintenance, now),
 			AlertDeliveryFailures: alertFailureResponses(failures),
 		})
 	})
@@ -141,18 +148,20 @@ type statusResponse struct {
 }
 
 type monitorResponse struct {
-	ID                     string         `json:"id"`
-	Name                   string         `json:"name"`
-	URL                    string         `json:"url"`
-	Status                 string         `json:"status"`
-	ConsecutiveFailures    int            `json:"consecutive_failures"`
-	LastCheckedAt          *time.Time     `json:"last_checked_at"`
-	LastSuccessAt          *time.Time     `json:"last_success_at"`
-	LastFailureAt          *time.Time     `json:"last_failure_at"`
-	LastError              string         `json:"last_error"`
-	LastObservedStatusCode int            `json:"last_observed_status_code"`
-	UpdatedAt              *time.Time     `json:"updated_at"`
-	Uptime                 uptimeResponse `json:"uptime"`
+	ID                     string                `json:"id"`
+	Name                   string                `json:"name"`
+	URL                    string                `json:"url"`
+	Status                 string                `json:"status"`
+	ConsecutiveFailures    int                   `json:"consecutive_failures"`
+	LastCheckedAt          *time.Time            `json:"last_checked_at"`
+	LastSuccessAt          *time.Time            `json:"last_success_at"`
+	LastFailureAt          *time.Time            `json:"last_failure_at"`
+	LastError              string                `json:"last_error"`
+	LastObservedStatusCode int                   `json:"last_observed_status_code"`
+	UpdatedAt              *time.Time            `json:"updated_at"`
+	Uptime                 uptimeResponse        `json:"uptime"`
+	ActiveMaintenance      *maintenanceResponse  `json:"active_maintenance"`
+	UpcomingMaintenance    []maintenanceResponse `json:"upcoming_maintenance"`
 }
 
 type uptimeResponse struct {
@@ -163,12 +172,23 @@ type uptimeResponse struct {
 }
 
 type uptimeWindowResponse struct {
-	TotalChecks      int        `json:"total_checks"`
-	SuccessfulChecks int        `json:"successful_checks"`
-	FailedChecks     int        `json:"failed_checks"`
-	UptimePercent    *float64   `json:"uptime_percent"`
-	WindowStartedAt  *time.Time `json:"window_started_at"`
-	WindowEndedAt    *time.Time `json:"window_ended_at"`
+	TotalChecks             int        `json:"total_checks"`
+	SuccessfulChecks        int        `json:"successful_checks"`
+	FailedChecks            int        `json:"failed_checks"`
+	MaintenanceChecks       int        `json:"maintenance_checks"`
+	MaintenanceFailedChecks int        `json:"maintenance_failed_checks"`
+	UptimePercent           *float64   `json:"uptime_percent"`
+	WindowStartedAt         *time.Time `json:"window_started_at"`
+	WindowEndedAt           *time.Time `json:"window_ended_at"`
+}
+
+type maintenanceResponse struct {
+	ID        int64      `json:"id"`
+	StartsAt  *time.Time `json:"starts_at"`
+	EndsAt    *time.Time `json:"ends_at"`
+	Reason    string     `json:"reason"`
+	CreatedBy string     `json:"created_by"`
+	CreatedAt *time.Time `json:"created_at"`
 }
 
 type alertFailureResponse struct {
@@ -201,8 +221,9 @@ func writeJSON(w http.ResponseWriter, code int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func monitorResponses(states []storage.MonitorState, uptimeStats map[string]storage.UptimeStats) []monitorResponse {
+func monitorResponses(states []storage.MonitorState, uptimeStats map[string]storage.UptimeStats, maintenance []storage.MaintenanceWindow, now time.Time) []monitorResponse {
 	responses := make([]monitorResponse, 0, len(states))
+	active, upcoming := maintenanceByMonitor(maintenance, now)
 	for _, state := range states {
 		stats := uptimeStats[state.MonitorID]
 		responses = append(responses, monitorResponse{
@@ -218,6 +239,8 @@ func monitorResponses(states []storage.MonitorState, uptimeStats map[string]stor
 			LastObservedStatusCode: state.LastObservedStatusCode,
 			UpdatedAt:              timePtr(state.UpdatedAt),
 			Uptime:                 uptimeResponseFromStats(stats),
+			ActiveMaintenance:      maintenanceResponsePtr(active[state.MonitorID]),
+			UpcomingMaintenance:    maintenanceResponses(upcoming[state.MonitorID]),
 		})
 	}
 	return responses
@@ -234,12 +257,59 @@ func uptimeResponseFromStats(stats storage.UptimeStats) uptimeResponse {
 
 func uptimeWindowResponseFromStats(stats storage.UptimeWindowStats) uptimeWindowResponse {
 	return uptimeWindowResponse{
-		TotalChecks:      stats.TotalChecks,
-		SuccessfulChecks: stats.SuccessfulChecks,
-		FailedChecks:     stats.FailedChecks,
-		UptimePercent:    uptimePercent(stats.SuccessfulChecks, stats.TotalChecks),
-		WindowStartedAt:  timePtr(stats.WindowStartedAt),
-		WindowEndedAt:    timePtr(stats.WindowEndedAt),
+		TotalChecks:             stats.TotalChecks,
+		SuccessfulChecks:        stats.SuccessfulChecks,
+		FailedChecks:            stats.FailedChecks,
+		MaintenanceChecks:       stats.MaintenanceChecks,
+		MaintenanceFailedChecks: stats.MaintenanceFailedChecks,
+		UptimePercent:           uptimePercent(stats.SuccessfulChecks, stats.TotalChecks),
+		WindowStartedAt:         timePtr(stats.WindowStartedAt),
+		WindowEndedAt:           timePtr(stats.WindowEndedAt),
+	}
+}
+
+func maintenanceByMonitor(windows []storage.MaintenanceWindow, now time.Time) (map[string]storage.MaintenanceWindow, map[string][]storage.MaintenanceWindow) {
+	active := map[string]storage.MaintenanceWindow{}
+	upcoming := map[string][]storage.MaintenanceWindow{}
+	for _, window := range windows {
+		if !window.CancelledAt.IsZero() || !window.EndsAt.After(now) {
+			continue
+		}
+		if !now.Before(window.StartsAt) && now.Before(window.EndsAt) {
+			active[window.MonitorID] = window
+			continue
+		}
+		if now.Before(window.StartsAt) {
+			upcoming[window.MonitorID] = append(upcoming[window.MonitorID], window)
+		}
+	}
+	return active, upcoming
+}
+
+func maintenanceResponsePtr(window storage.MaintenanceWindow) *maintenanceResponse {
+	if window.ID == 0 {
+		return nil
+	}
+	response := maintenanceResponseFromWindow(window)
+	return &response
+}
+
+func maintenanceResponses(windows []storage.MaintenanceWindow) []maintenanceResponse {
+	responses := make([]maintenanceResponse, 0, len(windows))
+	for _, window := range windows {
+		responses = append(responses, maintenanceResponseFromWindow(window))
+	}
+	return responses
+}
+
+func maintenanceResponseFromWindow(window storage.MaintenanceWindow) maintenanceResponse {
+	return maintenanceResponse{
+		ID:        window.ID,
+		StartsAt:  timePtr(window.StartsAt),
+		EndsAt:    timePtr(window.EndsAt),
+		Reason:    window.Reason,
+		CreatedBy: window.CreatedBy,
+		CreatedAt: timePtr(window.CreatedAt),
 	}
 }
 

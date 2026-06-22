@@ -135,6 +135,16 @@ upag monitors --db ./upag.sqlite
 upag incidents --db ./upag.sqlite --limit 50
 ```
 
+Schedule one-off maintenance when failures are expected:
+
+```sh
+upag maintenance add --db ./upag.sqlite --monitor homepage \
+  --start 2026-06-23T01:00:00Z --end 2026-06-23T02:00:00Z \
+  --reason "deploy"
+upag maintenance list --db ./upag.sqlite
+upag maintenance cancel --db ./upag.sqlite --id 1 --reason "finished"
+```
+
 ## Configuration
 
 `upag` reads a YAML configuration file. Durations use Go duration syntax, such
@@ -278,6 +288,8 @@ Example `GET /status` response:
           "total_checks": 24,
           "successful_checks": 24,
           "failed_checks": 0,
+          "maintenance_checks": 0,
+          "maintenance_failed_checks": 0,
           "uptime_percent": 100,
           "window_started_at": "2026-06-21T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
@@ -286,6 +298,8 @@ Example `GET /status` response:
           "total_checks": 168,
           "successful_checks": 167,
           "failed_checks": 1,
+          "maintenance_checks": 0,
+          "maintenance_failed_checks": 0,
           "uptime_percent": 99.4,
           "window_started_at": "2026-06-15T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
@@ -294,6 +308,8 @@ Example `GET /status` response:
           "total_checks": 720,
           "successful_checks": 718,
           "failed_checks": 2,
+          "maintenance_checks": 0,
+          "maintenance_failed_checks": 0,
           "uptime_percent": 99.72,
           "window_started_at": "2026-05-23T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
@@ -302,11 +318,15 @@ Example `GET /status` response:
           "total_checks": 1440,
           "successful_checks": 1436,
           "failed_checks": 4,
+          "maintenance_checks": 0,
+          "maintenance_failed_checks": 0,
           "uptime_percent": 99.72,
           "window_started_at": "2026-05-23T02:20:04.987654321Z",
           "window_ended_at": "2026-06-22T02:20:04.987654321Z"
         }
-      }
+      },
+      "active_maintenance": null,
+      "upcoming_maintenance": []
     }
   ],
   "alert_delivery_failures": [
@@ -331,10 +351,13 @@ delivery for that same incident and provider.
 Each monitor's `uptime` object is calculated from stored probe history. The
 `24h`, `7d`, and `30d` windows include probes whose `checked_at` timestamp is
 inside that window, inclusive of the lower boundary. `retained` includes all
-currently stored probe results after history pruning. `uptime_percent` is
+currently stored probe results after history pruning. Checks covered by a
+maintenance window are excluded from `total_checks`, `successful_checks`,
+`failed_checks`, and `uptime_percent`, but are still counted in
+`maintenance_checks` and `maintenance_failed_checks`. `uptime_percent` is
 `successful_checks / total_checks * 100`, rounded to two decimal places. For a
-window with no probe results, counts are `0`, `uptime_percent` is `null`, and
-the window timestamps are `null`.
+window with no reportable probe results, counts are `0`, `uptime_percent` is
+`null`, and the window timestamps are `null`.
 
 ### Defaults
 
@@ -473,6 +496,25 @@ Inspect stored state:
 upag monitors
 upag incidents --limit 50
 ```
+
+Manage one-off maintenance windows:
+
+```sh
+upag maintenance add --monitor homepage \
+  --start 2026-06-23T01:00:00Z --end 2026-06-23T02:00:00Z \
+  --reason "deploy"
+upag maintenance list
+upag maintenance list --all
+upag maintenance cancel --id 1 --reason "finished"
+```
+
+Maintenance windows are attached to a single monitor. Checks still run during
+maintenance. Failed checks covered by `starts_at <= checked_at < ends_at` do
+not create alerts and do not count as reported downtime. Raw probe results are
+still stored with their maintenance window ID. `maintenance add` rejects monitor
+IDs that are not already present in `monitor_states` and rejects overlapping
+non-cancelled windows for the same monitor. Audit fields default to the local
+OS user; pass `--by` to override the recorded operator.
 
 Print the binary version:
 

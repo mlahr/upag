@@ -15,28 +15,30 @@ type Store struct {
 }
 
 type MonitorState struct {
-	MonitorID              string
-	Name                   string
-	URL                    string
-	ExpectedStatusCode     int
-	Status                 string
-	ConsecutiveFailures    int
-	LastCheckedAt          time.Time
-	LastSuccessAt          time.Time
-	LastFailureAt          time.Time
-	LastError              string
-	LastObservedStatusCode int
-	UpdatedAt              time.Time
+	MonitorID               string
+	Name                    string
+	URL                     string
+	ExpectedStatusCode      int
+	Status                  string
+	StatusBeforeMaintenance string
+	ConsecutiveFailures     int
+	LastCheckedAt           time.Time
+	LastSuccessAt           time.Time
+	LastFailureAt           time.Time
+	LastError               string
+	LastObservedStatusCode  int
+	UpdatedAt               time.Time
 }
 
 type ProbeResult struct {
-	MonitorID          string
-	CheckedAt          time.Time
-	OK                 bool
-	ObservedStatusCode int
-	LatencyMS          int64
-	ResponseTimeMS     int64
-	Error              string
+	MonitorID           string
+	CheckedAt           time.Time
+	OK                  bool
+	ObservedStatusCode  int
+	LatencyMS           int64
+	ResponseTimeMS      int64
+	Error               string
+	MaintenanceWindowID int64
 }
 
 type UptimeStats struct {
@@ -47,11 +49,13 @@ type UptimeStats struct {
 }
 
 type UptimeWindowStats struct {
-	TotalChecks      int
-	SuccessfulChecks int
-	FailedChecks     int
-	WindowStartedAt  time.Time
-	WindowEndedAt    time.Time
+	TotalChecks             int
+	SuccessfulChecks        int
+	FailedChecks            int
+	MaintenanceChecks       int
+	MaintenanceFailedChecks int
+	WindowStartedAt         time.Time
+	WindowEndedAt           time.Time
 }
 
 type Incident struct {
@@ -83,6 +87,25 @@ type AlertNotificationRetry struct {
 	CurrentState MonitorState
 }
 
+type MaintenanceWindow struct {
+	ID                 int64
+	MonitorID          string
+	StartsAt           time.Time
+	EndsAt             time.Time
+	Reason             string
+	CreatedBy          string
+	CreatedAt          time.Time
+	CancelledAt        time.Time
+	CancelledBy        string
+	CancellationReason string
+}
+
+type MaintenanceWindowFilter struct {
+	MonitorID  string
+	IncludeAll bool
+	Now        time.Time
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
@@ -108,6 +131,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			url TEXT NOT NULL,
 			expected_status_code INTEGER NOT NULL,
 			status TEXT NOT NULL,
+			status_before_maintenance TEXT NOT NULL DEFAULT '',
 			consecutive_failures INTEGER NOT NULL,
 			last_checked_at TEXT,
 			last_success_at TEXT,
@@ -124,7 +148,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			observed_status_code INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
 			response_time_ms INTEGER NOT NULL DEFAULT 0,
-			error TEXT NOT NULL
+			error TEXT NOT NULL,
+			maintenance_window_id INTEGER
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked
 			ON probe_results (monitor_id, checked_at DESC)`,
@@ -160,6 +185,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			ON alert_notifications (monitor_id, attempted_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_attempted
 			ON alert_notifications (attempted_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS maintenance_windows (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			monitor_id TEXT NOT NULL,
+			starts_at TEXT NOT NULL,
+			ends_at TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			cancelled_at TEXT,
+			cancelled_by TEXT NOT NULL DEFAULT '',
+			cancellation_reason TEXT NOT NULL DEFAULT ''
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_maintenance_windows_monitor_time
+			ON maintenance_windows (monitor_id, starts_at, ends_at)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -172,6 +211,27 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureProbeResultColumns(ctx); err != nil {
 		return err
 	}
+	if err := s.ensureMonitorStateColumns(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureMonitorStateColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "monitor_states")
+	if err != nil {
+		return err
+	}
+	alterStatements := map[string]string{
+		"status_before_maintenance": `ALTER TABLE monitor_states ADD COLUMN status_before_maintenance TEXT NOT NULL DEFAULT ''`,
+	}
+	for column, statement := range alterStatements {
+		if !columns[column] {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate monitor_states.%s: %w", column, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -181,7 +241,8 @@ func (s *Store) ensureProbeResultColumns(ctx context.Context) error {
 		return err
 	}
 	alterStatements := map[string]string{
-		"response_time_ms": `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`,
+		"response_time_ms":      `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`,
+		"maintenance_window_id": `ALTER TABLE probe_results ADD COLUMN maintenance_window_id INTEGER`,
 	}
 	for column, statement := range alterStatements {
 		if !columns[column] {
@@ -238,7 +299,7 @@ func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool
 
 func (s *Store) GetState(ctx context.Context, monitorID string) (MonitorState, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT
-		monitor_id, name, url, expected_status_code, status, consecutive_failures,
+		monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at
 		FROM monitor_states WHERE monitor_id = ?`, monitorID)
@@ -260,22 +321,23 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.Error); err != nil {
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, error, maintenance_window_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.Error, nullableInt64(result.MaintenanceWindowID)); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_states
-		(monitor_id, name, url, expected_status_code, status, consecutive_failures,
+		(monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(monitor_id) DO UPDATE SET
 			name = excluded.name,
 			url = excluded.url,
 			expected_status_code = excluded.expected_status_code,
 			status = excluded.status,
+			status_before_maintenance = excluded.status_before_maintenance,
 			consecutive_failures = excluded.consecutive_failures,
 			last_checked_at = excluded.last_checked_at,
 			last_success_at = excluded.last_success_at,
@@ -283,7 +345,7 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 			last_error = excluded.last_error,
 			last_observed_status_code = excluded.last_observed_status_code,
 			updated_at = excluded.updated_at`,
-		next.MonitorID, next.Name, next.URL, next.ExpectedStatusCode, next.Status, next.ConsecutiveFailures,
+		next.MonitorID, next.Name, next.URL, next.ExpectedStatusCode, next.Status, next.StatusBeforeMaintenance, next.ConsecutiveFailures,
 		formatTime(next.LastCheckedAt), formatTime(next.LastSuccessAt), formatTime(next.LastFailureAt), next.LastError,
 		next.LastObservedStatusCode, formatTime(next.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
@@ -336,7 +398,7 @@ func (s *Store) SaveAlertNotifications(ctx context.Context, notifications []Aler
 
 func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT
-		monitor_id, name, url, expected_status_code, status, consecutive_failures,
+		monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at
 		FROM monitor_states ORDER BY monitor_id`)
@@ -391,7 +453,13 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time) (map[string]
 }
 
 func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
-	query := `SELECT monitor_id, COUNT(*), COALESCE(SUM(ok), 0), MIN(checked_at), MAX(checked_at)
+	query := `SELECT monitor_id,
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL THEN ok ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0),
+			MIN(CASE WHEN maintenance_window_id IS NULL THEN checked_at ELSE NULL END),
+			MAX(CASE WHEN maintenance_window_id IS NULL THEN checked_at ELSE NULL END)
 		FROM probe_results`
 	args := []any{}
 	if !cutoff.IsZero() {
@@ -411,17 +479,21 @@ func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (ma
 		var monitorID string
 		var totalChecks int
 		var successfulChecks int
-		var startedAt string
-		var endedAt string
-		if err := rows.Scan(&monitorID, &totalChecks, &successfulChecks, &startedAt, &endedAt); err != nil {
+		var maintenanceChecks int
+		var maintenanceFailedChecks int
+		var startedAt sql.NullString
+		var endedAt sql.NullString
+		if err := rows.Scan(&monitorID, &totalChecks, &successfulChecks, &maintenanceChecks, &maintenanceFailedChecks, &startedAt, &endedAt); err != nil {
 			return nil, err
 		}
 		stats[monitorID] = UptimeWindowStats{
-			TotalChecks:      totalChecks,
-			SuccessfulChecks: successfulChecks,
-			FailedChecks:     totalChecks - successfulChecks,
-			WindowStartedAt:  parseTime(startedAt),
-			WindowEndedAt:    parseTime(endedAt),
+			TotalChecks:             totalChecks,
+			SuccessfulChecks:        successfulChecks,
+			FailedChecks:            totalChecks - successfulChecks,
+			MaintenanceChecks:       maintenanceChecks,
+			MaintenanceFailedChecks: maintenanceFailedChecks,
+			WindowStartedAt:         parseNullTime(startedAt),
+			WindowEndedAt:           parseNullTime(endedAt),
 		}
 	}
 	return stats, rows.Err()
@@ -443,6 +515,7 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 			FROM probe_results
 			LEFT JOIN monitor_states ON monitor_states.monitor_id = probe_results.monitor_id
 			WHERE probe_results.ok = 0
+				AND probe_results.maintenance_window_id IS NULL
 				AND NOT EXISTS (
 					SELECT 1 FROM incidents
 					WHERE incidents.monitor_id = probe_results.monitor_id
@@ -541,7 +614,7 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number,
 		n.success, n.error, n.next_retry_at, n.retry_exhausted,
 		i.id, i.monitor_id, i.name, i.transition, i.observed_at, i.error, i.status_code,
-		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.consecutive_failures,
+		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.status_before_maintenance, s.consecutive_failures,
 		s.last_checked_at, s.last_success_at, s.last_failure_at, s.last_error,
 		s.last_observed_status_code, s.updated_at
 		FROM alert_notifications n
@@ -585,7 +658,7 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 			&retry.Incident.ID, &retry.Incident.MonitorID, &retry.Incident.Name, &retry.Incident.Transition,
 			&incidentObserved, &retry.Incident.Error, &retry.Incident.StatusCode,
 			&retry.CurrentState.MonitorID, &retry.CurrentState.Name, &retry.CurrentState.URL, &retry.CurrentState.ExpectedStatusCode,
-			&retry.CurrentState.Status, &retry.CurrentState.ConsecutiveFailures, &stateLastChecked, &stateLastSuccess,
+			&retry.CurrentState.Status, &retry.CurrentState.StatusBeforeMaintenance, &retry.CurrentState.ConsecutiveFailures, &stateLastChecked, &stateLastSuccess,
 			&stateLastFailure, &retry.CurrentState.LastError, &retry.CurrentState.LastObservedStatusCode, &stateUpdated,
 		); err != nil {
 			return nil, err
@@ -606,6 +679,145 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 	return retries, rows.Err()
 }
 
+func (s *Store) AddMaintenanceWindow(ctx context.Context, window MaintenanceWindow) (int64, error) {
+	if !window.EndsAt.After(window.StartsAt) {
+		return 0, fmt.Errorf("maintenance end must be after start")
+	}
+	if strings.TrimSpace(window.Reason) == "" {
+		return 0, fmt.Errorf("maintenance reason is required")
+	}
+	if strings.TrimSpace(window.CreatedBy) == "" {
+		return 0, fmt.Errorf("maintenance created_by is required")
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM monitor_states WHERE monitor_id = ?`, window.MonitorID).Scan(&exists); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, fmt.Errorf("monitor %q does not exist in monitor_states", window.MonitorID)
+		}
+		return 0, err
+	}
+	var overlappingID int64
+	err := s.db.QueryRowContext(ctx, `SELECT id FROM maintenance_windows
+		WHERE monitor_id = ?
+			AND cancelled_at IS NULL
+			AND starts_at < ?
+			AND ends_at > ?
+		ORDER BY starts_at ASC LIMIT 1`,
+		window.MonitorID, formatTime(window.EndsAt), formatTime(window.StartsAt)).Scan(&overlappingID)
+	if err != nil && err != sql.ErrNoRows {
+		return 0, err
+	}
+	if overlappingID != 0 {
+		return 0, fmt.Errorf("maintenance window overlaps existing window %d", overlappingID)
+	}
+	createdAt := window.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO maintenance_windows
+		(monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		window.MonitorID, formatTime(window.StartsAt), formatTime(window.EndsAt), window.Reason, window.CreatedBy,
+		formatTime(createdAt), nullableTime(window.CancelledAt), window.CancelledBy, window.CancellationReason)
+	if err != nil {
+		return 0, fmt.Errorf("insert maintenance window: %w", err)
+	}
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("get maintenance window id: %w", err)
+	}
+	return id, nil
+}
+
+func (s *Store) CancelMaintenanceWindow(ctx context.Context, id int64, cancelledAt time.Time, cancelledBy string, reason string) error {
+	if strings.TrimSpace(cancelledBy) == "" {
+		return fmt.Errorf("maintenance cancelled_by is required")
+	}
+	if cancelledAt.IsZero() {
+		cancelledAt = time.Now().UTC()
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE maintenance_windows
+		SET cancelled_at = ?, cancelled_by = ?, cancellation_reason = ?
+		WHERE id = ? AND cancelled_at IS NULL`,
+		formatTime(cancelledAt), cancelledBy, reason, id)
+	if err != nil {
+		return fmt.Errorf("cancel maintenance window: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("cancel maintenance rows affected: %w", err)
+	}
+	if rows == 0 {
+		var existing int
+		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM maintenance_windows WHERE id = ?`, id).Scan(&existing); err == sql.ErrNoRows {
+			return fmt.Errorf("maintenance window %d does not exist", id)
+		} else if err != nil {
+			return err
+		}
+		return fmt.Errorf("maintenance window %d is already cancelled", id)
+	}
+	return nil
+}
+
+func (s *Store) ActiveMaintenanceWindow(ctx context.Context, monitorID string, at time.Time) (MaintenanceWindow, bool, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT
+		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
+		cancelled_at, cancelled_by, cancellation_reason
+		FROM maintenance_windows
+		WHERE monitor_id = ?
+			AND cancelled_at IS NULL
+			AND starts_at <= ?
+			AND ends_at > ?
+		ORDER BY starts_at ASC LIMIT 1`, monitorID, formatTime(at), formatTime(at))
+	window, err := scanMaintenanceWindow(row)
+	if err == sql.ErrNoRows {
+		return MaintenanceWindow{}, false, nil
+	}
+	if err != nil {
+		return MaintenanceWindow{}, false, err
+	}
+	return window, true, nil
+}
+
+func (s *Store) ListMaintenanceWindows(ctx context.Context, filter MaintenanceWindowFilter) ([]MaintenanceWindow, error) {
+	query := `SELECT
+		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
+		cancelled_at, cancelled_by, cancellation_reason
+		FROM maintenance_windows`
+	var conditions []string
+	var args []any
+	if filter.MonitorID != "" {
+		conditions = append(conditions, `monitor_id = ?`)
+		args = append(args, filter.MonitorID)
+	}
+	if !filter.IncludeAll {
+		conditions = append(conditions, `cancelled_at IS NULL`)
+		if !filter.Now.IsZero() {
+			conditions = append(conditions, `ends_at > ?`)
+			args = append(args, formatTime(filter.Now))
+		}
+	}
+	if len(conditions) > 0 {
+		query += ` WHERE ` + strings.Join(conditions, ` AND `)
+	}
+	query += ` ORDER BY starts_at ASC, id ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var windows []MaintenanceWindow
+	for rows.Next() {
+		window, err := scanMaintenanceWindow(rows)
+		if err != nil {
+			return nil, err
+		}
+		windows = append(windows, window)
+	}
+	return windows, rows.Err()
+}
+
 func scanAlertNotification(scanner rowScanner) (AlertNotification, error) {
 	var notification AlertNotification
 	var attempted string
@@ -622,6 +834,24 @@ func scanAlertNotification(scanner rowScanner) (AlertNotification, error) {
 	}
 	notification.RetryExhausted = intBool(retryExhausted)
 	return notification, nil
+}
+
+func scanMaintenanceWindow(scanner rowScanner) (MaintenanceWindow, error) {
+	var window MaintenanceWindow
+	var startsAt, endsAt, createdAt string
+	var cancelledAt sql.NullString
+	err := scanner.Scan(
+		&window.ID, &window.MonitorID, &startsAt, &endsAt, &window.Reason, &window.CreatedBy, &createdAt,
+		&cancelledAt, &window.CancelledBy, &window.CancellationReason,
+	)
+	if err != nil {
+		return MaintenanceWindow{}, err
+	}
+	window.StartsAt = parseTime(startsAt)
+	window.EndsAt = parseTime(endsAt)
+	window.CreatedAt = parseTime(createdAt)
+	window.CancelledAt = parseNullTime(cancelledAt)
+	return window, nil
 }
 
 func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
@@ -657,7 +887,7 @@ func scanState(scanner rowScanner) (MonitorState, error) {
 	var state MonitorState
 	var lastChecked, lastSuccess, lastFailure, updated string
 	err := scanner.Scan(
-		&state.MonitorID, &state.Name, &state.URL, &state.ExpectedStatusCode, &state.Status, &state.ConsecutiveFailures,
+		&state.MonitorID, &state.Name, &state.URL, &state.ExpectedStatusCode, &state.Status, &state.StatusBeforeMaintenance, &state.ConsecutiveFailures,
 		&lastChecked, &lastSuccess, &lastFailure, &state.LastError, &state.LastObservedStatusCode, &updated,
 	)
 	if err != nil {
@@ -686,6 +916,27 @@ func parseTime(raw string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+func parseNullTime(raw sql.NullString) time.Time {
+	if !raw.Valid {
+		return time.Time{}
+	}
+	return parseTime(raw.String)
+}
+
+func nullableInt64(value int64) any {
+	if value == 0 {
+		return nil
+	}
+	return value
+}
+
+func nullableTime(value time.Time) any {
+	if value.IsZero() {
+		return nil
+	}
+	return formatTime(value)
 }
 
 func boolInt(value bool) int {

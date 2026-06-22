@@ -1,12 +1,16 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"upag/internal/defaults"
+	"upag/internal/state"
+	"upag/internal/storage"
 )
 
 func TestRunRecognizesDaemonStatusCommand(t *testing.T) {
@@ -87,6 +91,42 @@ func TestRunIncidentsUsesPackagedDBDefault(t *testing.T) {
 	}
 }
 
+func TestRunRecognizesMaintenanceCommands(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	seedMonitorState(t, dbPath, "home")
+	if err := run([]string{
+		"maintenance", "add",
+		"--db", dbPath,
+		"--monitor", "home",
+		"--start", "2026-06-23T01:00:00Z",
+		"--end", "2026-06-23T02:00:00Z",
+		"--reason", "deploy",
+		"--by", "tester",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"maintenance", "list", "--db", dbPath, "--all"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"maintenance", "cancel", "--db", dbPath, "--id", "1", "--reason", "done", "--by", "tester"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunRejectsUnknownMaintenanceCommand(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	err := run([]string{"maintenance", "unknown"})
+	if err == nil {
+		t.Fatal("unknown maintenance command returned nil error")
+	}
+	if !strings.Contains(err.Error(), "usage: upag maintenance <add|cancel|list>") {
+		t.Fatalf("maintenance command error = %q, want maintenance usage", err.Error())
+	}
+}
+
 func TestRunStatusUsesPackagedPIDFileDefault(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "packaged.pid")
 	if err := os.WriteFile(pidFile, []byte("999999\n"), 0644); err != nil {
@@ -126,10 +166,38 @@ func TestUsageMentionsDaemonAndMonitorCommands(t *testing.T) {
 		t.Fatal("usage returned nil error")
 	}
 	got := err.Error()
-	for _, want := range []string{"start", "stop", "status", "restart", "config", "monitors", "incidents"} {
+	for _, want := range []string{"start", "stop", "status", "restart", "config", "monitors", "incidents", "maintenance"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("usage = %q, missing %q", got, want)
 		}
+	}
+}
+
+func seedMonitorState(t *testing.T, dbPath string, monitorID string) {
+	t.Helper()
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	_, err = store.SaveProbeAndState(context.Background(), storage.ProbeResult{
+		MonitorID: monitorID,
+		CheckedAt: now,
+		OK:        true,
+	}, storage.MonitorState{
+		MonitorID:              monitorID,
+		Name:                   monitorID,
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 state.Up,
+		LastCheckedAt:          now,
+		LastSuccessAt:          now,
+		LastObservedStatusCode: 200,
+		UpdatedAt:              now,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

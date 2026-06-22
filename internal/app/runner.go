@@ -256,13 +256,11 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 	previous.URL = mon.URL
 	previous.ExpectedStatusCode = mon.ExpectedStatusCode
 
-	evaluation := monitor.Evaluate(previous, result, threshold, now)
-	next := evaluation.NextState
-	next.MonitorID = mon.ID
-	next.Name = mon.Name
-	next.URL = mon.URL
-	next.ExpectedStatusCode = mon.ExpectedStatusCode
-	next.UpdatedAt = now
+	activeMaintenance, inMaintenance, err := r.store.ActiveMaintenanceWindow(ctx, mon.ID, now)
+	if err != nil {
+		r.logError("maintenance_window_query_failed", "monitor_id=%q error=%q", mon.ID, err)
+		return
+	}
 
 	probeResult := storage.ProbeResult{
 		MonitorID:          mon.ID,
@@ -273,6 +271,38 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		ResponseTimeMS:     result.ResponseTime.Milliseconds(),
 		Error:              result.Error,
 	}
+
+	if inMaintenance {
+		next := maintenanceState(previous, result, mon, now)
+		probeResult.MaintenanceWindowID = activeMaintenance.ID
+		if _, err := r.store.SaveProbeAndState(ctx, probeResult, next, nil); err != nil {
+			r.logError("state_write_failed", "monitor_id=%q maintenance_window_id=%d error=%q", mon.ID, activeMaintenance.ID, err)
+			return
+		}
+		r.logProbe(mon, result, next.Status)
+		r.mu.Lock()
+		providers := strings.Join(r.emailer.Providers(), ",")
+		r.mu.Unlock()
+		r.logAlertDecision("info", mon, previous.Status, next.Status, "", providers, false, "maintenance_active", nil)
+		return
+	}
+
+	effectiveThreshold := threshold
+	evaluationPrevious := previous
+	if previous.Status == state.Maintenance && result.OK && previous.StatusBeforeMaintenance == state.Down {
+		evaluationPrevious.Status = state.Down
+	}
+	if previous.Status == state.Maintenance && !result.OK {
+		effectiveThreshold = 1
+	}
+	evaluation := monitor.Evaluate(evaluationPrevious, result, effectiveThreshold, now)
+	next := evaluation.NextState
+	next.MonitorID = mon.ID
+	next.Name = mon.Name
+	next.URL = mon.URL
+	next.ExpectedStatusCode = mon.ExpectedStatusCode
+	next.StatusBeforeMaintenance = ""
+	next.UpdatedAt = now
 
 	var incident *storage.Incident
 	if evaluation.IncidentTransition != "" {
@@ -375,6 +405,32 @@ func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, statu
 		result.ResponseTime.Milliseconds(),
 		result.Error,
 	)
+}
+
+func maintenanceState(previous storage.MonitorState, result checker.Result, mon config.MonitorConfig, now time.Time) storage.MonitorState {
+	next := previous
+	next.MonitorID = mon.ID
+	next.Name = mon.Name
+	next.URL = mon.URL
+	next.ExpectedStatusCode = mon.ExpectedStatusCode
+	if previous.Status == state.Maintenance {
+		next.StatusBeforeMaintenance = previous.StatusBeforeMaintenance
+	} else {
+		next.StatusBeforeMaintenance = previous.Status
+	}
+	next.Status = state.Maintenance
+	next.ConsecutiveFailures = 0
+	next.LastCheckedAt = now
+	next.LastObservedStatusCode = result.ObservedStatusCode
+	next.UpdatedAt = now
+	if result.OK {
+		next.LastSuccessAt = now
+		next.LastError = ""
+		return next
+	}
+	next.LastFailureAt = now
+	next.LastError = checker.FailureMessage(result)
+	return next
 }
 
 func (r *Runner) logAlertDecision(level string, mon config.MonitorConfig, previousStatus string, status string, transition string, providers string, sent bool, reason string, err error) {
