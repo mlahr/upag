@@ -32,7 +32,7 @@ func PrintStates(w io.Writer, states []storage.MonitorState) error {
 
 func PrintIncidents(w io.Writer, incidents []storage.Incident) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "TIME\tTRANSITION\tSTATUS\tMONITOR\tNAME\tERROR"); err != nil {
+	if _, err := fmt.Fprintln(tw, "TIME\tEVENT\tSTATUS_CODE\tMONITOR\tNAME\tERROR"); err != nil {
 		return err
 	}
 	for _, incident := range incidents {

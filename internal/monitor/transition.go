@@ -40,5 +40,8 @@ func Evaluate(previous storage.MonitorState, result checker.Result, threshold in
 		next.Status = state.Down
 		return Evaluation{NextState: next, IncidentTransition: state.Down}
 	}
+	if previous.Status != state.Down {
+		next.Status = state.Failing
+	}
 	return Evaluation{NextState: next}
 }

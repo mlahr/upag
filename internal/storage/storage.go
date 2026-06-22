@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -206,7 +207,23 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT
 		id, monitor_id, name, transition, observed_at, error, status_code
-		FROM incidents ORDER BY observed_at DESC, id DESC LIMIT ?`, limit)
+		FROM (
+			SELECT id, monitor_id, name, transition, observed_at, error, status_code
+			FROM incidents
+			UNION ALL
+			SELECT 0 AS id, probe_results.monitor_id, COALESCE(monitor_states.name, '') AS name,
+				'FAILURE' AS transition, probe_results.checked_at AS observed_at, probe_results.error,
+				probe_results.observed_status_code AS status_code
+			FROM probe_results
+			LEFT JOIN monitor_states ON monitor_states.monitor_id = probe_results.monitor_id
+			WHERE probe_results.ok = 0
+				AND NOT EXISTS (
+					SELECT 1 FROM incidents
+					WHERE incidents.monitor_id = probe_results.monitor_id
+						AND incidents.observed_at = probe_results.checked_at
+				)
+		)
+		ORDER BY observed_at DESC, id DESC LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +240,25 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 		incidents = append(incidents, incident)
 	}
 	return incidents, rows.Err()
+}
+
+func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
+	if len(monitorIDs) == 0 {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM monitor_states`)
+		return err
+	}
+
+	placeholders := make([]string, len(monitorIDs))
+	args := make([]any, len(monitorIDs))
+	for i, id := range monitorIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM monitor_states WHERE monitor_id NOT IN (`+strings.Join(placeholders, ",")+`)`,
+		args...,
+	)
+	return err
 }
 
 func (s *Store) PruneProbeResults(ctx context.Context, retention time.Duration, now time.Time) error {

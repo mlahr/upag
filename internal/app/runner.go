@@ -25,6 +25,7 @@ type Runner struct {
 	errOut     io.Writer
 
 	mu      sync.Mutex
+	logMu   sync.Mutex
 	cfg     config.Config
 	emailer *alert.Emailer
 	workers map[string]context.CancelFunc
@@ -47,7 +48,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	signal.Notify(reloadCh, syscall.SIGHUP)
 	defer signal.Stop(reloadCh)
 
+	r.logInfo("daemon_start", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	r.applyConfig(ctx, r.cfg)
+	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	pruneTicker := time.NewTicker(time.Hour)
 	defer pruneTicker.Stop()
 
@@ -55,21 +58,22 @@ func (r *Runner) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			r.stopAll()
+			r.logInfo("daemon_shutdown", "reason=%q", ctx.Err())
 			return nil
 		case <-reloadCh:
 			cfg, err := config.LoadFile(r.configPath)
 			if err != nil {
-				fmt.Fprintf(r.errOut, "config reload failed: %v\n", err)
+				r.logError("config_reload_failed", "error=%q", err)
 				continue
 			}
 			r.applyConfig(ctx, cfg)
-			fmt.Fprintln(r.out, "config reloaded")
+			r.logInfo("config_reloaded", "config=%q monitors=%d", r.configPath, len(cfg.Monitors))
 		case <-pruneTicker.C:
 			r.mu.Lock()
 			retention := r.cfg.Defaults.HistoryRetention.Duration
 			r.mu.Unlock()
 			if err := r.store.PruneProbeResults(ctx, retention, time.Now().UTC()); err != nil {
-				fmt.Fprintf(r.errOut, "history prune failed: %v\n", err)
+				r.logError("history_prune_failed", "error=%q", err)
 			}
 		}
 	}
@@ -80,14 +84,19 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	defer r.mu.Unlock()
 
 	desired := map[string]config.MonitorConfig{}
+	desiredIDs := make([]string, 0, len(cfg.Monitors))
 	for _, mon := range cfg.Monitors {
 		desired[mon.ID] = mon
+		desiredIDs = append(desiredIDs, mon.ID)
 	}
 	for id, cancel := range r.workers {
 		if _, ok := desired[id]; !ok {
 			cancel()
 			delete(r.workers, id)
 		}
+	}
+	if err := r.store.DeleteStatesExcept(parent, desiredIDs); err != nil {
+		r.logError("stale_monitor_cleanup_failed", "error=%q", err)
 	}
 	for _, mon := range cfg.Monitors {
 		if cancel, ok := r.workers[mon.ID]; ok {
@@ -136,7 +145,7 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 	now := result.CheckedAt
 	previous, ok, err := r.store.GetState(ctx, mon.ID)
 	if err != nil {
-		fmt.Fprintf(r.errOut, "state read failed for %s: %v\n", mon.ID, err)
+		r.logError("state_read_failed", "monitor_id=%q error=%q", mon.ID, err)
 		return
 	}
 	if !ok {
@@ -181,15 +190,57 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		}
 	}
 	if err := r.store.SaveProbeAndState(ctx, probeResult, next, incident); err != nil {
-		fmt.Fprintf(r.errOut, "state write failed for %s: %v\n", mon.ID, err)
+		r.logError("state_write_failed", "monitor_id=%q error=%q", mon.ID, err)
 		return
 	}
+	r.logProbe(mon, result, next.Status)
 	if incident != nil {
 		r.mu.Lock()
 		emailer := r.emailer
 		r.mu.Unlock()
 		if err := emailer.SendIncident(*incident, next); err != nil {
-			fmt.Fprintf(r.errOut, "email alert failed for %s: %v\n", mon.ID, err)
+			r.logError("email_alert_failed", "monitor_id=%q error=%q", mon.ID, err)
 		}
 	}
+}
+
+func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, status string) {
+	level := "info"
+	if !result.OK {
+		level = "error"
+	}
+	r.log(level, "probe_result", "monitor_id=%q name=%q url=%q ok=%t monitor_status=%q observed_status_code=%d expected_status_code=%d latency_ms=%d error=%q",
+		mon.ID,
+		mon.Name,
+		mon.URL,
+		result.OK,
+		status,
+		result.ObservedStatusCode,
+		mon.ExpectedStatusCode,
+		result.Latency.Milliseconds(),
+		result.Error,
+	)
+}
+
+func (r *Runner) logInfo(event string, format string, args ...any) {
+	r.log("info", event, format, args...)
+}
+
+func (r *Runner) logError(event string, format string, args ...any) {
+	r.log("error", event, format, args...)
+}
+
+func (r *Runner) log(level string, event string, format string, args ...any) {
+	w := r.out
+	if level == "error" {
+		w = r.errOut
+	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	fmt.Fprintf(w, "time=%q level=%s event=%s", time.Now().UTC().Format(time.RFC3339Nano), level, event)
+	if format != "" {
+		fmt.Fprint(w, " ")
+		fmt.Fprintf(w, format, args...)
+	}
+	fmt.Fprintln(w)
 }

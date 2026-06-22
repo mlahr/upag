@@ -39,6 +39,8 @@ func run(args []string) error {
 		return runDaemonStatus(args[1:])
 	case "restart":
 		return runRestart(args[1:])
+	case "config":
+		return runConfig(args[1:])
 	case "monitors":
 		return runMonitors(args[1:])
 	case "incidents":
@@ -160,6 +162,32 @@ func runRestart(args []string) error {
 	return nil
 }
 
+func runConfig(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: upag config <reload> [flags]")
+	}
+	switch args[0] {
+	case "reload":
+		return runConfigReload(args[1:])
+	default:
+		return fmt.Errorf("usage: upag config <reload> [flags]")
+	}
+}
+
+func runConfigReload(args []string) error {
+	fs := flag.NewFlagSet("config reload", flag.ContinueOnError)
+	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	pid, err := daemon.Reload(*pidFile)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "upag daemon reloaded configuration with PID %d\n", pid)
+	return nil
+}
+
 func runMonitors(args []string) error {
 	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
 	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
@@ -202,5 +230,5 @@ func runIncidents(args []string) error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag <run|start|stop|status|restart|monitors|incidents> [flags]")
+	return fmt.Errorf("usage: upag <run|start|stop|status|restart|config|monitors|incidents> [flags]")
 }

@@ -65,3 +65,97 @@ func TestSaveProbeAndStatePersistsIncident(t *testing.T) {
 		t.Fatalf("incident count = %d, want 1", len(incidents))
 	}
 }
+
+func TestListIncidentsIncludesFailedProbeBeforeTransition(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	next := MonitorState{
+		MonitorID:              "api",
+		Name:                   "API",
+		URL:                    "https://example.com/x",
+		ExpectedStatusCode:     200,
+		Status:                 state.Failing,
+		ConsecutiveFailures:    1,
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "expected HTTP status 200, observed HTTP status 404",
+		LastObservedStatusCode: 404,
+		UpdatedAt:              now,
+	}
+	err = store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID:          "api",
+		CheckedAt:          now,
+		OK:                 false,
+		ObservedStatusCode: 404,
+		Error:              "expected HTTP status 200, observed HTTP status 404",
+	}, next, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	incidents, err := store.ListIncidents(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidents) != 1 {
+		t.Fatalf("incident count = %d, want 1", len(incidents))
+	}
+	got := incidents[0]
+	if got.Transition != "FAILURE" {
+		t.Fatalf("event = %q, want FAILURE", got.Transition)
+	}
+	if got.Name != "API" || got.StatusCode != 404 {
+		t.Fatalf("incident = %+v, want API failure with status 404", got)
+	}
+}
+
+func TestDeleteStatesExceptRemovesStaleMonitorStates(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	for _, id := range []string{"active", "stale"} {
+		next := MonitorState{
+			MonitorID:              id,
+			Name:                   id,
+			URL:                    "https://example.com/",
+			ExpectedStatusCode:     200,
+			Status:                 state.Up,
+			LastCheckedAt:          now,
+			LastSuccessAt:          now,
+			LastObservedStatusCode: 200,
+			UpdatedAt:              now,
+		}
+		err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID:          id,
+			CheckedAt:          now,
+			OK:                 true,
+			ObservedStatusCode: 200,
+		}, next, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := store.DeleteStatesExcept(context.Background(), []string{"active"}); err != nil {
+		t.Fatal(err)
+	}
+	states, err := store.ListStates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 {
+		t.Fatalf("state count = %d, want 1", len(states))
+	}
+	if states[0].MonitorID != "active" {
+		t.Fatalf("remaining monitor = %q, want active", states[0].MonitorID)
+	}
+}

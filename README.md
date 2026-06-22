@@ -40,10 +40,15 @@ Run as a background daemon:
 ./upag stop --pid-file ./upag.pid
 ```
 
+The daemon writes line-oriented logs to stdout and stderr. When started with `start`,
+both streams are appended to `--log-file`. Logged events include daemon start,
+daemon ready, daemon shutdown, configuration reloads, probe results, state
+storage failures, email alert failures, and history prune failures.
+
 Reload configuration without restarting the process:
 
 ```sh
-kill -HUP <pid>
+./upag config reload --pid-file ./upag.pid
 ```
 
 Configuration reloads add new monitors, update monitors with matching IDs, and stop scheduling monitors removed from the YAML file.

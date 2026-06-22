@@ -23,6 +23,23 @@ func TestEvaluateDownAfterThreshold(t *testing.T) {
 	}
 }
 
+func TestEvaluateFailingBeforeThreshold(t *testing.T) {
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	previous := storage.MonitorState{Status: state.Unknown}
+	result := checker.Result{OK: false, Error: "timeout"}
+
+	evaluation := Evaluate(previous, result, 3, now)
+	if evaluation.NextState.Status != state.Failing {
+		t.Fatalf("status = %s, want FAILING", evaluation.NextState.Status)
+	}
+	if evaluation.NextState.ConsecutiveFailures != 1 {
+		t.Fatalf("failures = %d, want 1", evaluation.NextState.ConsecutiveFailures)
+	}
+	if evaluation.IncidentTransition != "" {
+		t.Fatalf("transition = %q, want none", evaluation.IncidentTransition)
+	}
+}
+
 func TestEvaluateRecoveryFromDown(t *testing.T) {
 	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
 	previous := storage.MonitorState{Status: state.Down, ConsecutiveFailures: 5, LastError: "timeout"}

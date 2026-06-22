@@ -108,6 +108,26 @@ func Stop(pidFile string, timeout time.Duration) error {
 	return fmt.Errorf("daemon PID %d did not exit within %s", status.PID, timeout)
 }
 
+func Reload(pidFile string) (int, error) {
+	status, err := Inspect(pidFile)
+	if err != nil {
+		return 0, err
+	}
+	if !status.Running {
+		if status.StaleFile {
+			return 0, fmt.Errorf("daemon is not running; pid file %q is stale for PID %d", pidFile, status.PID)
+		}
+		return 0, ErrNotRunning
+	}
+	if err := syscall.Kill(status.PID, syscall.SIGHUP); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return 0, ErrNotRunning
+		}
+		return 0, fmt.Errorf("reload daemon PID %d: %w", status.PID, err)
+	}
+	return status.PID, nil
+}
+
 func Inspect(pidFile string) (Status, error) {
 	status := Status{PIDFile: pidFile}
 	pid, err := ReadPID(pidFile)
