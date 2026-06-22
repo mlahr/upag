@@ -24,7 +24,8 @@ build:
 	go build -o $(APP_NAME) .
 
 clean:
-	rm -f $(APP_NAME) coverage.out coverage.html
+	go clean
+	rm -f coverage.out coverage.html
 
 fmt:
 	go fmt ./...
