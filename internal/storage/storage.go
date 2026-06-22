@@ -14,6 +14,11 @@ type Store struct {
 	db *sql.DB
 }
 
+type migration struct {
+	ID string
+	Fn func(context.Context, *sql.Tx) error
+}
+
 type MonitorState struct {
 	MonitorID               string
 	Name                    string
@@ -127,6 +132,77 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
+	if _, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+		id TEXT PRIMARY KEY,
+		applied_at TEXT NOT NULL
+	)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
+
+	applied, err := s.appliedMigrations(ctx)
+	if err != nil {
+		return err
+	}
+	for _, migration := range migrations() {
+		if applied[migration.ID] {
+			continue
+		}
+		if err := s.applyMigration(ctx, migration); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrations() []migration {
+	return []migration{
+		{ID: "0001_initial_schema", Fn: migrateInitialSchema},
+		{ID: "0002_alert_notification_retries", Fn: migrateAlertNotificationRetries},
+		{ID: "0003_maintenance_windows", Fn: migrateMaintenanceWindows},
+		{ID: "0004_monitor_status_before_maintenance", Fn: migrateMonitorStatusBeforeMaintenance},
+		{ID: "0005_probe_response_time_and_maintenance", Fn: migrateProbeResponseTimeAndMaintenance},
+		{ID: "0006_probe_attempt_count", Fn: migrateProbeAttemptCount},
+	}
+}
+
+func (s *Store) appliedMigrations(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM schema_migrations`)
+	if err != nil {
+		return nil, fmt.Errorf("list schema migrations: %w", err)
+	}
+	defer rows.Close()
+
+	applied := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		applied[id] = true
+	}
+	return applied, rows.Err()
+}
+
+func (s *Store) applyMigration(ctx context.Context, migration migration) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin migration %s: %w", migration.ID, err)
+	}
+	defer tx.Rollback()
+
+	if err := migration.Fn(ctx, tx); err != nil {
+		return fmt.Errorf("apply migration %s: %w", migration.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`, migration.ID, formatTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("record migration %s: %w", migration.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit migration %s: %w", migration.ID, err)
+	}
+	return nil
+}
+
+func migrateInitialSchema(ctx context.Context, tx *sql.Tx) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS monitor_states (
 			monitor_id TEXT PRIMARY KEY,
@@ -134,7 +210,6 @@ func (s *Store) migrate(ctx context.Context) error {
 			url TEXT NOT NULL,
 			expected_status_code INTEGER NOT NULL,
 			status TEXT NOT NULL,
-			status_before_maintenance TEXT NOT NULL DEFAULT '',
 			consecutive_failures INTEGER NOT NULL,
 			last_checked_at TEXT,
 			last_success_at TEXT,
@@ -150,10 +225,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			ok INTEGER NOT NULL,
 			observed_status_code INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
-			response_time_ms INTEGER NOT NULL DEFAULT 0,
-			attempt_count INTEGER NOT NULL DEFAULT 1,
-			error TEXT NOT NULL,
-			maintenance_window_id INTEGER
+			error TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked
 			ON probe_results (monitor_id, checked_at DESC)`,
@@ -176,19 +248,36 @@ func (s *Store) migrate(ctx context.Context) error {
 			monitor_id TEXT NOT NULL,
 			provider TEXT NOT NULL,
 			attempted_at TEXT NOT NULL,
-			attempt_number INTEGER NOT NULL DEFAULT 1,
 			success INTEGER NOT NULL,
 			error TEXT NOT NULL,
-			next_retry_at TEXT,
-			retry_exhausted INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (incident_id) REFERENCES incidents(id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident
 			ON alert_notifications (incident_id)`,
+	}
+	return execMigrationStatements(ctx, tx, statements)
+}
+
+func migrateAlertNotificationRetries(ctx context.Context, tx *sql.Tx) error {
+	if err := addColumnIfMissing(ctx, tx, "alert_notifications", "attempt_number", `ALTER TABLE alert_notifications ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, tx, "alert_notifications", "next_retry_at", `ALTER TABLE alert_notifications ADD COLUMN next_retry_at TEXT`); err != nil {
+		return err
+	}
+	if err := addColumnIfMissing(ctx, tx, "alert_notifications", "retry_exhausted", `ALTER TABLE alert_notifications ADD COLUMN retry_exhausted INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	return execMigrationStatements(ctx, tx, []string{
 		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_monitor_attempted
 			ON alert_notifications (monitor_id, attempted_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_attempted
 			ON alert_notifications (attempted_at DESC)`,
+	})
+}
+
+func migrateMaintenanceWindows(ctx context.Context, tx *sql.Tx) error {
+	return execMigrationStatements(ctx, tx, []string{
 		`CREATE TABLE IF NOT EXISTS maintenance_windows (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			monitor_id TEXT NOT NULL,
@@ -203,84 +292,57 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_maintenance_windows_monitor_time
 			ON maintenance_windows (monitor_id, starts_at, ends_at)`,
+	})
+}
+
+func migrateMonitorStatusBeforeMaintenance(ctx context.Context, tx *sql.Tx) error {
+	return addColumnIfMissing(ctx, tx, "monitor_states", "status_before_maintenance", `ALTER TABLE monitor_states ADD COLUMN status_before_maintenance TEXT NOT NULL DEFAULT ''`)
+}
+
+func migrateProbeResponseTimeAndMaintenance(ctx context.Context, tx *sql.Tx) error {
+	if err := addColumnIfMissing(ctx, tx, "probe_results", "response_time_ms", `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
 	}
+	return addColumnIfMissing(ctx, tx, "probe_results", "maintenance_window_id", `ALTER TABLE probe_results ADD COLUMN maintenance_window_id INTEGER`)
+}
+
+func migrateProbeAttemptCount(ctx context.Context, tx *sql.Tx) error {
+	return addColumnIfMissing(ctx, tx, "probe_results", "attempt_count", `ALTER TABLE probe_results ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1`)
+}
+
+func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
 	for _, statement := range statements {
-		if _, err := s.db.ExecContext(ctx, statement); err != nil {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("migrate sqlite database: %w", err)
 		}
 	}
-	if err := s.ensureAlertNotificationColumns(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureProbeResultColumns(ctx); err != nil {
-		return err
-	}
-	if err := s.ensureMonitorStateColumns(ctx); err != nil {
-		return err
-	}
 	return nil
 }
 
-func (s *Store) ensureMonitorStateColumns(ctx context.Context) error {
-	columns, err := s.tableColumns(ctx, "monitor_states")
+func addColumnIfMissing(ctx context.Context, tx *sql.Tx, table string, column string, statement string) error {
+	columns, err := tableColumns(ctx, tx, table)
 	if err != nil {
 		return err
 	}
-	alterStatements := map[string]string{
-		"status_before_maintenance": `ALTER TABLE monitor_states ADD COLUMN status_before_maintenance TEXT NOT NULL DEFAULT ''`,
+	if columns[column] {
+		return nil
 	}
-	for column, statement := range alterStatements {
-		if !columns[column] {
-			if _, err := s.db.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate monitor_states.%s: %w", column, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Store) ensureProbeResultColumns(ctx context.Context) error {
-	columns, err := s.tableColumns(ctx, "probe_results")
-	if err != nil {
-		return err
-	}
-	alterStatements := map[string]string{
-		"response_time_ms":      `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`,
-		"attempt_count":         `ALTER TABLE probe_results ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1`,
-		"maintenance_window_id": `ALTER TABLE probe_results ADD COLUMN maintenance_window_id INTEGER`,
-	}
-	for column, statement := range alterStatements {
-		if !columns[column] {
-			if _, err := s.db.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate probe_results.%s: %w", column, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Store) ensureAlertNotificationColumns(ctx context.Context) error {
-	columns, err := s.tableColumns(ctx, "alert_notifications")
-	if err != nil {
-		return err
-	}
-	alterStatements := map[string]string{
-		"attempt_number":  `ALTER TABLE alert_notifications ADD COLUMN attempt_number INTEGER NOT NULL DEFAULT 1`,
-		"next_retry_at":   `ALTER TABLE alert_notifications ADD COLUMN next_retry_at TEXT`,
-		"retry_exhausted": `ALTER TABLE alert_notifications ADD COLUMN retry_exhausted INTEGER NOT NULL DEFAULT 0`,
-	}
-	for column, statement := range alterStatements {
-		if !columns[column] {
-			if _, err := s.db.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate alert_notifications.%s: %w", column, err)
-			}
-		}
+	if _, err := tx.ExecContext(ctx, statement); err != nil {
+		return fmt.Errorf("migrate %s.%s: %w", table, column, err)
 	}
 	return nil
 }
 
 func (s *Store) tableColumns(ctx context.Context, table string) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
+	return tableColumns(ctx, s.db, table)
+}
+
+type queryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func tableColumns(ctx context.Context, db queryer, table string) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(`+table+`)`)
 	if err != nil {
 		return nil, err
 	}

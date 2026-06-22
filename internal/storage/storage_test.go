@@ -181,6 +181,63 @@ func TestOpenCreatesProbeResultsResponseTimeColumn(t *testing.T) {
 	if !columns["response_time_ms"] {
 		t.Fatal("probe_results.response_time_ms column is missing")
 	}
+	if !columns["attempt_count"] {
+		t.Fatal("probe_results.attempt_count column is missing")
+	}
+}
+
+func TestOpenRecordsSchemaMigrationsAndDoesNotReapplyThem(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstCount := migrationCount(t, store)
+	if firstCount != len(migrations()) {
+		t.Fatalf("schema migration count = %d, want %d", firstCount, len(migrations()))
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	secondCount := migrationCount(t, store)
+	if secondCount != firstCount {
+		t.Fatalf("schema migration count after reopen = %d, want %d", secondCount, firstCount)
+	}
+}
+
+func TestFailedMigrationIsNotRecorded(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	err = store.applyMigration(context.Background(), migration{
+		ID: "9999_failing_migration",
+		Fn: func(ctx context.Context, tx *sql.Tx) error {
+			_, err := tx.ExecContext(ctx, `ALTER TABLE table_that_does_not_exist ADD COLUMN value TEXT`)
+			return err
+		},
+	})
+	if err == nil {
+		t.Fatal("expected migration failure")
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM schema_migrations WHERE id = ?`, "9999_failing_migration").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("failed migration records = %d, want 0", count)
+	}
 }
 
 func TestOpenMigratesProbeResultsResponseTimeColumn(t *testing.T) {
@@ -218,6 +275,21 @@ func TestOpenMigratesProbeResultsResponseTimeColumn(t *testing.T) {
 	if !columns["response_time_ms"] {
 		t.Fatal("probe_results.response_time_ms column is missing after migration")
 	}
+	if !columns["attempt_count"] {
+		t.Fatal("probe_results.attempt_count column is missing after migration")
+	}
+	if migrationCount(t, store) != len(migrations()) {
+		t.Fatalf("schema migration count = %d, want %d", migrationCount(t, store), len(migrations()))
+	}
+}
+
+func migrationCount(t *testing.T, store *Store) int {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM schema_migrations`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
 }
 
 func TestSaveProbeAndStatePersistsResponseTime(t *testing.T) {

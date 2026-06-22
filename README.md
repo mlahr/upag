@@ -12,7 +12,7 @@ transition DOWN or UP.
 - Optional maximum full response duration checks.
 - Per-monitor intervals and timeouts with global defaults.
 - SQLite persistence for monitor state, probe history, incidents, and alert
-  notification attempts.
+  notification attempts, with automatic startup migrations.
 - Email incident alerts through SMTP, the Mailtrap Transactional Email API, or
   both.
 - Retry storage for failed alert notification attempts.
