@@ -4,7 +4,7 @@ project_name: upag
 
 builds:
   - id: upag
-    main: ./main.go
+    main: .
     binary: upag
     env:
       - CGO_ENABLED=1
