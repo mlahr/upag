@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"upag/internal/app"
 	"upag/internal/cli"
 	"upag/internal/config"
+	"upag/internal/daemon"
 	"upag/internal/storage"
 )
 
@@ -29,8 +31,16 @@ func run(args []string) error {
 	switch args[0] {
 	case "run":
 		return runDaemon(args[1:])
+	case "start":
+		return runStart(args[1:])
+	case "stop":
+		return runStop(args[1:])
 	case "status":
-		return runStatus(args[1:])
+		return runDaemonStatus(args[1:])
+	case "restart":
+		return runRestart(args[1:])
+	case "monitors":
+		return runMonitors(args[1:])
 	case "incidents":
 		return runIncidents(args[1:])
 	default:
@@ -67,8 +77,91 @@ func runDaemon(args []string) error {
 	return runner.Run(ctx)
 }
 
-func runStatus(args []string) error {
+func runStart(args []string) error {
+	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
+	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	pid, err := daemon.Start(daemon.Options{
+		ConfigPath: *configPath,
+		DBPath:     *dbPath,
+		PIDFile:    *pidFile,
+		LogFile:    *logFile,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "upag daemon started with PID %d\n", pid)
+	return nil
+}
+
+func runStop(args []string) error {
+	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := daemon.Stop(*pidFile, 5*time.Second); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stdout, "upag daemon stopped")
+	return nil
+}
+
+func runDaemonStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	status, err := daemon.Inspect(*pidFile)
+	if err != nil {
+		return err
+	}
+	if status.Running {
+		fmt.Fprintf(os.Stdout, "upag daemon is running with PID %d using pid file %s\n", status.PID, status.PIDFile)
+		return nil
+	}
+	if status.StaleFile {
+		return fmt.Errorf("upag daemon is not running; pid file %s is stale for PID %d", status.PIDFile, status.PID)
+	}
+	return daemon.ErrNotRunning
+}
+
+func runRestart(args []string) error {
+	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
+	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	if err := daemon.Stop(*pidFile, 5*time.Second); err != nil && err != daemon.ErrNotRunning {
+		return err
+	}
+	pid, err := daemon.Start(daemon.Options{
+		ConfigPath: *configPath,
+		DBPath:     *dbPath,
+		PIDFile:    *pidFile,
+		LogFile:    *logFile,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stdout, "upag daemon restarted with PID %d\n", pid)
+	return nil
+}
+
+func runMonitors(args []string) error {
+	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
 	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -109,5 +202,5 @@ func runIncidents(args []string) error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag <run|status|incidents> [flags]")
+	return fmt.Errorf("usage: upag <run|start|stop|status|restart|monitors|incidents> [flags]")
 }

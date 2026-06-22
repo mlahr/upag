@@ -31,6 +31,15 @@ HTTPS certificates are verified by default. Set `insecure_skip_verify: true` onl
 ./upag run --config ./config.yaml --db ./upag.sqlite
 ```
 
+Run as a background daemon:
+
+```sh
+./upag start --config ./config.yaml --db ./upag.sqlite --pid-file ./upag.pid --log-file ./upag.log
+./upag status --pid-file ./upag.pid
+./upag restart --config ./config.yaml --db ./upag.sqlite --pid-file ./upag.pid --log-file ./upag.log
+./upag stop --pid-file ./upag.pid
+```
+
 Reload configuration without restarting the process:
 
 ```sh
@@ -42,7 +51,7 @@ Configuration reloads add new monitors, update monitors with matching IDs, and s
 ## Inspect
 
 ```sh
-./upag status --db ./upag.sqlite
+./upag monitors --db ./upag.sqlite
 ./upag incidents --db ./upag.sqlite --limit 50
 ```
 

@@ -2,7 +2,7 @@ check = "npm test"
 idle_seconds = 60
 snapshot_mode = "both"
 commit_mode = "checkpoint"
-msg_source_cmd = ""
+msg_source_cmd = 'gommit -A -n --diff-base "$AUTOSNAP_DIFF_BASE"'
 log_max_bytes = 10485760
 
 [watch]
