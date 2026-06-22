@@ -48,6 +48,16 @@ type Incident struct {
 	StatusCode int
 }
 
+type AlertNotification struct {
+	ID          int64
+	IncidentID  int64
+	MonitorID   string
+	Provider    string
+	AttemptedAt time.Time
+	Success     bool
+	Error       string
+}
+
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite3", path+"?_foreign_keys=on&_busy_timeout=5000")
 	if err != nil {
@@ -105,6 +115,22 @@ func (s *Store) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_incidents_observed
 			ON incidents (observed_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS alert_notifications (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			incident_id INTEGER NOT NULL,
+			monitor_id TEXT NOT NULL,
+			provider TEXT NOT NULL,
+			attempted_at TEXT NOT NULL,
+			success INTEGER NOT NULL,
+			error TEXT NOT NULL,
+			FOREIGN KEY (incident_id) REFERENCES incidents(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident
+			ON alert_notifications (incident_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_monitor_attempted
+			ON alert_notifications (monitor_id, attempted_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_alert_notifications_attempted
+			ON alert_notifications (attempted_at DESC)`,
 	}
 	for _, statement := range statements {
 		if _, err := s.db.ExecContext(ctx, statement); err != nil {
@@ -130,10 +156,10 @@ func (s *Store) GetState(ctx context.Context, monitorID string) (MonitorState, b
 	return state, true, nil
 }
 
-func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident) error {
+func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 
@@ -141,7 +167,7 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		(monitor_id, checked_at, ok, observed_status_code, latency_ms, error)
 		VALUES (?, ?, ?, ?, ?, ?)`,
 		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.Error); err != nil {
-		return fmt.Errorf("insert probe result: %w", err)
+		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_states
@@ -164,18 +190,46 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		next.MonitorID, next.Name, next.URL, next.ExpectedStatusCode, next.Status, next.ConsecutiveFailures,
 		formatTime(next.LastCheckedAt), formatTime(next.LastSuccessAt), formatTime(next.LastFailureAt), next.LastError,
 		next.LastObservedStatusCode, formatTime(next.UpdatedAt)); err != nil {
-		return fmt.Errorf("save monitor state: %w", err)
+		return 0, fmt.Errorf("save monitor state: %w", err)
 	}
 
+	var incidentID int64
 	if incident != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO incidents
+		result, err := tx.ExecContext(ctx, `INSERT INTO incidents
 			(monitor_id, name, transition, observed_at, error, status_code)
 			VALUES (?, ?, ?, ?, ?, ?)`,
-			incident.MonitorID, incident.Name, incident.Transition, formatTime(incident.ObservedAt), incident.Error, incident.StatusCode); err != nil {
-			return fmt.Errorf("insert incident: %w", err)
+			incident.MonitorID, incident.Name, incident.Transition, formatTime(incident.ObservedAt), incident.Error, incident.StatusCode)
+		if err != nil {
+			return 0, fmt.Errorf("insert incident: %w", err)
 		}
+		incidentID, err = result.LastInsertId()
+		if err != nil {
+			return 0, fmt.Errorf("get incident id: %w", err)
+		}
+		incident.ID = incidentID
 	}
 
+	return incidentID, tx.Commit()
+}
+
+func (s *Store) SaveAlertNotifications(ctx context.Context, notifications []AlertNotification) error {
+	if len(notifications) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, notification := range notifications {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO alert_notifications
+			(incident_id, monitor_id, provider, attempted_at, success, error)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			notification.IncidentID, notification.MonitorID, notification.Provider, formatTime(notification.AttemptedAt),
+			boolInt(notification.Success), notification.Error); err != nil {
+			return fmt.Errorf("insert alert notification: %w", err)
+		}
+	}
 	return tx.Commit()
 }
 
@@ -240,6 +294,34 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 		incidents = append(incidents, incident)
 	}
 	return incidents, rows.Err()
+}
+
+func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertNotification, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		id, incident_id, monitor_id, provider, attempted_at, success, error
+		FROM alert_notifications
+		ORDER BY attempted_at DESC, id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var notifications []AlertNotification
+	for rows.Next() {
+		var notification AlertNotification
+		var attempted string
+		var success int
+		if err := rows.Scan(&notification.ID, &notification.IncidentID, &notification.MonitorID, &notification.Provider, &attempted, &success, &notification.Error); err != nil {
+			return nil, err
+		}
+		notification.AttemptedAt = parseTime(attempted)
+		notification.Success = intBool(success)
+		notifications = append(notifications, notification)
+	}
+	return notifications, rows.Err()
 }
 
 func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
@@ -311,4 +393,8 @@ func boolInt(value bool) int {
 		return 1
 	}
 	return 0
+}
+
+func intBool(value int) bool {
+	return value != 0
 }

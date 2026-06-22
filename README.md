@@ -1,6 +1,6 @@
 # upag
 
-`upag` is an internal HTTP(S) uptime monitor. It runs as one Go daemon on a private VPS or container, reads monitor definitions from YAML, records state and probe history in SQLite, and sends email alerts through SMTP when monitors transition DOWN or UP.
+`upag` is an internal HTTP(S) uptime monitor. It runs as one Go daemon on a private VPS or container, reads monitor definitions from YAML, records state and probe history in SQLite, and sends email alerts through SMTP or Mailtrap when monitors transition DOWN or UP.
 
 ## Build
 
@@ -13,6 +13,32 @@ The SQLite driver uses CGO, so the build environment needs a C compiler.
 ## Configure
 
 Start from `config.example.yaml`.
+
+Alert delivery uses every configured provider. A config with only `smtp:` sends
+through SMTP. A config with only `mailtrap:` sends through Mailtrap. A config
+with both blocks sends each incident alert through both providers.
+
+```yaml
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to:
+    - ops@example.com
+```
+
+For Mailtrap's HTTPS Transactional Email API, use:
+
+```yaml
+mailtrap:
+  token: change-me
+  from: alerts@example.com
+  from_name: upag
+  to:
+    - ops@example.com
+```
+
+When `mailtrap.endpoint` is omitted, it defaults to
+`https://send.api.mailtrap.io/api/send`.
 
 Each monitor requires:
 
@@ -43,7 +69,9 @@ Run as a background daemon:
 The daemon writes line-oriented logs to stdout and stderr. When started with `start`,
 both streams are appended to `--log-file`. Logged events include daemon start,
 daemon ready, daemon shutdown, configuration reloads, probe results, state
-storage failures, email alert failures, and history prune failures.
+storage failures, alert decisions, alert notification storage failures, and
+history prune failures. Alert notification send attempts for transition
+incidents are also persisted in SQLite.
 
 Reload configuration without restarting the process:
 

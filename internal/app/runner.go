@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -27,7 +28,7 @@ type Runner struct {
 	mu      sync.Mutex
 	logMu   sync.Mutex
 	cfg     config.Config
-	emailer *alert.Emailer
+	emailer alert.IncidentSender
 	workers map[string]context.CancelFunc
 }
 
@@ -38,7 +39,7 @@ func NewRunner(configPath string, cfg config.Config, store *storage.Store, out i
 		store:      store,
 		out:        out,
 		errOut:     errOut,
-		emailer:    alert.NewEmailer(cfg.SMTP),
+		emailer:    alert.NewIncidentSender(cfg),
 		workers:    map[string]context.CancelFunc{},
 	}, nil
 }
@@ -107,7 +108,7 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 		go r.runMonitor(workerCtx, cfg.Defaults.FailureThreshold, mon)
 	}
 	r.cfg = cfg
-	r.emailer = alert.NewEmailer(cfg.SMTP)
+	r.emailer = alert.NewIncidentSender(cfg)
 }
 
 func (r *Runner) stopAll() {
@@ -189,19 +190,31 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 			StatusCode: result.ObservedStatusCode,
 		}
 	}
-	if err := r.store.SaveProbeAndState(ctx, probeResult, next, incident); err != nil {
+	incidentID, err := r.store.SaveProbeAndState(ctx, probeResult, next, incident)
+	if err != nil {
 		r.logError("state_write_failed", "monitor_id=%q error=%q", mon.ID, err)
 		return
 	}
 	r.logProbe(mon, result, next.Status)
+	r.mu.Lock()
+	emailer := r.emailer
+	providers := strings.Join(emailer.Providers(), ",")
+	r.mu.Unlock()
 	if incident != nil {
-		r.mu.Lock()
-		emailer := r.emailer
-		r.mu.Unlock()
-		if err := emailer.SendIncident(*incident, next); err != nil {
-			r.logError("email_alert_failed", "monitor_id=%q error=%q", mon.ID, err)
+		attemptedAt := time.Now().UTC()
+		results := emailer.SendIncident(*incident, next)
+		notifications := alertNotifications(incidentID, mon.ID, attemptedAt, results)
+		if err := r.store.SaveAlertNotifications(ctx, notifications); err != nil {
+			r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d error=%q", mon.ID, incidentID, err)
 		}
+		if err := alert.SendResultsError(results); err != nil {
+			r.logAlertDecision("error", mon, previous.Status, next.Status, evaluation.IncidentTransition, providers, false, "", err)
+			return
+		}
+		r.logAlertDecision("info", mon, previous.Status, next.Status, evaluation.IncidentTransition, providers, true, "", nil)
+		return
 	}
+	r.logAlertDecision("info", mon, previous.Status, next.Status, "", providers, false, alertSkipReason(previous, next, result, threshold), nil)
 }
 
 func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, status string) {
@@ -220,6 +233,47 @@ func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, statu
 		result.Latency.Milliseconds(),
 		result.Error,
 	)
+}
+
+func (r *Runner) logAlertDecision(level string, mon config.MonitorConfig, previousStatus string, status string, transition string, providers string, sent bool, reason string, err error) {
+	format := "monitor_id=%q name=%q monitor_status=%q previous_status=%q transition=%q alert_sent=%t providers=%q reason=%q error=%q"
+	errorText := ""
+	if err != nil {
+		errorText = err.Error()
+	}
+	r.log(level, "alert_decision", format, mon.ID, mon.Name, status, previousStatus, transition, sent, providers, reason, errorText)
+}
+
+func alertSkipReason(previous storage.MonitorState, next storage.MonitorState, result checker.Result, threshold int) string {
+	if !result.OK && next.Status == state.Failing && next.ConsecutiveFailures < threshold {
+		return "failure_threshold_not_reached"
+	}
+	if previous.Status == state.Down && next.Status == state.Down {
+		return "already_down"
+	}
+	if previous.Status == state.Up && next.Status == state.Up {
+		return "already_up"
+	}
+	return "no_state_transition"
+}
+
+func alertNotifications(incidentID int64, monitorID string, attemptedAt time.Time, results []alert.SendResult) []storage.AlertNotification {
+	notifications := make([]storage.AlertNotification, 0, len(results))
+	for _, result := range results {
+		errorText := ""
+		if result.Error != nil {
+			errorText = result.Error.Error()
+		}
+		notifications = append(notifications, storage.AlertNotification{
+			IncidentID:  incidentID,
+			MonitorID:   monitorID,
+			Provider:    result.Provider,
+			AttemptedAt: attemptedAt,
+			Success:     result.Error == nil,
+			Error:       errorText,
+		})
+	}
+	return notifications
 }
 
 func (r *Runner) logInfo(event string, format string, args ...any) {

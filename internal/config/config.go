@@ -13,6 +13,7 @@ import (
 
 type Config struct {
 	SMTP     SMTPConfig      `yaml:"smtp"`
+	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
 }
@@ -26,6 +27,14 @@ type SMTPConfig struct {
 	From      string   `yaml:"from"`
 	To        []string `yaml:"to"`
 	LocalName string   `yaml:"local_name"`
+}
+
+type MailtrapConfig struct {
+	Token    string   `yaml:"token"`
+	Endpoint string   `yaml:"endpoint"`
+	From     string   `yaml:"from"`
+	FromName string   `yaml:"from_name"`
+	To       []string `yaml:"to"`
 }
 
 type Defaults struct {
@@ -101,6 +110,9 @@ func (c *Config) ApplyDefaults() {
 	if c.SMTP.TLS == "" {
 		c.SMTP.TLS = "starttls"
 	}
+	if c.Mailtrap.Endpoint == "" {
+		c.Mailtrap.Endpoint = "https://send.api.mailtrap.io/api/send"
+	}
 	for i := range c.Monitors {
 		if c.Monitors[i].Interval.Duration == 0 {
 			c.Monitors[i].Interval = c.Defaults.Interval
@@ -111,24 +123,63 @@ func (c *Config) ApplyDefaults() {
 	}
 }
 
+func (c SMTPConfig) IsConfigured() bool {
+	return c.Host != "" ||
+		c.Username != "" ||
+		c.Password != "" ||
+		c.From != "" ||
+		len(c.To) != 0 ||
+		c.LocalName != ""
+}
+
+func (c MailtrapConfig) IsConfigured() bool {
+	return c.Token != "" ||
+		c.From != "" ||
+		c.FromName != "" ||
+		len(c.To) != 0
+}
+
 func (c Config) Validate() error {
 	var errs []error
-	if c.SMTP.Host == "" {
-		errs = append(errs, errors.New("smtp.host is required"))
+	smtpConfigured := c.SMTP.IsConfigured()
+	mailtrapConfigured := c.Mailtrap.IsConfigured()
+	if !smtpConfigured && !mailtrapConfigured {
+		errs = append(errs, errors.New("at least one alert provider must be configured"))
 	}
-	if c.SMTP.Port <= 0 || c.SMTP.Port > 65535 {
-		errs = append(errs, errors.New("smtp.port must be a TCP port number from 1 through 65535"))
+	if smtpConfigured {
+		if c.SMTP.Host == "" {
+			errs = append(errs, errors.New("smtp.host is required"))
+		}
+		if c.SMTP.Port <= 0 || c.SMTP.Port > 65535 {
+			errs = append(errs, errors.New("smtp.port must be a TCP port number from 1 through 65535"))
+		}
+		switch c.SMTP.TLS {
+		case "none", "starttls", "tls":
+		default:
+			errs = append(errs, errors.New("smtp.tls must be one of: none, starttls, tls"))
+		}
+		if c.SMTP.From == "" {
+			errs = append(errs, errors.New("smtp.from is required"))
+		}
+		if len(c.SMTP.To) == 0 {
+			errs = append(errs, errors.New("smtp.to must contain at least one recipient"))
+		}
 	}
-	switch c.SMTP.TLS {
-	case "none", "starttls", "tls":
-	default:
-		errs = append(errs, errors.New("smtp.tls must be one of: none, starttls, tls"))
-	}
-	if c.SMTP.From == "" {
-		errs = append(errs, errors.New("smtp.from is required"))
-	}
-	if len(c.SMTP.To) == 0 {
-		errs = append(errs, errors.New("smtp.to must contain at least one recipient"))
+	if mailtrapConfigured {
+		if c.Mailtrap.Token == "" {
+			errs = append(errs, errors.New("mailtrap.token is required"))
+		}
+		if c.Mailtrap.Endpoint == "" {
+			errs = append(errs, errors.New("mailtrap.endpoint is required"))
+		} else if err := validateHTTPURL(c.Mailtrap.Endpoint); err != nil {
+			errs = append(errs, fmt.Errorf("mailtrap.endpoint: %w", err))
+		}
+		if c.Mailtrap.From == "" {
+			errs = append(errs, errors.New("mailtrap.from is required"))
+		}
+		if len(c.Mailtrap.To) == 0 {
+			errs = append(errs, errors.New("mailtrap.to must contain at least one recipient"))
+		}
 	}
 	if c.Defaults.Interval.Duration <= 0 {
 		errs = append(errs, errors.New("defaults.interval must be positive"))

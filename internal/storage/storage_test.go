@@ -37,7 +37,7 @@ func TestSaveProbeAndStatePersistsIncident(t *testing.T) {
 		ObservedAt: now,
 		Error:      "timeout",
 	}
-	err = store.SaveProbeAndState(context.Background(), ProbeResult{
+	incidentID, err := store.SaveProbeAndState(context.Background(), ProbeResult{
 		MonitorID: "home",
 		CheckedAt: now,
 		OK:        false,
@@ -45,6 +45,9 @@ func TestSaveProbeAndStatePersistsIncident(t *testing.T) {
 	}, next, incident)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if incidentID == 0 {
+		t.Fatal("incident id = 0, want nonzero")
 	}
 
 	loaded, ok, err := store.GetState(context.Background(), "home")
@@ -87,7 +90,7 @@ func TestListIncidentsIncludesFailedProbeBeforeTransition(t *testing.T) {
 		LastObservedStatusCode: 404,
 		UpdatedAt:              now,
 	}
-	err = store.SaveProbeAndState(context.Background(), ProbeResult{
+	incidentID, err := store.SaveProbeAndState(context.Background(), ProbeResult{
 		MonitorID:          "api",
 		CheckedAt:          now,
 		OK:                 false,
@@ -96,6 +99,9 @@ func TestListIncidentsIncludesFailedProbeBeforeTransition(t *testing.T) {
 	}, next, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if incidentID != 0 {
+		t.Fatalf("incident id = %d, want 0", incidentID)
 	}
 
 	incidents, err := store.ListIncidents(context.Background(), 10)
@@ -134,7 +140,7 @@ func TestDeleteStatesExceptRemovesStaleMonitorStates(t *testing.T) {
 			LastObservedStatusCode: 200,
 			UpdatedAt:              now,
 		}
-		err := store.SaveProbeAndState(context.Background(), ProbeResult{
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
 			MonitorID:          id,
 			CheckedAt:          now,
 			OK:                 true,
@@ -157,5 +163,82 @@ func TestDeleteStatesExceptRemovesStaleMonitorStates(t *testing.T) {
 	}
 	if states[0].MonitorID != "active" {
 		t.Fatalf("remaining monitor = %q, want active", states[0].MonitorID)
+	}
+}
+
+func TestSaveAlertNotificationsPersistsAttempts(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	next := MonitorState{
+		MonitorID:              "home",
+		Name:                   "Home",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 state.Down,
+		ConsecutiveFailures:    3,
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "timeout",
+		LastObservedStatusCode: 0,
+		UpdatedAt:              now,
+	}
+	incidentID, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID: "home",
+		CheckedAt: now,
+		OK:        false,
+		Error:     "timeout",
+	}, next, &Incident{
+		MonitorID:  "home",
+		Name:       "Home",
+		Transition: state.Down,
+		ObservedAt: now,
+		Error:      "timeout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = store.SaveAlertNotifications(context.Background(), []AlertNotification{
+		{
+			IncidentID:  incidentID,
+			MonitorID:   "home",
+			Provider:    "smtp",
+			AttemptedAt: now,
+			Success:     true,
+		},
+		{
+			IncidentID:  incidentID,
+			MonitorID:   "home",
+			Provider:    "mailtrap",
+			AttemptedAt: now,
+			Success:     false,
+			Error:       "invalid token",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	notifications, err := store.ListAlertNotifications(context.Background(), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notifications) != 2 {
+		t.Fatalf("notification count = %d, want 2", len(notifications))
+	}
+	byProvider := map[string]AlertNotification{}
+	for _, notification := range notifications {
+		byProvider[notification.Provider] = notification
+	}
+	if byProvider["smtp"].IncidentID != incidentID || !byProvider["smtp"].Success {
+		t.Fatalf("smtp notification = %+v, want success linked to incident %d", byProvider["smtp"], incidentID)
+	}
+	if byProvider["mailtrap"].IncidentID != incidentID || byProvider["mailtrap"].Success || byProvider["mailtrap"].Error != "invalid token" {
+		t.Fatalf("mailtrap notification = %+v, want failure linked to incident %d", byProvider["mailtrap"], incidentID)
 	}
 }

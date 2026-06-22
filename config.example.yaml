@@ -8,6 +8,15 @@ smtp:
   to:
     - ops@example.com
 
+# To also use Mailtrap's HTTPS Transactional Email API, configure this block.
+# If both smtp and mailtrap are configured, alerts are sent through both.
+# mailtrap:
+#   token: change-me
+#   from: alerts@example.com
+#   from_name: upag
+#   to:
+#     - ops@example.com
+
 defaults:
   interval: 60s
   timeout: 10s
