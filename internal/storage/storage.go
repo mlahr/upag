@@ -35,6 +35,7 @@ type ProbeResult struct {
 	OK                 bool
 	ObservedStatusCode int
 	LatencyMS          int64
+	ResponseTimeMS     int64
 	Error              string
 }
 
@@ -107,6 +108,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			ok INTEGER NOT NULL,
 			observed_status_code INTEGER NOT NULL,
 			latency_ms INTEGER NOT NULL,
+			response_time_ms INTEGER NOT NULL DEFAULT 0,
 			error TEXT NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked
@@ -151,6 +153,27 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	if err := s.ensureAlertNotificationColumns(ctx); err != nil {
 		return err
+	}
+	if err := s.ensureProbeResultColumns(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureProbeResultColumns(ctx context.Context) error {
+	columns, err := s.tableColumns(ctx, "probe_results")
+	if err != nil {
+		return err
+	}
+	alterStatements := map[string]string{
+		"response_time_ms": `ALTER TABLE probe_results ADD COLUMN response_time_ms INTEGER NOT NULL DEFAULT 0`,
+	}
+	for column, statement := range alterStatements {
+		if !columns[column] {
+			if _, err := s.db.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate probe_results.%s: %w", column, err)
+			}
+		}
 	}
 	return nil
 }
@@ -222,9 +245,9 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, error)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.Error); err != nil {
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.Error); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 

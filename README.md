@@ -73,6 +73,18 @@ When `response_body` is omitted, only the HTTP status code is checked. Body
 assertions are evaluated only after the observed status code matches
 `expected_status_code`.
 
+Monitors can also assert a maximum full response duration:
+
+```yaml
+max_response_time: 500ms
+```
+
+`latency_ms` in logs and stored probe history is time to response headers.
+When `max_response_time` or `response_body` is configured, `response_time_ms`
+is the full response duration, ending after the response body has been read.
+Otherwise, `response_time_ms` is `0`. `max_response_time` is checked against
+`response_time_ms`.
+
 HTTPS certificates are verified by default. Set `insecure_skip_verify: true` only for internal endpoints that intentionally use self-signed or otherwise unverifiable certificates.
 
 ## Run

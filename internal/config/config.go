@@ -60,6 +60,7 @@ type MonitorConfig struct {
 	URL                string                 `yaml:"url"`
 	ExpectedStatusCode int                    `yaml:"expected_status_code"`
 	ResponseBody       ResponseBodyAssertions `yaml:"response_body"`
+	MaxResponseTime    Duration               `yaml:"max_response_time"`
 	Interval           Duration               `yaml:"interval"`
 	Timeout            Duration               `yaml:"timeout"`
 	InsecureSkipVerify bool                   `yaml:"insecure_skip_verify"`
@@ -258,6 +259,9 @@ func (c Config) Validate() error {
 		}
 		if monitor.ExpectedStatusCode < 100 || monitor.ExpectedStatusCode > 599 {
 			errs = append(errs, fmt.Errorf("%s.expected_status_code must be from 100 through 599", prefix))
+		}
+		if monitor.MaxResponseTime.Duration < 0 {
+			errs = append(errs, fmt.Errorf("%s.max_response_time must be positive", prefix))
 		}
 		if monitor.Interval.Duration <= 0 {
 			errs = append(errs, fmt.Errorf("%s.interval must be positive", prefix))

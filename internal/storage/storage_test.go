@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -163,6 +164,99 @@ func TestDeleteStatesExceptRemovesStaleMonitorStates(t *testing.T) {
 	}
 	if states[0].MonitorID != "active" {
 		t.Fatalf("remaining monitor = %q, want active", states[0].MonitorID)
+	}
+}
+
+func TestOpenCreatesProbeResultsResponseTimeColumn(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	columns, err := store.tableColumns(context.Background(), "probe_results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !columns["response_time_ms"] {
+		t.Fatal("probe_results.response_time_ms column is missing")
+	}
+}
+
+func TestOpenMigratesProbeResultsResponseTimeColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE probe_results (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		monitor_id TEXT NOT NULL,
+		checked_at TEXT NOT NULL,
+		ok INTEGER NOT NULL,
+		observed_status_code INTEGER NOT NULL,
+		latency_ms INTEGER NOT NULL,
+		error TEXT NOT NULL
+	)`)
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	columns, err := store.tableColumns(context.Background(), "probe_results")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !columns["response_time_ms"] {
+		t.Fatal("probe_results.response_time_ms column is missing after migration")
+	}
+}
+
+func TestSaveProbeAndStatePersistsResponseTime(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	next := MonitorState{
+		MonitorID:              "home",
+		Name:                   "Home",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 state.Up,
+		LastCheckedAt:          now,
+		LastSuccessAt:          now,
+		LastObservedStatusCode: 200,
+		UpdatedAt:              now,
+	}
+	_, err = store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID:          "home",
+		CheckedAt:          now,
+		OK:                 true,
+		ObservedStatusCode: 200,
+		LatencyMS:          12,
+		ResponseTimeMS:     34,
+	}, next, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got int64
+	if err := store.db.QueryRowContext(context.Background(), `SELECT response_time_ms FROM probe_results WHERE monitor_id = ?`, "home").Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != 34 {
+		t.Fatalf("response_time_ms = %d, want 34", got)
 	}
 }
 

@@ -111,6 +111,27 @@ monitors:
 	}
 }
 
+func TestParseAcceptsMaxResponseTime(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    max_response_time: 500ms
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Monitors[0].MaxResponseTime.Duration != 500*time.Millisecond {
+		t.Fatalf("max_response_time = %s, want 500ms", cfg.Monitors[0].MaxResponseTime.Duration)
+	}
+}
+
 func TestParseRejectsMissingAlertProvider(t *testing.T) {
 	_, err := Parse([]byte(`
 monitors:
@@ -190,6 +211,27 @@ monitors:
 		if !strings.Contains(message, want) {
 			t.Fatalf("validation error %q does not contain %q", message, want)
 		}
+	}
+}
+
+func TestParseRejectsNegativeMaxResponseTime(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    max_response_time: -1s
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "monitors[0].max_response_time must be positive") {
+		t.Fatalf("validation error %q does not contain max_response_time", err)
 	}
 }
 

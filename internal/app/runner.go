@@ -180,6 +180,7 @@ func (r *Runner) probe(ctx context.Context, threshold int, mon config.MonitorCon
 		OK:                 result.OK,
 		ObservedStatusCode: result.ObservedStatusCode,
 		LatencyMS:          result.Latency.Milliseconds(),
+		ResponseTimeMS:     result.ResponseTime.Milliseconds(),
 		Error:              result.Error,
 	}
 
@@ -272,7 +273,7 @@ func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, statu
 	if !result.OK {
 		level = "error"
 	}
-	r.log(level, "probe_result", "monitor_id=%q name=%q url=%q ok=%t monitor_status=%q observed_status_code=%d expected_status_code=%d latency_ms=%d error=%q",
+	r.log(level, "probe_result", "monitor_id=%q name=%q url=%q ok=%t monitor_status=%q observed_status_code=%d expected_status_code=%d latency_ms=%d response_time_ms=%d error=%q",
 		mon.ID,
 		mon.Name,
 		mon.URL,
@@ -281,6 +282,7 @@ func (r *Runner) logProbe(mon config.MonitorConfig, result checker.Result, statu
 		result.ObservedStatusCode,
 		mon.ExpectedStatusCode,
 		result.Latency.Milliseconds(),
+		result.ResponseTime.Milliseconds(),
 		result.Error,
 	)
 }
