@@ -60,10 +60,16 @@ func run(args []string) error {
 
 func runDaemon(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
-	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	configPath := fs.String("config", standaloneConfigPath, "path to YAML configuration")
+	dbPath := fs.String("db", standaloneDBPath, "path to SQLite database")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "config", Value: configPath, Default: func(d pathDefaults) string { return d.ConfigPath }},
+		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
+	); err != nil {
 		return err
 	}
 
@@ -102,12 +108,19 @@ func runDaemon(args []string) error {
 
 func runStart(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
-	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
-	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
-	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
-	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	configPath := fs.String("config", standaloneConfigPath, "path to YAML configuration")
+	dbPath := fs.String("db", standaloneDBPath, "path to SQLite database")
+	pidFile := fs.String("pid-file", standalonePIDFile, "path to daemon PID file")
+	logFile := fs.String("log-file", standaloneLogFile, "path to daemon log file")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "config", Value: configPath, Default: func(d pathDefaults) string { return d.ConfigPath }},
+		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
+		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	); err != nil {
 		return err
 	}
 
@@ -127,8 +140,13 @@ func runStart(args []string) error {
 
 func runStop(args []string) error {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
-	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	pidFile := fs.String("pid-file", standalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	); err != nil {
 		return err
 	}
 	if err := daemon.Stop(*pidFile, 5*time.Second); err != nil {
@@ -140,8 +158,13 @@ func runStop(args []string) error {
 
 func runDaemonStatus(args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
-	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	pidFile := fs.String("pid-file", standalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	); err != nil {
 		return err
 	}
 
@@ -161,12 +184,19 @@ func runDaemonStatus(args []string) error {
 
 func runRestart(args []string) error {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
-	configPath := fs.String("config", "./config.yaml", "path to YAML configuration")
-	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
-	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
-	logFile := fs.String("log-file", "./upag.log", "path to daemon log file")
+	configPath := fs.String("config", standaloneConfigPath, "path to YAML configuration")
+	dbPath := fs.String("db", standaloneDBPath, "path to SQLite database")
+	pidFile := fs.String("pid-file", standalonePIDFile, "path to daemon PID file")
+	logFile := fs.String("log-file", standaloneLogFile, "path to daemon log file")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "config", Value: configPath, Default: func(d pathDefaults) string { return d.ConfigPath }},
+		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
+		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	); err != nil {
 		return err
 	}
 
@@ -201,8 +231,13 @@ func runConfig(args []string) error {
 
 func runConfigReload(args []string) error {
 	fs := flag.NewFlagSet("config reload", flag.ContinueOnError)
-	pidFile := fs.String("pid-file", "./upag.pid", "path to daemon PID file")
+	pidFile := fs.String("pid-file", standalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "pid-file", Value: pidFile, Default: func(d pathDefaults) string { return d.PIDFile }},
+	); err != nil {
 		return err
 	}
 	pid, err := daemon.Reload(*pidFile)
@@ -215,8 +250,13 @@ func runConfigReload(args []string) error {
 
 func runMonitors(args []string) error {
 	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
-	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	dbPath := fs.String("db", standaloneDBPath, "path to SQLite database")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
+	); err != nil {
 		return err
 	}
 
@@ -235,9 +275,14 @@ func runMonitors(args []string) error {
 
 func runIncidents(args []string) error {
 	fs := flag.NewFlagSet("incidents", flag.ContinueOnError)
-	dbPath := fs.String("db", "./upag.sqlite", "path to SQLite database")
+	dbPath := fs.String("db", standaloneDBPath, "path to SQLite database")
 	limit := fs.Int("limit", 50, "maximum number of incidents to print")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := applyPathDefaults(fs,
+		pathDefaultTarget{FlagName: "db", Value: dbPath, Default: func(d pathDefaults) string { return d.DBPath }},
+	); err != nil {
 		return err
 	}
 

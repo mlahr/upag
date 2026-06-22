@@ -264,6 +264,8 @@ full response duration, ending after the response body has been read. Otherwise,
 When installed from the Debian package, `upag` runs as the `upag` system user.
 Configuration lives in `/etc/upag/config.yaml`, service defaults live in
 `/etc/default/upag`, and SQLite state lives in `/var/lib/upag/upag.sqlite`.
+Bare CLI commands read `/etc/default/upag` when it exists, so inspection
+commands use the packaged database and PID file without extra flags.
 
 Enable the packaged service only after configuring real alert credentials and
 monitors:
@@ -331,8 +333,8 @@ stop scheduling monitors removed from the YAML file.
 Inspect stored state:
 
 ```sh
-upag monitors --db ./upag.sqlite
-upag incidents --db ./upag.sqlite --limit 50
+upag monitors
+upag incidents --limit 50
 ```
 
 Print the binary version:

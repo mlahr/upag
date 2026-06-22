@@ -15,7 +15,6 @@ User=upag
 Group=upag
 StateDirectory=upag
 RuntimeDirectory=upag
-ConfigurationDirectory=upag
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
