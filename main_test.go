@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +141,105 @@ func TestRunRecognizesStorageMigrateCommandValidation(t *testing.T) {
 	}
 }
 
+func TestBuildPostgresDSNEncodesUserAndPassword(t *testing.T) {
+	dsn, err := buildPostgresDSN(postgresDSNOptions{
+		Host:     "db.example.supabase.co",
+		User:     "person@example.com",
+		Password: "abc@123:xyz/?#% '",
+		Database: "postgres",
+		Port:     5432,
+		SSLMode:  "require",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "postgres://person%40example.com:abc%40123%3Axyz%2F%3F%23%25%20%27@db.example.supabase.co:5432/postgres?sslmode=require"
+	if dsn != want {
+		t.Fatalf("dsn = %q, want %q", dsn, want)
+	}
+}
+
+func TestRunStorageDSNPrintsDSNWithoutTesting(t *testing.T) {
+	restorePassword := storageDSNReadPassword
+	storageDSNReadPassword = func() (string, error) { return "abc@123:xyz", nil }
+	t.Cleanup(func() { storageDSNReadPassword = restorePassword })
+
+	stdout := captureStdout(t, func() {
+		if err := run([]string{
+			"storage", "dsn",
+			"--host", "db.example.supabase.co",
+			"--user", "person@example.com",
+			"--no-test",
+			"--format", "dsn",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	want := "postgres://person%40example.com:abc%40123%3Axyz@db.example.supabase.co:5432/postgres?sslmode=require\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunStorageDSNPrintsYAMLSnippetWithoutTesting(t *testing.T) {
+	restorePassword := storageDSNReadPassword
+	storageDSNReadPassword = func() (string, error) { return "abc@123:xyz", nil }
+	t.Cleanup(func() { storageDSNReadPassword = restorePassword })
+
+	stdout := captureStdout(t, func() {
+		if err := run([]string{
+			"storage", "dsn",
+			"--host", "db.example.supabase.co",
+			"--user", "person@example.com",
+			"--no-test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	want := "storage:\n  backend: postgres\n  postgres:\n    dsn: 'postgres://person%40example.com:abc%40123%3Axyz@db.example.supabase.co:5432/postgres?sslmode=require'\n"
+	if stdout != want {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
+	}
+}
+
+func TestRunStorageDSNValidatesRequiredFlags(t *testing.T) {
+	restorePassword := storageDSNReadPassword
+	storageDSNReadPassword = func() (string, error) { return "password", nil }
+	t.Cleanup(func() { storageDSNReadPassword = restorePassword })
+
+	err := run([]string{"storage", "dsn", "--user", "person@example.com", "--no-test"})
+	if err == nil || !strings.Contains(err.Error(), "storage dsn requires --host") {
+		t.Fatalf("storage dsn error = %v, want missing host", err)
+	}
+	err = run([]string{"storage", "dsn", "--host", "db.example.supabase.co", "--no-test"})
+	if err == nil || !strings.Contains(err.Error(), "storage dsn requires --user") {
+		t.Fatalf("storage dsn error = %v, want missing user", err)
+	}
+}
+
+func TestRunStorageDSNValidatesFormat(t *testing.T) {
+	err := run([]string{
+		"storage", "dsn",
+		"--host", "db.example.supabase.co",
+		"--user", "person@example.com",
+		"--no-test",
+		"--format", "json",
+	})
+	if err == nil || !strings.Contains(err.Error(), "storage dsn --format must be one of: yaml, dsn") {
+		t.Fatalf("storage dsn error = %v, want invalid format", err)
+	}
+}
+
+func TestRunRejectsUnknownStorageCommand(t *testing.T) {
+	err := run([]string{"storage", "unknown"})
+	if err == nil {
+		t.Fatal("unknown storage command returned nil error")
+	}
+	if !strings.Contains(err.Error(), "usage: upag storage <migrate|dsn>") {
+		t.Fatalf("storage command error = %q, want storage usage", err.Error())
+	}
+}
+
 func TestRunStatusUsesPackagedPIDFileDefault(t *testing.T) {
 	pidFile := filepath.Join(t.TempDir(), "packaged.pid")
 	if err := os.WriteFile(pidFile, []byte("999999\n"), 0644); err != nil {
@@ -207,6 +307,31 @@ monitors:
 		t.Fatal(err)
 	}
 	return configPath
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	original := os.Stdout
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = write
+	defer func() { os.Stdout = original }()
+
+	fn()
+
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(output)
 }
 
 func seedMonitorState(t *testing.T, dbPath string, monitorID string) {

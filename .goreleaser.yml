@@ -45,7 +45,7 @@ nfpms:
       - adduser
       - lsb-base
     contents:
-      - src: packaging/debian/config.yaml
+      - src: packaging/debian/upag.config.yaml
         dst: /etc/upag/config.yaml
         type: config|noreplace
         file_info:

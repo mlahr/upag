@@ -5,12 +5,18 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"os/user"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/term"
 
 	"upag/internal/app"
 	"upag/internal/cli"
@@ -22,6 +28,7 @@ import (
 )
 
 var version = "dev"
+var storageDSNReadPassword = readStorageDSNPassword
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -335,9 +342,151 @@ func runStorage(args []string) error {
 	switch args[0] {
 	case "migrate":
 		return runStorageMigrate(args[1:])
+	case "dsn":
+		return runStorageDSN(args[1:])
 	default:
 		return storageUsage()
 	}
+}
+
+type postgresDSNOptions struct {
+	Host     string
+	User     string
+	Password string
+	Database string
+	Port     int
+	SSLMode  string
+}
+
+func buildPostgresDSN(opts postgresDSNOptions) (string, error) {
+	if err := validatePostgresDSNOptions(opts); err != nil {
+		return "", err
+	}
+	values := url.Values{}
+	values.Set("sslmode", strings.TrimSpace(opts.SSLMode))
+	dsn := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(strings.TrimSpace(opts.User), opts.Password),
+		Host:     net.JoinHostPort(strings.TrimSpace(opts.Host), strconv.Itoa(opts.Port)),
+		Path:     "/" + strings.TrimSpace(opts.Database),
+		RawQuery: values.Encode(),
+	}
+	return dsn.String(), nil
+}
+
+func validatePostgresDSNOptions(opts postgresDSNOptions) error {
+	host := strings.TrimSpace(opts.Host)
+	if host == "" {
+		return fmt.Errorf("storage dsn requires --host")
+	}
+	user := strings.TrimSpace(opts.User)
+	if user == "" {
+		return fmt.Errorf("storage dsn requires --user")
+	}
+	database := strings.TrimSpace(opts.Database)
+	if database == "" {
+		return fmt.Errorf("storage dsn --database is required")
+	}
+	if opts.Port <= 0 || opts.Port > 65535 {
+		return fmt.Errorf("storage dsn --port must be between 1 and 65535")
+	}
+	sslMode := strings.TrimSpace(opts.SSLMode)
+	if sslMode == "" {
+		return fmt.Errorf("storage dsn --sslmode is required")
+	}
+	return nil
+}
+
+func runStorageDSN(args []string) error {
+	fs := flag.NewFlagSet("storage dsn", flag.ContinueOnError)
+	host := fs.String("host", "", "PostgreSQL host, for example db.xxxxx.supabase.co")
+	user := fs.String("user", "", "PostgreSQL username")
+	database := fs.String("database", "postgres", "PostgreSQL database name")
+	port := fs.Int("port", 5432, "PostgreSQL port")
+	sslMode := fs.String("sslmode", "require", "PostgreSQL sslmode query parameter")
+	timeout := fs.Duration("timeout", 10*time.Second, "connectivity test timeout")
+	noTest := fs.Bool("no-test", false, "print the DSN without testing connectivity")
+	format := fs.String("format", "yaml", "output format: yaml or dsn")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *format != "yaml" && *format != "dsn" {
+		return fmt.Errorf("storage dsn --format must be one of: yaml, dsn")
+	}
+	if *timeout <= 0 {
+		return fmt.Errorf("storage dsn --timeout must be positive")
+	}
+
+	opts := postgresDSNOptions{
+		Host:     *host,
+		User:     *user,
+		Database: *database,
+		Port:     *port,
+		SSLMode:  *sslMode,
+	}
+	if err := validatePostgresDSNOptions(opts); err != nil {
+		return err
+	}
+	password, err := storageDSNReadPassword()
+	if err != nil {
+		return err
+	}
+	opts.Password = password
+	dsn, err := buildPostgresDSN(opts)
+	if err != nil {
+		return err
+	}
+
+	if !*noTest {
+		ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+		defer cancel()
+		fmt.Fprintln(os.Stderr, "Testing PostgreSQL connectivity with SELECT 1...")
+		if err := testPostgresDSN(ctx, dsn); err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stderr, "PostgreSQL connectivity OK")
+	}
+
+	switch *format {
+	case "dsn":
+		fmt.Fprintln(os.Stdout, dsn)
+	case "yaml":
+		fmt.Fprintln(os.Stdout, "storage:")
+		fmt.Fprintln(os.Stdout, "  backend: postgres")
+		fmt.Fprintln(os.Stdout, "  postgres:")
+		fmt.Fprintf(os.Stdout, "    dsn: '%s'\n", yamlSingleQuotedValue(dsn))
+	}
+	return nil
+}
+
+func readStorageDSNPassword() (string, error) {
+	fmt.Fprint(os.Stderr, "Postgres password: ")
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", fmt.Errorf("read Postgres password: %w", err)
+	}
+	return string(password), nil
+}
+
+func testPostgresDSN(ctx context.Context, dsn string) error {
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		return fmt.Errorf("open postgres connection pool: %w", err)
+	}
+	defer pool.Close()
+	var one int
+	if err := pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
+		return fmt.Errorf("test postgres connectivity: %w", err)
+	}
+	if one != 1 {
+		return fmt.Errorf("test postgres connectivity: SELECT 1 returned %d", one)
+	}
+	return nil
+}
+
+func yamlSingleQuotedValue(value string) string {
+	return strings.ReplaceAll(value, "'", "''")
 }
 
 func runStorageMigrate(args []string) error {
@@ -540,7 +689,7 @@ func maintenanceUsage() error {
 }
 
 func storageUsage() error {
-	return fmt.Errorf("usage: upag storage <migrate> [flags]")
+	return fmt.Errorf("usage: upag storage <migrate|dsn> [flags]")
 }
 
 func usage() error {
