@@ -87,9 +87,10 @@ func (s *PostgresStore) migrate(ctx context.Context) error {
 }
 
 func postgresMigrations() []postgresMigration {
-	return []postgresMigration{{
-		ID: "0001_current_schema",
-		SQL: `
+	return []postgresMigration{
+		{
+			ID: "0001_current_schema",
+			SQL: `
 CREATE TABLE IF NOT EXISTS monitor_states (
 	monitor_id TEXT PRIMARY KEY,
 	name TEXT NOT NULL,
@@ -204,7 +205,23 @@ CREATE TABLE IF NOT EXISTS probe_outcome_runs (
 );
 CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_monitor_started ON probe_outcome_runs (monitor_id, started_at);
 `,
-	}}
+		},
+		{
+			ID: "0002_query_path_indexes",
+			SQL: `
+CREATE INDEX IF NOT EXISTS idx_incidents_monitor_observed ON incidents (monitor_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident_provider_id ON alert_notifications (incident_id, provider, id);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_due_retries ON alert_notifications (next_retry_at, id)
+	WHERE success = FALSE
+		AND retry_exhausted = FALSE
+		AND next_retry_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_probe_minute_rollups_bucket_start ON probe_minute_rollups (bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_hourly_rollups_bucket_start ON probe_hourly_rollups (bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_daily_rollups_bucket_start ON probe_daily_rollups (bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_ended ON probe_outcome_runs (ended_at);
+`,
+		},
+	}
 }
 
 func (s *PostgresStore) GetState(ctx context.Context, monitorID string) (MonitorState, bool, error) {
