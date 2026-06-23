@@ -292,6 +292,15 @@ func migrationCount(t *testing.T, store *Store) int {
 	return count
 }
 
+func tableCount(t *testing.T, store *Store, table string) int {
+	t.Helper()
+	var count int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	return count
+}
+
 func TestSaveProbeAndStatePersistsResponseTime(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
@@ -506,6 +515,196 @@ func TestListUptimeStatsUsesStrictAccountingForConfirmedOutages(t *testing.T) {
 	}
 	if retained.ReportableSeconds != int64((10*time.Minute)/time.Second) {
 		t.Fatalf("retained reportable_seconds = %d, want 600", retained.ReportableSeconds)
+	}
+}
+
+func TestRollupAndPruneProbeResultsCompactsRawProbes(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	saveTestState(t, store, "home", now)
+	maintenanceID, err := store.AddMaintenanceWindow(context.Background(), MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  now.Add(-48 * time.Hour),
+		EndsAt:    now.Add(-47 * time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "michael",
+		CreatedAt: now.Add(-49 * time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, probe := range []ProbeResult{
+		{MonitorID: "home", CheckedAt: now.Add(-25 * time.Hour), OK: false},
+		{MonitorID: "home", CheckedAt: now.Add(-25*time.Hour + time.Minute), OK: false},
+		{MonitorID: "home", CheckedAt: now.Add(-25*time.Hour + 2*time.Minute), OK: false},
+		{MonitorID: "home", CheckedAt: now.Add(-25*time.Hour + 4*time.Minute), OK: true},
+		{MonitorID: "home", CheckedAt: now.Add(-47*time.Hour - 30*time.Minute), OK: false, MaintenanceWindowID: maintenanceID},
+		{MonitorID: "home", CheckedAt: now.Add(-23 * time.Hour), OK: true},
+	} {
+		_, err := store.SaveProbeAndState(context.Background(), probe, MonitorState{
+			MonitorID:     probe.MonitorID,
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        state.Up,
+			LastCheckedAt: probe.CheckedAt,
+			UpdatedAt:     probe.CheckedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = store.RollupAndPruneProbeResults(context.Background(), ProbeRetentionPolicy{
+		ProbeResults:       RollupRetention{Duration: 24 * time.Hour},
+		ProbeMinuteRollups: RollupRetention{Duration: 30 * 24 * time.Hour},
+		ProbeHourlyRollups: RollupRetention{Duration: 365 * 24 * time.Hour},
+		ProbeDailyRollups:  RollupRetention{Forever: true},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tableCount(t, store, "probe_results"); got != 2 {
+		t.Fatalf("probe_results count = %d, want two recent raw probes", got)
+	}
+	if got := tableCount(t, store, "probe_minute_rollups"); got != 5 {
+		t.Fatalf("probe_minute_rollups count = %d, want five compacted minutes", got)
+	}
+	if got := tableCount(t, store, "probe_outcome_runs"); got != 2 {
+		t.Fatalf("probe_outcome_runs count = %d, want failure and success runs", got)
+	}
+
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := stats["home"].Retained
+	if retained.TotalChecks != 6 || retained.SuccessfulChecks != 3 || retained.FailedChecks != 3 {
+		t.Fatalf("retained stats = %+v, want six reportable checks with three successes", retained)
+	}
+	if retained.MaintenanceChecks != 1 || retained.MaintenanceFailedChecks != 1 {
+		t.Fatalf("maintenance stats = %+v, want one failed maintenance check", retained)
+	}
+	if retained.DowntimeSeconds != int64((4*time.Minute)/time.Second) {
+		t.Fatalf("retained downtime_seconds = %d, want 240 from compacted outage run", retained.DowntimeSeconds)
+	}
+}
+
+func TestRollupAndPruneProbeResultsCompactsRollupLevels(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-40 * 24 * time.Hour)
+	for _, probe := range []ProbeResult{
+		{MonitorID: "home", CheckedAt: old, OK: true},
+		{MonitorID: "home", CheckedAt: old.Add(10 * time.Minute), OK: false},
+	} {
+		_, err = store.SaveProbeAndState(context.Background(), probe, MonitorState{
+			MonitorID:     "home",
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        state.Up,
+			LastCheckedAt: probe.CheckedAt,
+			UpdatedAt:     probe.CheckedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	err = store.RollupAndPruneProbeResults(context.Background(), ProbeRetentionPolicy{
+		ProbeResults:       RollupRetention{Duration: 24 * time.Hour},
+		ProbeMinuteRollups: RollupRetention{Duration: 30 * 24 * time.Hour},
+		ProbeHourlyRollups: RollupRetention{Duration: 365 * 24 * time.Hour},
+		ProbeDailyRollups:  RollupRetention{Forever: true},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tableCount(t, store, "probe_minute_rollups"); got != 0 {
+		t.Fatalf("probe_minute_rollups count = %d, want rolled into hourly", got)
+	}
+	if got := tableCount(t, store, "probe_hourly_rollups"); got != 1 {
+		t.Fatalf("probe_hourly_rollups count = %d, want one hourly rollup", got)
+	}
+	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := stats["home"].Retained
+	if retained.TotalChecks != 2 || retained.SuccessfulChecks != 1 || retained.FailedChecks != 1 {
+		t.Fatalf("retained stats = %+v, want two checks rolled into one hour", retained)
+	}
+	if got := tableCount(t, store, "probe_daily_rollups"); got != 0 {
+		t.Fatalf("probe_daily_rollups count = %d, want no daily rollup before hourly retention", got)
+	}
+}
+
+func TestRollupAndPruneProbeResultsMergesIncrementalBucketCompaction(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 6, 22, 10, 0, 0, 0, time.UTC)
+	for _, probe := range []ProbeResult{
+		{MonitorID: "home", CheckedAt: base.Add(10 * time.Second), OK: true},
+		{MonitorID: "home", CheckedAt: base.Add(50 * time.Second), OK: false},
+	} {
+		_, err := store.SaveProbeAndState(context.Background(), probe, MonitorState{
+			MonitorID:     "home",
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        state.Up,
+			LastCheckedAt: probe.CheckedAt,
+			UpdatedAt:     probe.CheckedAt,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	policy := ProbeRetentionPolicy{
+		ProbeResults:       RollupRetention{Duration: time.Hour},
+		ProbeMinuteRollups: RollupRetention{Duration: 30 * 24 * time.Hour},
+		ProbeHourlyRollups: RollupRetention{Duration: 365 * 24 * time.Hour},
+		ProbeDailyRollups:  RollupRetention{Forever: true},
+	}
+	if err := store.RollupAndPruneProbeResults(context.Background(), policy, base.Add(time.Hour+30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RollupAndPruneProbeResults(context.Background(), policy, base.Add(time.Hour+time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tableCount(t, store, "probe_results"); got != 0 {
+		t.Fatalf("probe_results count = %d, want all raw probes compacted", got)
+	}
+	if got := tableCount(t, store, "probe_minute_rollups"); got != 1 {
+		t.Fatalf("probe_minute_rollups count = %d, want one merged minute bucket", got)
+	}
+	stats, err := store.ListUptimeStats(context.Background(), base.Add(2*time.Hour), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retained := stats["home"].Retained
+	if retained.TotalChecks != 2 || retained.SuccessfulChecks != 1 || retained.FailedChecks != 1 {
+		t.Fatalf("retained stats = %+v, want merged minute bucket with two checks", retained)
+	}
+	if !retained.WindowStartedAt.Equal(base.Add(10*time.Second)) || !retained.WindowEndedAt.Equal(base.Add(50*time.Second)) {
+		t.Fatalf("retained window = %+v, want first and last compacted probe timestamps", retained)
 	}
 }
 

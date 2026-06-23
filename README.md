@@ -130,6 +130,16 @@ defaults:
   failure_threshold: 3
   history_retention: 720h
 
+storage:
+  probe_results:
+    retention: 24h
+  probe_minute_rollups:
+    retention: 30d
+  probe_hourly_rollups:
+    retention: 1y
+  probe_daily_rollups:
+    retention: forever
+
 monitors:
   - id: homepage
     name: Homepage
@@ -163,7 +173,8 @@ upag maintenance cancel --db ./upag.sqlite --id 1 --reason "finished"
 ## Configuration
 
 `upag` reads a YAML configuration file. Durations use Go duration syntax, such
-as `500ms`, `10s`, `1m`, or `720h`.
+as `500ms`, `10s`, `1m`, or `720h`. Storage retention also accepts `d` for
+24-hour days, `y` for 365-day years, and `forever`.
 
 Complete example:
 
@@ -209,6 +220,16 @@ defaults:
   timeout: 10s
   failure_threshold: 3
   history_retention: 720h
+
+storage:
+  probe_results:
+    retention: 24h
+  probe_minute_rollups:
+    retention: 30d
+  probe_hourly_rollups:
+    retention: 1y
+  probe_daily_rollups:
+    retention: forever
 
 monitors:
   - id: example
@@ -404,9 +425,10 @@ delivery for that same incident and provider.
 
 Each monitor's `uptime` object is calculated from stored probe history. The
 `24h`, `7d`, and `30d` windows include probes whose `checked_at` timestamp is
-inside that window, inclusive of the lower boundary. `retained` includes all
-currently stored probe results after history pruning. Checks covered by a
-maintenance window are excluded from `total_checks`, `successful_checks`, and
+inside that window, inclusive of the lower boundary for raw probes and at bucket
+granularity for compacted rollups. `retained` includes all available history
+across raw probe results and probe rollups. Checks covered by a maintenance
+window are excluded from `total_checks`, `successful_checks`, and
 `failed_checks`, but are still counted in `maintenance_checks` and
 `maintenance_failed_checks`.
 
@@ -432,7 +454,17 @@ to two decimal places. For a window with no reportable seconds,
   `500ms`.
 - `failure_threshold`: consecutive failed checks required before a monitor
   transitions DOWN. Defaults to `3`.
-- `history_retention`: retained probe history duration. Defaults to `720h`.
+- `history_retention`: legacy raw probe retention fallback. Defaults to `720h`
+  and is used only when `storage.probe_results.retention` is unset.
+
+`storage` controls probe compaction retention:
+
+- `probe_results.retention`: raw probe result retention. Defaults to
+  `defaults.history_retention`.
+- `probe_minute_rollups.retention`: minute rollup retention. Defaults to `30d`.
+- `probe_hourly_rollups.retention`: hourly rollup retention. Defaults to `1y`.
+- `probe_daily_rollups.retention`: daily rollup retention. Defaults to
+  `forever`.
 
 ### Observer Connectivity
 

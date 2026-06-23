@@ -18,6 +18,7 @@ type Config struct {
 	SMTP     SMTPConfig      `yaml:"smtp"`
 	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
 	Observer ObserverConfig  `yaml:"observer"`
+	Storage  StorageConfig   `yaml:"storage"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
 }
@@ -66,6 +67,21 @@ type ObserverConfig struct {
 	enabledSet        bool
 }
 
+type StorageConfig struct {
+	ProbeResults          RetentionConfig `yaml:"probe_results"`
+	ProbeMinuteRollups    RetentionConfig `yaml:"probe_minute_rollups"`
+	ProbeHourlyRollups    RetentionConfig `yaml:"probe_hourly_rollups"`
+	ProbeDailyRollups     RetentionConfig `yaml:"probe_daily_rollups"`
+	probeResultsSet       bool
+	probeMinuteRollupsSet bool
+	probeHourlyRollupsSet bool
+	probeDailyRollupsSet  bool
+}
+
+type RetentionConfig struct {
+	Retention RetentionDuration `yaml:"retention"`
+}
+
 type SentinelConfig struct {
 	ID                 string `yaml:"id"`
 	Name               string `yaml:"name"`
@@ -110,6 +126,11 @@ type Duration struct {
 	time.Duration
 }
 
+type RetentionDuration struct {
+	Duration time.Duration
+	Forever  bool
+}
+
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var raw string
 	if err := value.Decode(&raw); err != nil {
@@ -120,6 +141,41 @@ func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	d.Duration = parsed
+	return nil
+}
+
+func (d *RetentionDuration) UnmarshalYAML(value *yaml.Node) error {
+	var raw string
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "forever" {
+		d.Duration = 0
+		d.Forever = true
+		return nil
+	}
+	if strings.HasSuffix(raw, "d") || strings.HasSuffix(raw, "y") {
+		unit := raw[len(raw)-1]
+		number := strings.TrimSpace(raw[:len(raw)-1])
+		parsed, err := time.ParseDuration(number + "h")
+		if err != nil {
+			return err
+		}
+		if unit == 'd' {
+			d.Duration = parsed * 24
+		} else {
+			d.Duration = parsed * 24 * 365
+		}
+		d.Forever = false
+		return nil
+	}
+	parsed, err := time.ParseDuration(raw)
+	if err != nil {
+		return err
+	}
+	d.Duration = parsed
+	d.Forever = false
 	return nil
 }
 
@@ -143,6 +199,35 @@ func (d *Defaults) UnmarshalYAML(value *yaml.Node) error {
 	if raw.ProbeRetries != nil {
 		d.ProbeRetries = *raw.ProbeRetries
 		d.probeRetriesSet = true
+	}
+	return nil
+}
+
+func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
+	raw := struct {
+		ProbeResults       *RetentionConfig `yaml:"probe_results"`
+		ProbeMinuteRollups *RetentionConfig `yaml:"probe_minute_rollups"`
+		ProbeHourlyRollups *RetentionConfig `yaml:"probe_hourly_rollups"`
+		ProbeDailyRollups  *RetentionConfig `yaml:"probe_daily_rollups"`
+	}{}
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+	if raw.ProbeResults != nil {
+		s.ProbeResults = *raw.ProbeResults
+		s.probeResultsSet = true
+	}
+	if raw.ProbeMinuteRollups != nil {
+		s.ProbeMinuteRollups = *raw.ProbeMinuteRollups
+		s.probeMinuteRollupsSet = true
+	}
+	if raw.ProbeHourlyRollups != nil {
+		s.ProbeHourlyRollups = *raw.ProbeHourlyRollups
+		s.probeHourlyRollupsSet = true
+	}
+	if raw.ProbeDailyRollups != nil {
+		s.ProbeDailyRollups = *raw.ProbeDailyRollups
+		s.probeDailyRollupsSet = true
 	}
 	return nil
 }
@@ -224,6 +309,18 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Defaults.HistoryRetention.Duration == 0 {
 		c.Defaults.HistoryRetention.Duration = 30 * 24 * time.Hour
+	}
+	if !c.Storage.probeResultsSet {
+		c.Storage.ProbeResults.Retention.Duration = c.Defaults.HistoryRetention.Duration
+	}
+	if !c.Storage.probeMinuteRollupsSet {
+		c.Storage.ProbeMinuteRollups.Retention.Duration = 30 * 24 * time.Hour
+	}
+	if !c.Storage.probeHourlyRollupsSet {
+		c.Storage.ProbeHourlyRollups.Retention.Duration = 365 * 24 * time.Hour
+	}
+	if !c.Storage.probeDailyRollupsSet {
+		c.Storage.ProbeDailyRollups.Retention.Forever = true
 	}
 	if c.SMTP.Port == 0 {
 		c.SMTP.Port = 587
@@ -373,6 +470,15 @@ func (c Config) Validate() error {
 	if c.Defaults.HistoryRetention.Duration <= 0 {
 		errs = append(errs, errors.New("defaults.history_retention must be positive"))
 	}
+	validateRetention := func(path string, retention RetentionDuration) {
+		if !retention.Forever && retention.Duration <= 0 {
+			errs = append(errs, fmt.Errorf("%s.retention must be positive or forever", path))
+		}
+	}
+	validateRetention("storage.probe_results", c.Storage.ProbeResults.Retention)
+	validateRetention("storage.probe_minute_rollups", c.Storage.ProbeMinuteRollups.Retention)
+	validateRetention("storage.probe_hourly_rollups", c.Storage.ProbeHourlyRollups.Retention)
+	validateRetention("storage.probe_daily_rollups", c.Storage.ProbeDailyRollups.Retention)
 	if c.HTTP.Port < 0 || c.HTTP.Port > 65535 {
 		errs = append(errs, errors.New("http.port must be a TCP port number from 0 through 65535"))
 	}

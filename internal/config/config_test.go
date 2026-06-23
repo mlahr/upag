@@ -54,6 +54,18 @@ monitors:
 	if cfg.HTTP.Address != "127.0.0.1" {
 		t.Fatalf("HTTP address = %q, want 127.0.0.1", cfg.HTTP.Address)
 	}
+	if cfg.Storage.ProbeResults.Retention.Duration != 30*24*time.Hour || cfg.Storage.ProbeResults.Retention.Forever {
+		t.Fatalf("probe_results retention = %+v, want 30d finite", cfg.Storage.ProbeResults.Retention)
+	}
+	if cfg.Storage.ProbeMinuteRollups.Retention.Duration != 30*24*time.Hour || cfg.Storage.ProbeMinuteRollups.Retention.Forever {
+		t.Fatalf("probe_minute_rollups retention = %+v, want 30d finite", cfg.Storage.ProbeMinuteRollups.Retention)
+	}
+	if cfg.Storage.ProbeHourlyRollups.Retention.Duration != 365*24*time.Hour || cfg.Storage.ProbeHourlyRollups.Retention.Forever {
+		t.Fatalf("probe_hourly_rollups retention = %+v, want 1y finite", cfg.Storage.ProbeHourlyRollups.Retention)
+	}
+	if !cfg.Storage.ProbeDailyRollups.Retention.Forever {
+		t.Fatalf("probe_daily_rollups retention = %+v, want forever", cfg.Storage.ProbeDailyRollups.Retention)
+	}
 	if !cfg.Observer.Enabled {
 		t.Fatal("observer enabled = false, want true")
 	}
@@ -71,6 +83,66 @@ monitors:
 	}
 	if cfg.Observer.Sentinels[2].ID != "cloudflare-ip" || cfg.Observer.Sentinels[2].URL != "http://1.1.1.1/cdn-cgi/trace" || cfg.Observer.Sentinels[2].ExpectedStatusCode != 301 {
 		t.Fatalf("observer IP sentinel = %+v, want cloudflare-ip over literal IPv4 with HTTP 301", cfg.Observer.Sentinels[2])
+	}
+}
+
+func TestParseStorageRetention(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  probe_results:
+    retention: 24h
+  probe_minute_rollups:
+    retention: 30d
+  probe_hourly_rollups:
+    retention: 1y
+  probe_daily_rollups:
+    retention: forever
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.ProbeResults.Retention.Duration != 24*time.Hour {
+		t.Fatalf("probe_results retention = %s, want 24h", cfg.Storage.ProbeResults.Retention.Duration)
+	}
+	if cfg.Storage.ProbeMinuteRollups.Retention.Duration != 30*24*time.Hour {
+		t.Fatalf("probe_minute_rollups retention = %s, want 720h", cfg.Storage.ProbeMinuteRollups.Retention.Duration)
+	}
+	if cfg.Storage.ProbeHourlyRollups.Retention.Duration != 365*24*time.Hour {
+		t.Fatalf("probe_hourly_rollups retention = %s, want 8760h", cfg.Storage.ProbeHourlyRollups.Retention.Duration)
+	}
+	if !cfg.Storage.ProbeDailyRollups.Retention.Forever {
+		t.Fatal("probe_daily_rollups retention forever = false, want true")
+	}
+}
+
+func TestParseStorageRetentionFallsBackToHistoryRetention(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  history_retention: 12h
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.ProbeResults.Retention.Duration != 12*time.Hour {
+		t.Fatalf("probe_results retention = %s, want history_retention fallback 12h", cfg.Storage.ProbeResults.Retention.Duration)
 	}
 }
 

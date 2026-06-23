@@ -110,14 +110,30 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.logInfo("config_reloaded", "config=%q monitors=%d", r.configPath, len(cfg.Monitors))
 		case <-pruneTicker.C:
 			r.mu.Lock()
-			retention := r.cfg.Defaults.HistoryRetention.Duration
+			retention := probeRetentionPolicy(r.cfg)
 			r.mu.Unlock()
-			if err := r.store.PruneProbeResults(ctx, retention, time.Now().UTC()); err != nil {
+			if err := r.store.RollupAndPruneProbeResults(ctx, retention, time.Now().UTC()); err != nil {
 				r.logError("history_prune_failed", "error=%q", err)
 			}
 		case <-retryTicker.C:
 			r.retryAlertNotifications(ctx)
 		}
+	}
+}
+
+func probeRetentionPolicy(cfg config.Config) storage.ProbeRetentionPolicy {
+	return storage.ProbeRetentionPolicy{
+		ProbeResults:       rollupRetention(cfg.Storage.ProbeResults.Retention),
+		ProbeMinuteRollups: rollupRetention(cfg.Storage.ProbeMinuteRollups.Retention),
+		ProbeHourlyRollups: rollupRetention(cfg.Storage.ProbeHourlyRollups.Retention),
+		ProbeDailyRollups:  rollupRetention(cfg.Storage.ProbeDailyRollups.Retention),
+	}
+}
+
+func rollupRetention(retention config.RetentionDuration) storage.RollupRetention {
+	return storage.RollupRetention{
+		Duration: retention.Duration,
+		Forever:  retention.Forever,
 	}
 }
 

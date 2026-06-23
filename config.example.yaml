@@ -51,6 +51,16 @@ defaults:
   failure_threshold: 3
   history_retention: 720h
 
+storage:
+  probe_results:
+    retention: 24h
+  probe_minute_rollups:
+    retention: 30d
+  probe_hourly_rollups:
+    retention: 1y
+  probe_daily_rollups:
+    retention: forever
+
 monitors:
   - id: example
     name: Example homepage

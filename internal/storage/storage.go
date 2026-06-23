@@ -90,6 +90,18 @@ type UptimeWindowStats struct {
 	WindowEndedAt           time.Time
 }
 
+type RollupRetention struct {
+	Duration time.Duration
+	Forever  bool
+}
+
+type ProbeRetentionPolicy struct {
+	ProbeResults       RollupRetention
+	ProbeMinuteRollups RollupRetention
+	ProbeHourlyRollups RollupRetention
+	ProbeDailyRollups  RollupRetention
+}
+
 type Incident struct {
 	ID         int64
 	MonitorID  string
@@ -187,6 +199,7 @@ func migrations() []migration {
 		{ID: "0005_probe_response_time_and_maintenance", Fn: migrateProbeResponseTimeAndMaintenance},
 		{ID: "0006_probe_attempt_count", Fn: migrateProbeAttemptCount},
 		{ID: "0007_observer_health", Fn: migrateObserverHealth},
+		{ID: "0008_probe_rollups", Fn: migrateProbeRollups},
 	}
 }
 
@@ -363,6 +376,40 @@ func migrateObserverHealth(ctx context.Context, tx *sql.Tx) error {
 			checked_at TEXT NOT NULL
 		)`,
 	})
+}
+
+func migrateProbeRollups(ctx context.Context, tx *sql.Tx) error {
+	statements := []string{
+		rollupTableStatement("probe_minute_rollups"),
+		rollupTableStatement("probe_hourly_rollups"),
+		rollupTableStatement("probe_daily_rollups"),
+		`CREATE TABLE IF NOT EXISTS probe_outcome_runs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			monitor_id TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			ended_at TEXT NOT NULL,
+			ok INTEGER NOT NULL,
+			probe_count INTEGER NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_monitor_started
+			ON probe_outcome_runs (monitor_id, started_at)`,
+	}
+	return execMigrationStatements(ctx, tx, statements)
+}
+
+func rollupTableStatement(name string) string {
+	return `CREATE TABLE IF NOT EXISTS ` + name + ` (
+		monitor_id TEXT NOT NULL,
+		bucket_start TEXT NOT NULL,
+		total_checks INTEGER NOT NULL,
+		successful_checks INTEGER NOT NULL,
+		maintenance_checks INTEGER NOT NULL,
+		maintenance_failed_checks INTEGER NOT NULL,
+		observer_suppressed_checks INTEGER NOT NULL,
+		first_reportable_at TEXT,
+		last_reportable_at TEXT,
+		PRIMARY KEY (monitor_id, bucket_start)
+	)`
 }
 
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
@@ -688,21 +735,7 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThres
 }
 
 func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
-	query := `SELECT monitor_id,
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0),
-			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END),
-			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END)
-		FROM probe_results`
-	args := []any{}
-	if !cutoff.IsZero() {
-		query += ` WHERE checked_at >= ?`
-		args = append(args, formatTime(cutoff))
-	}
-	query += ` GROUP BY monitor_id`
-
+	query, args := uptimeWindowQuery(cutoff)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -734,10 +767,59 @@ func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (ma
 	return stats, rows.Err()
 }
 
+func uptimeWindowQuery(cutoff time.Time) (string, []any) {
+	rawWhere := ""
+	rollupWhere := ""
+	args := []any{}
+	if !cutoff.IsZero() {
+		rawWhere = ` WHERE checked_at >= ?`
+		rollupWhere = ` WHERE bucket_start >= ?`
+		formatted := formatTime(cutoff)
+		args = append(args, formatted, formatted, formatted, formatted)
+	}
+	query := `SELECT monitor_id,
+			COALESCE(SUM(total_checks), 0),
+			COALESCE(SUM(successful_checks), 0),
+			COALESCE(SUM(maintenance_checks), 0),
+			COALESCE(SUM(maintenance_failed_checks), 0),
+			MIN(first_reportable_at),
+			MAX(last_reportable_at)
+		FROM (
+			SELECT monitor_id,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0) AS total_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0) AS successful_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS maintenance_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0) AS maintenance_failed_checks,
+				MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END) AS first_reportable_at,
+				MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END) AS last_reportable_at
+			FROM probe_results` + rawWhere + `
+			GROUP BY monitor_id
+			UNION ALL
+			SELECT monitor_id, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, first_reportable_at, last_reportable_at
+			FROM probe_minute_rollups` + rollupWhere + `
+			UNION ALL
+			SELECT monitor_id, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, first_reportable_at, last_reportable_at
+			FROM probe_hourly_rollups` + rollupWhere + `
+			UNION ALL
+			SELECT monitor_id, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, first_reportable_at, last_reportable_at
+			FROM probe_daily_rollups` + rollupWhere + `
+		)
+		GROUP BY monitor_id`
+	return query, args
+}
+
 type uptimeProbe struct {
 	MonitorID string
 	CheckedAt time.Time
 	OK        bool
+}
+
+type uptimeRun struct {
+	MonitorID  string
+	StartedAt  time.Time
+	EndedAt    time.Time
+	OK         bool
+	ProbeCount int
 }
 
 type timeInterval struct {
@@ -749,7 +831,7 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 	if failureThreshold <= 0 {
 		failureThreshold = 1
 	}
-	probes, err := s.listReportableUptimeProbes(ctx)
+	runs, err := s.listReportableUptimeRuns(ctx)
 	if err != nil {
 		return err
 	}
@@ -758,15 +840,15 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 		return err
 	}
 
-	probesByMonitor := map[string][]uptimeProbe{}
+	runsByMonitor := map[string][]uptimeRun{}
 	firstProbeByMonitor := map[string]time.Time{}
-	for _, probe := range probes {
-		probesByMonitor[probe.MonitorID] = append(probesByMonitor[probe.MonitorID], probe)
-		if firstProbeByMonitor[probe.MonitorID].IsZero() {
-			firstProbeByMonitor[probe.MonitorID] = probe.CheckedAt
+	for _, run := range runs {
+		runsByMonitor[run.MonitorID] = append(runsByMonitor[run.MonitorID], run)
+		if firstProbeByMonitor[run.MonitorID].IsZero() {
+			firstProbeByMonitor[run.MonitorID] = run.StartedAt
 		}
-		if _, ok := stats[probe.MonitorID]; !ok {
-			stats[probe.MonitorID] = UptimeStats{}
+		if _, ok := stats[run.MonitorID]; !ok {
+			stats[run.MonitorID] = UptimeStats{}
 		}
 	}
 	maintenanceByMonitor := map[string][]timeInterval{}
@@ -782,7 +864,7 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 		if firstProbe.IsZero() {
 			continue
 		}
-		outages := strictOutageIntervals(probesByMonitor[monitorID], failureThreshold, now)
+		outages := strictOutageIntervals(runsByMonitor[monitorID], failureThreshold, now)
 		maintenanceWindows := maintenanceByMonitor[monitorID]
 		monitorStats.TwentyFourHour = applyAvailabilityWindow(monitorStats.TwentyFourHour, firstProbe, now.Add(-24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.SevenDay = applyAvailabilityWindow(monitorStats.SevenDay, firstProbe, now.Add(-7*24*time.Hour), now, outages, maintenanceWindows)
@@ -793,30 +875,43 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 	return nil
 }
 
-func (s *Store) listReportableUptimeProbes(ctx context.Context) ([]uptimeProbe, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, checked_at, ok
+func (s *Store) listReportableUptimeRuns(ctx context.Context) ([]uptimeRun, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, started_at, ended_at, ok, probe_count
+		FROM probe_outcome_runs
+		UNION ALL
+		SELECT monitor_id, checked_at AS started_at, checked_at AS ended_at, ok, 1 AS probe_count
 		FROM probe_results
 		WHERE maintenance_window_id IS NULL
 			AND observer_suppressed = 0
-		ORDER BY monitor_id ASC, checked_at ASC, id ASC`)
+		ORDER BY monitor_id ASC, started_at ASC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var probes []uptimeProbe
+	var runs []uptimeRun
 	for rows.Next() {
-		var probe uptimeProbe
-		var checkedAt string
+		var run uptimeRun
+		var startedAt string
+		var endedAt string
 		var ok int
-		if err := rows.Scan(&probe.MonitorID, &checkedAt, &ok); err != nil {
+		if err := rows.Scan(&run.MonitorID, &startedAt, &endedAt, &ok, &run.ProbeCount); err != nil {
 			return nil, err
 		}
-		probe.CheckedAt = parseTime(checkedAt)
-		probe.OK = intBool(ok)
-		probes = append(probes, probe)
+		run.StartedAt = parseTime(startedAt)
+		run.EndedAt = parseTime(endedAt)
+		run.OK = intBool(ok)
+		if len(runs) > 0 {
+			last := &runs[len(runs)-1]
+			if last.MonitorID == run.MonitorID && last.OK == run.OK {
+				last.EndedAt = run.EndedAt
+				last.ProbeCount += run.ProbeCount
+				continue
+			}
+		}
+		runs = append(runs, run)
 	}
-	return probes, rows.Err()
+	return runs, rows.Err()
 }
 
 func (s *Store) listUncancelledMaintenanceWindows(ctx context.Context) ([]MaintenanceWindow, error) {
@@ -841,27 +936,19 @@ func (s *Store) listUncancelledMaintenanceWindows(ctx context.Context) ([]Mainte
 	return windows, rows.Err()
 }
 
-func strictOutageIntervals(probes []uptimeProbe, threshold int, now time.Time) []timeInterval {
+func strictOutageIntervals(runs []uptimeRun, threshold int, now time.Time) []timeInterval {
 	var intervals []timeInterval
-	consecutiveFailures := 0
-	var streakStartedAt time.Time
 	var outageStartedAt time.Time
-	for _, probe := range probes {
-		if probe.OK {
+	for _, run := range runs {
+		if run.OK {
 			if !outageStartedAt.IsZero() {
-				intervals = append(intervals, timeInterval{Start: outageStartedAt, End: probe.CheckedAt})
+				intervals = append(intervals, timeInterval{Start: outageStartedAt, End: run.StartedAt})
 				outageStartedAt = time.Time{}
 			}
-			consecutiveFailures = 0
-			streakStartedAt = time.Time{}
 			continue
 		}
-		if consecutiveFailures == 0 {
-			streakStartedAt = probe.CheckedAt
-		}
-		consecutiveFailures++
-		if outageStartedAt.IsZero() && consecutiveFailures >= threshold {
-			outageStartedAt = streakStartedAt
+		if outageStartedAt.IsZero() && run.ProbeCount >= threshold {
+			outageStartedAt = run.StartedAt
 		}
 	}
 	if !outageStartedAt.IsZero() && now.After(outageStartedAt) {
@@ -1319,6 +1406,187 @@ func (s *Store) PruneProbeResults(ctx context.Context, retention time.Duration, 
 	cutoff := now.Add(-retention)
 	_, err := s.db.ExecContext(ctx, `DELETE FROM probe_results WHERE checked_at < ?`, formatTime(cutoff))
 	return err
+}
+
+func (s *Store) RollupAndPruneProbeResults(ctx context.Context, policy ProbeRetentionPolicy, now time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if !policy.ProbeResults.Forever {
+		cutoff := now.UTC().Add(-policy.ProbeResults.Duration)
+		if err := compactRawOutcomeRuns(ctx, tx, cutoff); err != nil {
+			return err
+		}
+		if err := rollupRawProbeResults(ctx, tx, "probe_minute_rollups", minuteBucketExpression(), cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_results WHERE checked_at < ?`, formatTime(cutoff)); err != nil {
+			return err
+		}
+	}
+	if !policy.ProbeMinuteRollups.Forever {
+		cutoff := now.UTC().Add(-policy.ProbeMinuteRollups.Duration)
+		if err := rollupStoredProbeRollups(ctx, tx, "probe_minute_rollups", "probe_hourly_rollups", hourlyBucketExpression(), cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_minute_rollups WHERE bucket_start < ?`, formatTime(cutoff)); err != nil {
+			return err
+		}
+	}
+	if !policy.ProbeHourlyRollups.Forever {
+		cutoff := now.UTC().Add(-policy.ProbeHourlyRollups.Duration)
+		if err := rollupStoredProbeRollups(ctx, tx, "probe_hourly_rollups", "probe_daily_rollups", dailyBucketExpression(), cutoff); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_hourly_rollups WHERE bucket_start < ?`, formatTime(cutoff)); err != nil {
+			return err
+		}
+	}
+	if !policy.ProbeDailyRollups.Forever {
+		cutoff := now.UTC().Add(-policy.ProbeDailyRollups.Duration)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_daily_rollups WHERE bucket_start < ?`, formatTime(cutoff)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM probe_outcome_runs WHERE ended_at < ?`, formatTime(cutoff)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func compactRawOutcomeRuns(ctx context.Context, tx *sql.Tx, cutoff time.Time) error {
+	rows, err := tx.QueryContext(ctx, `SELECT monitor_id, checked_at, ok
+		FROM probe_results
+		WHERE checked_at < ?
+			AND maintenance_window_id IS NULL
+			AND observer_suppressed = 0
+		ORDER BY monitor_id ASC, checked_at ASC, id ASC`, formatTime(cutoff))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var monitorID string
+		var checkedAtRaw string
+		var okInt int
+		if err := rows.Scan(&monitorID, &checkedAtRaw, &okInt); err != nil {
+			return err
+		}
+		if err := appendOutcomeRun(ctx, tx, monitorID, parseTime(checkedAtRaw), intBool(okInt)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func appendOutcomeRun(ctx context.Context, tx *sql.Tx, monitorID string, checkedAt time.Time, ok bool) error {
+	var id int64
+	var lastOK int
+	err := tx.QueryRowContext(ctx, `SELECT id, ok
+		FROM probe_outcome_runs
+		WHERE monitor_id = ?
+		ORDER BY started_at DESC, id DESC LIMIT 1`, monitorID).Scan(&id, &lastOK)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil && intBool(lastOK) == ok {
+		_, err = tx.ExecContext(ctx, `UPDATE probe_outcome_runs
+			SET ended_at = ?, probe_count = probe_count + 1
+			WHERE id = ?`, formatTime(checkedAt), id)
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO probe_outcome_runs
+		(monitor_id, started_at, ended_at, ok, probe_count)
+		VALUES (?, ?, ?, ?, 1)`, monitorID, formatTime(checkedAt), formatTime(checkedAt), boolInt(ok))
+	return err
+}
+
+func rollupRawProbeResults(ctx context.Context, tx *sql.Tx, target string, bucketExpr string, cutoff time.Time) error {
+	query := `INSERT INTO ` + target + `
+		(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
+			observer_suppressed_checks, first_reportable_at, last_reportable_at)
+		SELECT monitor_id, ` + bucketExpr + ` AS bucket_start,
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN observer_suppressed = 1 THEN 1 ELSE 0 END), 0),
+			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END),
+			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END)
+		FROM probe_results
+		WHERE checked_at < ?
+		GROUP BY monitor_id, 2
+		ON CONFLICT(monitor_id, bucket_start) DO UPDATE SET
+			total_checks = ` + target + `.total_checks + excluded.total_checks,
+			successful_checks = ` + target + `.successful_checks + excluded.successful_checks,
+			maintenance_checks = ` + target + `.maintenance_checks + excluded.maintenance_checks,
+			maintenance_failed_checks = ` + target + `.maintenance_failed_checks + excluded.maintenance_failed_checks,
+			observer_suppressed_checks = ` + target + `.observer_suppressed_checks + excluded.observer_suppressed_checks,
+			first_reportable_at = ` + mergedFirstReportableAt(target+`.first_reportable_at`, `excluded.first_reportable_at`) + `,
+			last_reportable_at = ` + mergedLastReportableAt(target+`.last_reportable_at`, `excluded.last_reportable_at`)
+	_, err := tx.ExecContext(ctx, query, formatTime(cutoff))
+	return err
+}
+
+func rollupStoredProbeRollups(ctx context.Context, tx *sql.Tx, source string, target string, bucketExpr string, cutoff time.Time) error {
+	query := `INSERT INTO ` + target + `
+		(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
+			observer_suppressed_checks, first_reportable_at, last_reportable_at)
+		SELECT monitor_id, ` + bucketExpr + ` AS bucket_start,
+			COALESCE(SUM(total_checks), 0),
+			COALESCE(SUM(successful_checks), 0),
+			COALESCE(SUM(maintenance_checks), 0),
+			COALESCE(SUM(maintenance_failed_checks), 0),
+			COALESCE(SUM(observer_suppressed_checks), 0),
+			MIN(first_reportable_at),
+			MAX(last_reportable_at)
+		FROM ` + source + `
+		WHERE bucket_start < ?
+		GROUP BY monitor_id, 2
+		ON CONFLICT(monitor_id, bucket_start) DO UPDATE SET
+			total_checks = ` + target + `.total_checks + excluded.total_checks,
+			successful_checks = ` + target + `.successful_checks + excluded.successful_checks,
+			maintenance_checks = ` + target + `.maintenance_checks + excluded.maintenance_checks,
+			maintenance_failed_checks = ` + target + `.maintenance_failed_checks + excluded.maintenance_failed_checks,
+			observer_suppressed_checks = ` + target + `.observer_suppressed_checks + excluded.observer_suppressed_checks,
+			first_reportable_at = ` + mergedFirstReportableAt(target+`.first_reportable_at`, `excluded.first_reportable_at`) + `,
+			last_reportable_at = ` + mergedLastReportableAt(target+`.last_reportable_at`, `excluded.last_reportable_at`)
+	_, err := tx.ExecContext(ctx, query, formatTime(cutoff))
+	return err
+}
+
+func mergedFirstReportableAt(existing string, incoming string) string {
+	return `CASE
+		WHEN ` + existing + ` IS NULL OR ` + existing + ` = '' THEN ` + incoming + `
+		WHEN ` + incoming + ` IS NULL OR ` + incoming + ` = '' THEN ` + existing + `
+		WHEN ` + incoming + ` < ` + existing + ` THEN ` + incoming + `
+		ELSE ` + existing + `
+	END`
+}
+
+func mergedLastReportableAt(existing string, incoming string) string {
+	return `CASE
+		WHEN ` + existing + ` IS NULL OR ` + existing + ` = '' THEN ` + incoming + `
+		WHEN ` + incoming + ` IS NULL OR ` + incoming + ` = '' THEN ` + existing + `
+		WHEN ` + incoming + ` > ` + existing + ` THEN ` + incoming + `
+		ELSE ` + existing + `
+	END`
+}
+
+func minuteBucketExpression() string {
+	return `substr(checked_at, 1, 17) || '00Z'`
+}
+
+func hourlyBucketExpression() string {
+	return `substr(bucket_start, 1, 14) || '00:00Z'`
+}
+
+func dailyBucketExpression() string {
+	return `substr(bucket_start, 1, 11) || '00:00:00Z'`
 }
 
 type rowScanner interface {
