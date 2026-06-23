@@ -59,6 +59,8 @@ func run(args []string) error {
 		return runIncidents(args[1:])
 	case "maintenance":
 		return runMaintenance(args[1:])
+	case "storage":
+		return runStorage(args[1:])
 	default:
 		return usage()
 	}
@@ -67,14 +69,12 @@ func run(args []string) error {
 func runDaemon(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
 	); err != nil {
 		return err
 	}
@@ -96,7 +96,7 @@ func runDaemon(args []string) error {
 		return err
 	}
 
-	store, err := storage.Open(*dbPath)
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -115,7 +115,6 @@ func runDaemon(args []string) error {
 func runStart(args []string) error {
 	fs := flag.NewFlagSet("start", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	logFile := fs.String("log-file", defaults.StandaloneLogFile, "path to daemon log file")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
@@ -124,7 +123,6 @@ func runStart(args []string) error {
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
 		defaults.PathTarget{FlagName: "pid-file", Value: pidFile, Default: func(d defaults.Paths) string { return d.PIDFile }},
 	); err != nil {
 		return err
@@ -132,7 +130,6 @@ func runStart(args []string) error {
 
 	pid, err := daemon.Start(daemon.Options{
 		ConfigPath: *configPath,
-		DBPath:     *dbPath,
 		PIDFile:    *pidFile,
 		LogFile:    *logFile,
 		Syslog:     *useSyslog,
@@ -191,7 +188,6 @@ func runDaemonStatus(args []string) error {
 func runRestart(args []string) error {
 	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	logFile := fs.String("log-file", defaults.StandaloneLogFile, "path to daemon log file")
 	useSyslog := fs.Bool("syslog", false, "write daemon logs to syslog")
@@ -200,7 +196,6 @@ func runRestart(args []string) error {
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
 		defaults.PathTarget{FlagName: "pid-file", Value: pidFile, Default: func(d defaults.Paths) string { return d.PIDFile }},
 	); err != nil {
 		return err
@@ -211,7 +206,6 @@ func runRestart(args []string) error {
 	}
 	pid, err := daemon.Start(daemon.Options{
 		ConfigPath: *configPath,
-		DBPath:     *dbPath,
 		PIDFile:    *pidFile,
 		LogFile:    *logFile,
 		Syslog:     *useSyslog,
@@ -256,17 +250,21 @@ func runConfigReload(args []string) error {
 
 func runMonitors(args []string) error {
 	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
 	); err != nil {
 		return err
 	}
 
-	store, err := storage.Open(*dbPath)
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -286,18 +284,22 @@ func runMonitors(args []string) error {
 
 func runIncidents(args []string) error {
 	fs := flag.NewFlagSet("incidents", flag.ContinueOnError)
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of incidents to print")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
 	); err != nil {
 		return err
 	}
 
-	store, err := storage.Open(*dbPath)
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -326,9 +328,50 @@ func runMaintenance(args []string) error {
 	}
 }
 
+func runStorage(args []string) error {
+	if len(args) == 0 {
+		return storageUsage()
+	}
+	switch args[0] {
+	case "migrate":
+		return runStorageMigrate(args[1:])
+	default:
+		return storageUsage()
+	}
+}
+
+func runStorageMigrate(args []string) error {
+	fs := flag.NewFlagSet("storage migrate", flag.ContinueOnError)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	fromSQLite := fs.String("from-sqlite", "", "source SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
+	}
+	if *fromSQLite == "" {
+		return fmt.Errorf("storage migrate requires --from-sqlite")
+	}
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	if cfg.Storage.Backend != "postgres" {
+		return fmt.Errorf("storage migrate target config must use storage.backend: postgres")
+	}
+	if err := storage.MigrateSQLiteToPostgres(context.Background(), *fromSQLite, cfg.Storage.Postgres.DSN); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stdout, "SQLite data migrated to PostgreSQL storage")
+	return nil
+}
+
 func runMaintenanceAdd(args []string) error {
 	fs := flag.NewFlagSet("maintenance add", flag.ContinueOnError)
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	startRaw := fs.String("start", "", "maintenance start time in RFC3339 format")
 	endRaw := fs.String("end", "", "maintenance end time in RFC3339 format")
@@ -338,7 +381,7 @@ func runMaintenanceAdd(args []string) error {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
 	); err != nil {
 		return err
 	}
@@ -357,7 +400,11 @@ func runMaintenanceAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.Open(*dbPath)
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -379,7 +426,7 @@ func runMaintenanceAdd(args []string) error {
 
 func runMaintenanceCancel(args []string) error {
 	fs := flag.NewFlagSet("maintenance cancel", flag.ContinueOnError)
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	idRaw := fs.String("id", "", "maintenance window ID")
 	reason := fs.String("reason", "", "cancellation reason")
 	actor := fs.String("by", "", "operator identity for audit records")
@@ -387,7 +434,7 @@ func runMaintenanceCancel(args []string) error {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
 	); err != nil {
 		return err
 	}
@@ -402,7 +449,11 @@ func runMaintenanceCancel(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.Open(*dbPath)
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -416,18 +467,22 @@ func runMaintenanceCancel(args []string) error {
 
 func runMaintenanceList(args []string) error {
 	fs := flag.NewFlagSet("maintenance list", flag.ContinueOnError)
-	dbPath := fs.String("db", defaults.StandaloneDBPath, "path to SQLite database")
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	includeAll := fs.Bool("all", false, "include cancelled and ended maintenance windows")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "db", Value: dbPath, Default: func(d defaults.Paths) string { return d.DBPath }},
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
 	); err != nil {
 		return err
 	}
-	store, err := storage.Open(*dbPath)
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -484,6 +539,10 @@ func maintenanceUsage() error {
 	return fmt.Errorf("usage: upag maintenance <add|cancel|list> [flags]")
 }
 
+func storageUsage() error {
+	return fmt.Errorf("usage: upag storage <migrate> [flags]")
+}
+
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|maintenance> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|maintenance|storage> [flags]")
 }

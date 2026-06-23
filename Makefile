@@ -16,7 +16,7 @@ help:
 		'  clean      Remove build and coverage artifacts' \
 		'  fmt        Format Go source files' \
 		'  install    Install $(APP_NAME) to $(BINDIR)' \
-		'  test       Run all Go tests' \
+		'  test       Run all Go tests, including Docker-backed PostgreSQL tests' \
 		'  tidy       Tidy Go module dependencies' \
 		'  vet        Run go vet'
 

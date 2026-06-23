@@ -29,7 +29,8 @@ func TestRunRecognizesMonitorsCommand(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 
 	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
-	if err := run([]string{"monitors", "--db", dbPath}); err != nil {
+	configPath := writeSQLiteConfig(t, dbPath)
+	if err := run([]string{"monitors", "--config", configPath}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -67,9 +68,10 @@ func TestRunRejectsOldStatusDBFlag(t *testing.T) {
 	}
 }
 
-func TestRunMonitorsUsesPackagedDBDefault(t *testing.T) {
+func TestRunMonitorsUsesPackagedConfigDefault(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "packaged.sqlite")
-	withPackageDefaultsPath(t, writeDefaultsFile(t, "UPAG_DB="+dbPath+"\n"))
+	configPath := writeSQLiteConfig(t, dbPath)
+	withPackageDefaultsPath(t, writeDefaultsFile(t, "UPAG_CONFIG="+configPath+"\n"))
 
 	if err := run([]string{"monitors"}); err != nil {
 		t.Fatal(err)
@@ -79,9 +81,10 @@ func TestRunMonitorsUsesPackagedDBDefault(t *testing.T) {
 	}
 }
 
-func TestRunIncidentsUsesPackagedDBDefault(t *testing.T) {
+func TestRunIncidentsUsesPackagedConfigDefault(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "packaged.sqlite")
-	withPackageDefaultsPath(t, writeDefaultsFile(t, "UPAG_DB="+dbPath+"\n"))
+	configPath := writeSQLiteConfig(t, dbPath)
+	withPackageDefaultsPath(t, writeDefaultsFile(t, "UPAG_CONFIG="+configPath+"\n"))
 
 	if err := run([]string{"incidents"}); err != nil {
 		t.Fatal(err)
@@ -95,10 +98,11 @@ func TestRunRecognizesMaintenanceCommands(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 
 	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
 	seedMonitorState(t, dbPath, "home")
 	if err := run([]string{
 		"maintenance", "add",
-		"--db", dbPath,
+		"--config", configPath,
 		"--monitor", "home",
 		"--start", "2026-06-23T01:00:00Z",
 		"--end", "2026-06-23T02:00:00Z",
@@ -107,10 +111,10 @@ func TestRunRecognizesMaintenanceCommands(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"maintenance", "list", "--db", dbPath, "--all"}); err != nil {
+	if err := run([]string{"maintenance", "list", "--config", configPath, "--all"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"maintenance", "cancel", "--db", dbPath, "--id", "1", "--reason", "done", "--by", "tester"}); err != nil {
+	if err := run([]string{"maintenance", "cancel", "--config", configPath, "--id", "1", "--reason", "done", "--by", "tester"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -124,6 +128,15 @@ func TestRunRejectsUnknownMaintenanceCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "usage: upag maintenance <add|cancel|list>") {
 		t.Fatalf("maintenance command error = %q, want maintenance usage", err.Error())
+	}
+}
+
+func TestRunRecognizesStorageMigrateCommandValidation(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	err := run([]string{"storage", "migrate", "--config", writeSQLiteConfig(t, filepath.Join(t.TempDir(), "upag.sqlite"))})
+	if err == nil || !strings.Contains(err.Error(), "storage migrate requires --from-sqlite") {
+		t.Fatalf("storage migrate error = %v, want missing --from-sqlite", err)
 	}
 }
 
@@ -166,11 +179,34 @@ func TestUsageMentionsDaemonAndMonitorCommands(t *testing.T) {
 		t.Fatal("usage returned nil error")
 	}
 	got := err.Error()
-	for _, want := range []string{"start", "stop", "status", "restart", "config", "monitors", "incidents", "maintenance"} {
+	for _, want := range []string{"start", "stop", "status", "restart", "config", "monitors", "incidents", "maintenance", "storage"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("usage = %q, missing %q", got, want)
 		}
 	}
+}
+
+func writeSQLiteConfig(t *testing.T, dbPath string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  backend: sqlite
+  sqlite:
+    path: `+dbPath+`
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
 }
 
 func seedMonitorState(t *testing.T, dbPath string, monitorID string) {

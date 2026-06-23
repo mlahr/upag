@@ -57,6 +57,12 @@ monitors:
 	if cfg.Storage.ProbeResults.Retention.Duration != 30*24*time.Hour || cfg.Storage.ProbeResults.Retention.Forever {
 		t.Fatalf("probe_results retention = %+v, want 30d finite", cfg.Storage.ProbeResults.Retention)
 	}
+	if cfg.Storage.Backend != "sqlite" {
+		t.Fatalf("storage backend = %q, want sqlite", cfg.Storage.Backend)
+	}
+	if cfg.Storage.SQLite.Path != "./upag.sqlite" {
+		t.Fatalf("storage sqlite path = %q, want ./upag.sqlite", cfg.Storage.SQLite.Path)
+	}
 	if cfg.Storage.ProbeMinuteRollups.Retention.Duration != 30*24*time.Hour || cfg.Storage.ProbeMinuteRollups.Retention.Forever {
 		t.Fatalf("probe_minute_rollups retention = %+v, want 30d finite", cfg.Storage.ProbeMinuteRollups.Retention)
 	}
@@ -83,6 +89,71 @@ monitors:
 	}
 	if cfg.Observer.Sentinels[2].ID != "cloudflare-ip" || cfg.Observer.Sentinels[2].URL != "http://1.1.1.1/cdn-cgi/trace" || cfg.Observer.Sentinels[2].ExpectedStatusCode != 301 {
 		t.Fatalf("observer IP sentinel = %+v, want cloudflare-ip over literal IPv4 with HTTP 301", cfg.Observer.Sentinels[2])
+	}
+}
+
+func TestParsePostgresStorage(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  backend: postgres
+  postgres:
+    dsn: postgres://user:password@localhost:5432/upag?sslmode=disable
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.Backend != "postgres" {
+		t.Fatalf("storage backend = %q, want postgres", cfg.Storage.Backend)
+	}
+	if cfg.Storage.Postgres.DSN != "postgres://user:password@localhost:5432/upag?sslmode=disable" {
+		t.Fatalf("postgres dsn = %q", cfg.Storage.Postgres.DSN)
+	}
+}
+
+func TestParseRejectsInvalidStorageBackend(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  backend: supabase
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil || !strings.Contains(err.Error(), "storage.backend must be one of: sqlite, postgres") {
+		t.Fatalf("Parse error = %v, want invalid storage backend", err)
+	}
+}
+
+func TestParseRejectsMissingPostgresDSN(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  backend: postgres
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil || !strings.Contains(err.Error(), "storage.postgres.dsn is required") {
+		t.Fatalf("Parse error = %v, want missing postgres dsn", err)
 	}
 }
 

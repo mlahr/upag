@@ -52,6 +52,13 @@ defaults:
   history_retention: 720h
 
 storage:
+  backend: sqlite
+  sqlite:
+    path: ./upag.sqlite
+  # Use a PostgreSQL/Supabase connection string instead of sqlite:
+  # backend: postgres
+  # postgres:
+  #   dsn: postgres://user:password@host:5432/postgres?sslmode=require
   probe_results:
     retention: 24h
   probe_minute_rollups:

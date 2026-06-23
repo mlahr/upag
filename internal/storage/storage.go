@@ -7,8 +7,34 @@ import (
 	"strings"
 	"time"
 
+	"upag/internal/config"
+
 	_ "github.com/mattn/go-sqlite3"
 )
+
+type Backend interface {
+	Close() error
+	GetState(context.Context, string) (MonitorState, bool, error)
+	SaveProbeAndState(context.Context, ProbeResult, MonitorState, *Incident) (int64, error)
+	SaveProbeResult(context.Context, ProbeResult) error
+	GetObserverState(context.Context) (ObserverState, bool, error)
+	ListObserverSentinelResults(context.Context) ([]ObserverSentinelResult, error)
+	SaveObserverCheck(context.Context, ObserverState, []ObserverSentinelResult, *Incident) (int64, error)
+	SaveAlertNotifications(context.Context, []AlertNotification) error
+	ListStates(context.Context) ([]MonitorState, error)
+	ListUptimeStats(context.Context, time.Time, int) (map[string]UptimeStats, error)
+	ListIncidents(context.Context, int) ([]Incident, error)
+	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
+	ListActionableAlertDeliveryFailures(context.Context, int) ([]AlertNotification, error)
+	ListDueAlertNotificationRetries(context.Context, time.Time, int) ([]AlertNotificationRetry, error)
+	AddMaintenanceWindow(context.Context, MaintenanceWindow) (int64, error)
+	CancelMaintenanceWindow(context.Context, int64, time.Time, string, string) error
+	ActiveMaintenanceWindow(context.Context, string, time.Time) (MaintenanceWindow, bool, error)
+	ListMaintenanceWindows(context.Context, MaintenanceWindowFilter) ([]MaintenanceWindow, error)
+	DeleteStatesExcept(context.Context, []string) error
+	PruneProbeResults(context.Context, time.Duration, time.Time) error
+	RollupAndPruneProbeResults(context.Context, ProbeRetentionPolicy, time.Time) error
+}
 
 type Store struct {
 	db *sql.DB
@@ -161,6 +187,17 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func OpenBackend(ctx context.Context, cfg config.StorageConfig) (Backend, error) {
+	switch cfg.Backend {
+	case "sqlite":
+		return Open(cfg.SQLite.Path)
+	case "postgres":
+		return OpenPostgres(ctx, cfg.Postgres.DSN)
+	default:
+		return nil, fmt.Errorf("unsupported storage backend %q", cfg.Backend)
+	}
 }
 
 func (s *Store) Close() error {

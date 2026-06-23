@@ -17,9 +17,6 @@ func TestLoadPathsUsesStandaloneDefaultsWhenFileIsMissing(t *testing.T) {
 	if defaults.ConfigPath != StandaloneConfigPath {
 		t.Fatalf("ConfigPath = %q, want %q", defaults.ConfigPath, StandaloneConfigPath)
 	}
-	if defaults.DBPath != StandaloneDBPath {
-		t.Fatalf("DBPath = %q, want %q", defaults.DBPath, StandaloneDBPath)
-	}
 	if defaults.PIDFile != StandalonePIDFile {
 		t.Fatalf("PIDFile = %q, want %q", defaults.PIDFile, StandalonePIDFile)
 	}
@@ -32,7 +29,6 @@ func TestLoadPathsReadsPackagedDefaults(t *testing.T) {
 	defaultsFile := writeDefaultsFile(t, `
 # comments are ignored
 UPAG_CONFIG=/etc/upag/config.yaml
-UPAG_DB='/var/lib/upag/upag.sqlite'
 UPAG_PIDFILE="/run/upag/upag.pid"
 UNKNOWN_KEY=ignored
 `)
@@ -45,9 +41,6 @@ UNKNOWN_KEY=ignored
 	if defaults.ConfigPath != "/etc/upag/config.yaml" {
 		t.Fatalf("ConfigPath = %q", defaults.ConfigPath)
 	}
-	if defaults.DBPath != "/var/lib/upag/upag.sqlite" {
-		t.Fatalf("DBPath = %q", defaults.DBPath)
-	}
 	if defaults.PIDFile != "/run/upag/upag.pid" {
 		t.Fatalf("PIDFile = %q", defaults.PIDFile)
 	}
@@ -57,7 +50,7 @@ UNKNOWN_KEY=ignored
 }
 
 func TestLoadPathsRejectsMalformedRelevantValue(t *testing.T) {
-	defaultsFile := writeDefaultsFile(t, `UPAG_DB="/var/lib/upag/upag.sqlite`)
+	defaultsFile := writeDefaultsFile(t, `UPAG_CONFIG="/etc/upag/config.yaml`)
 	withPackageDefaultsPath(t, defaultsFile)
 
 	if _, err := LoadPaths(); err == nil {
@@ -68,22 +61,19 @@ func TestLoadPathsRejectsMalformedRelevantValue(t *testing.T) {
 func TestApplyPathsFillsOnlyUnsetFlags(t *testing.T) {
 	defaultsFile := writeDefaultsFile(t, `
 UPAG_CONFIG=/etc/upag/config.yaml
-UPAG_DB=/var/lib/upag/upag.sqlite
 UPAG_PIDFILE=/run/upag/upag.pid
 `)
 	withPackageDefaultsPath(t, defaultsFile)
 
 	fs := flag.NewFlagSet("test", flag.ContinueOnError)
 	configPath := fs.String("config", StandaloneConfigPath, "")
-	dbPath := fs.String("db", StandaloneDBPath, "")
 	pidFile := fs.String("pid-file", StandalonePIDFile, "")
-	if err := fs.Parse([]string{"--db", "/tmp/explicit.sqlite"}); err != nil {
+	if err := fs.Parse([]string{"--pid-file", "/tmp/explicit.pid"}); err != nil {
 		t.Fatal(err)
 	}
 
 	err := ApplyPaths(fs,
 		PathTarget{FlagName: "config", Value: configPath, Default: func(d Paths) string { return d.ConfigPath }},
-		PathTarget{FlagName: "db", Value: dbPath, Default: func(d Paths) string { return d.DBPath }},
 		PathTarget{FlagName: "pid-file", Value: pidFile, Default: func(d Paths) string { return d.PIDFile }},
 	)
 	if err != nil {
@@ -92,11 +82,8 @@ UPAG_PIDFILE=/run/upag/upag.pid
 	if *configPath != "/etc/upag/config.yaml" {
 		t.Fatalf("configPath = %q", *configPath)
 	}
-	if *dbPath != "/tmp/explicit.sqlite" {
-		t.Fatalf("dbPath = %q, want explicit flag value", *dbPath)
-	}
-	if *pidFile != "/run/upag/upag.pid" {
-		t.Fatalf("pidFile = %q", *pidFile)
+	if *pidFile != "/tmp/explicit.pid" {
+		t.Fatalf("pidFile = %q, want explicit flag value", *pidFile)
 	}
 }
 

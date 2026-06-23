@@ -20,7 +20,6 @@ GROUP=upag
 
 UPAG_ENABLED=false
 UPAG_CONFIG=/etc/upag/config.yaml
-UPAG_DB=/var/lib/upag/upag.sqlite
 UPAG_PIDFILE=/run/upag/upag.pid
 
 [ -r "$DEFAULTS" ] && . "$DEFAULTS"
@@ -40,7 +39,7 @@ case "$1" in
 		ensure_runtime_dir
 		log_daemon_msg "Starting $DESC" "$NAME"
 		if start-stop-daemon --start --quiet --chuid "$USER:$GROUP" --exec "$DAEMON" -- \
-			start --config "$UPAG_CONFIG" --db "$UPAG_DB" --pid-file "$UPAG_PIDFILE" --syslog; then
+			start --config "$UPAG_CONFIG" --pid-file "$UPAG_PIDFILE" --syslog; then
 			log_end_msg 0
 		else
 			log_end_msg 1

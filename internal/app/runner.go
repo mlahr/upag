@@ -27,7 +27,7 @@ type Runner struct {
 	configPath string
 	version    string
 	startedAt  time.Time
-	store      *storage.Store
+	store      storage.Backend
 	out        io.Writer
 	errOut     io.Writer
 
@@ -59,7 +59,7 @@ type observerWorker struct {
 	config config.ObserverConfig
 }
 
-func NewRunner(configPath string, cfg config.Config, store *storage.Store, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
+func NewRunner(configPath string, cfg config.Config, store storage.Backend, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
 	return &Runner{
 		configPath: configPath,
 		version:    version,

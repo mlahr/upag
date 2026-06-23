@@ -11,7 +11,6 @@ import (
 
 const (
 	StandaloneConfigPath = "./config.yaml"
-	StandaloneDBPath     = "./upag.sqlite"
 	StandalonePIDFile    = "./upag.pid"
 	StandaloneLogFile    = "./upag.log"
 )
@@ -20,7 +19,6 @@ var packageDefaultsPath = "/etc/default/upag"
 
 type Paths struct {
 	ConfigPath string
-	DBPath     string
 	PIDFile    string
 	LogFile    string
 }
@@ -42,7 +40,6 @@ func SetPackageDefaultsPathForTest(path string) func() {
 func StandalonePaths() Paths {
 	return Paths{
 		ConfigPath: StandaloneConfigPath,
-		DBPath:     StandaloneDBPath,
 		PIDFile:    StandalonePIDFile,
 		LogFile:    StandaloneLogFile,
 	}
@@ -105,8 +102,6 @@ func LoadPaths() (Paths, error) {
 		switch key {
 		case "UPAG_CONFIG":
 			defaults.ConfigPath = value
-		case "UPAG_DB":
-			defaults.DBPath = value
 		case "UPAG_PIDFILE":
 			defaults.PIDFile = value
 		}
@@ -152,7 +147,7 @@ func parseLine(line string) (string, string, bool, error) {
 
 func isDefaultsKey(key string) bool {
 	switch key {
-	case "UPAG_CONFIG", "UPAG_DB", "UPAG_PIDFILE":
+	case "UPAG_CONFIG", "UPAG_PIDFILE":
 		return true
 	default:
 		return false

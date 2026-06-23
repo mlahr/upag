@@ -36,7 +36,7 @@ nfpms:
     formats:
       - deb
     maintainer: "Michael Lahr"
-    description: "Internal HTTP(S) uptime monitor with SQLite state storage and email alerts."
+    description: "Internal HTTP(S) uptime monitor with SQLite or PostgreSQL state storage and email alerts."
     homepage: "https://github.com/mlahr/upag"
     section: net
     priority: optional
@@ -45,7 +45,7 @@ nfpms:
       - adduser
       - lsb-base
     contents:
-      - src: config.example.yaml
+      - src: packaging/debian/config.yaml
         dst: /etc/upag/config.yaml
         type: config|noreplace
         file_info:

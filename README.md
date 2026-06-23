@@ -131,6 +131,9 @@ defaults:
   history_retention: 720h
 
 storage:
+  backend: sqlite
+  sqlite:
+    path: ./upag.sqlite
   probe_results:
     retention: 24h
   probe_minute_rollups:
@@ -150,24 +153,24 @@ monitors:
 Run `upag` in the foreground:
 
 ```sh
-upag run --config ./config.yaml --db ./upag.sqlite
+upag run --config ./config.yaml
 ```
 
 Inspect monitor state and recent incidents from another shell:
 
 ```sh
-upag monitors --db ./upag.sqlite
-upag incidents --db ./upag.sqlite --limit 50
+upag monitors --config ./config.yaml
+upag incidents --config ./config.yaml --limit 50
 ```
 
 Schedule one-off maintenance when failures are expected:
 
 ```sh
-upag maintenance add --db ./upag.sqlite --monitor homepage \
+upag maintenance add --config ./config.yaml --monitor homepage \
   --start 2026-06-23T01:00:00Z --end 2026-06-23T02:00:00Z \
   --reason "deploy"
-upag maintenance list --db ./upag.sqlite
-upag maintenance cancel --db ./upag.sqlite --id 1 --reason "finished"
+upag maintenance list --config ./config.yaml
+upag maintenance cancel --config ./config.yaml --id 1 --reason "finished"
 ```
 
 ## Configuration
@@ -222,6 +225,13 @@ defaults:
   history_retention: 720h
 
 storage:
+  backend: sqlite
+  sqlite:
+    path: ./upag.sqlite
+  # Or use PostgreSQL/Supabase:
+  # backend: postgres
+  # postgres:
+  #   dsn: postgres://user:password@host:5432/postgres?sslmode=require
   probe_results:
     retention: 24h
   probe_minute_rollups:
@@ -457,14 +467,29 @@ to two decimal places. For a window with no reportable seconds,
 - `history_retention`: legacy raw probe retention fallback. Defaults to `720h`
   and is used only when `storage.probe_results.retention` is unset.
 
-`storage` controls probe compaction retention:
+`storage.backend` selects persistence. Use `sqlite` for local SQLite storage or
+`postgres` for PostgreSQL providers such as Supabase.
 
+`storage` also controls probe compaction retention:
+
+- `sqlite.path`: SQLite database path when `storage.backend` is `sqlite`.
+- `postgres.dsn`: PostgreSQL connection string when `storage.backend` is
+  `postgres`.
 - `probe_results.retention`: raw probe result retention. Defaults to
   `defaults.history_retention`.
 - `probe_minute_rollups.retention`: minute rollup retention. Defaults to `30d`.
 - `probe_hourly_rollups.retention`: hourly rollup retention. Defaults to `1y`.
 - `probe_daily_rollups.retention`: daily rollup retention. Defaults to
   `forever`.
+
+Migrate an existing SQLite database into a PostgreSQL/Supabase-backed config:
+
+```sh
+upag storage migrate --from-sqlite ./upag.sqlite --config ./config.yaml
+```
+
+The target config must use `storage.backend: postgres`, and the PostgreSQL
+target must be empty.
 
 ### Observer Connectivity
 
@@ -563,9 +588,10 @@ included in `response_time_ms`.
 
 When installed from the Debian package, `upag` runs as the `upag` system user.
 Configuration lives in `/etc/upag/config.yaml`, service defaults live in
-`/etc/default/upag`, and SQLite state lives in `/var/lib/upag/upag.sqlite`.
+`/etc/default/upag`, and the packaged config stores SQLite state in
+`/var/lib/upag/upag.sqlite`.
 Bare CLI commands read `/etc/default/upag` when it exists, so inspection
-commands use the packaged database and PID file without extra flags.
+commands use the packaged config and PID file without extra flags.
 
 Enable the packaged service only after configuring real alert credentials and
 monitors:
@@ -609,15 +635,15 @@ sudo /etc/init.d/upag stop
 Run in the foreground:
 
 ```sh
-upag run --config ./config.yaml --db ./upag.sqlite
+upag run --config ./config.yaml
 ```
 
 Run as a background daemon:
 
 ```sh
-upag start --config ./config.yaml --db ./upag.sqlite --pid-file ./upag.pid --log-file ./upag.log
+upag start --config ./config.yaml --pid-file ./upag.pid --log-file ./upag.log
 upag status --pid-file ./upag.pid
-upag restart --config ./config.yaml --db ./upag.sqlite --pid-file ./upag.pid --log-file ./upag.log
+upag restart --config ./config.yaml --pid-file ./upag.pid --log-file ./upag.log
 upag stop --pid-file ./upag.pid
 ```
 
@@ -678,6 +704,9 @@ make vet
 make test
 make build
 ```
+
+`make test` and `go test ./...` require Docker. The PostgreSQL storage tests
+start a local `postgres:16-alpine` container automatically.
 
 Run the complete default target:
 

@@ -15,7 +15,6 @@ var ErrNotRunning = errors.New("daemon is not running")
 
 type Options struct {
 	ConfigPath string
-	DBPath     string
 	PIDFile    string
 	LogFile    string
 	Syslog     bool
@@ -66,7 +65,7 @@ func Start(opts Options) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("resolve executable path: %w", err)
 	}
-	cmdArgs := []string{"run", "--config", opts.ConfigPath, "--db", opts.DBPath}
+	cmdArgs := []string{"run", "--config", opts.ConfigPath}
 	if opts.Syslog {
 		cmdArgs = append(cmdArgs, "--syslog")
 	}

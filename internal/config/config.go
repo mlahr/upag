@@ -68,6 +68,9 @@ type ObserverConfig struct {
 }
 
 type StorageConfig struct {
+	Backend               string          `yaml:"backend"`
+	SQLite                SQLiteConfig    `yaml:"sqlite"`
+	Postgres              PostgresConfig  `yaml:"postgres"`
 	ProbeResults          RetentionConfig `yaml:"probe_results"`
 	ProbeMinuteRollups    RetentionConfig `yaml:"probe_minute_rollups"`
 	ProbeHourlyRollups    RetentionConfig `yaml:"probe_hourly_rollups"`
@@ -76,6 +79,14 @@ type StorageConfig struct {
 	probeMinuteRollupsSet bool
 	probeHourlyRollupsSet bool
 	probeDailyRollupsSet  bool
+}
+
+type SQLiteConfig struct {
+	Path string `yaml:"path"`
+}
+
+type PostgresConfig struct {
+	DSN string `yaml:"dsn"`
 }
 
 type RetentionConfig struct {
@@ -205,6 +216,9 @@ func (d *Defaults) UnmarshalYAML(value *yaml.Node) error {
 
 func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
 	raw := struct {
+		Backend            string           `yaml:"backend"`
+		SQLite             SQLiteConfig     `yaml:"sqlite"`
+		Postgres           PostgresConfig   `yaml:"postgres"`
 		ProbeResults       *RetentionConfig `yaml:"probe_results"`
 		ProbeMinuteRollups *RetentionConfig `yaml:"probe_minute_rollups"`
 		ProbeHourlyRollups *RetentionConfig `yaml:"probe_hourly_rollups"`
@@ -213,6 +227,9 @@ func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&raw); err != nil {
 		return err
 	}
+	s.Backend = raw.Backend
+	s.SQLite = raw.SQLite
+	s.Postgres = raw.Postgres
 	if raw.ProbeResults != nil {
 		s.ProbeResults = *raw.ProbeResults
 		s.probeResultsSet = true
@@ -309,6 +326,12 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Defaults.HistoryRetention.Duration == 0 {
 		c.Defaults.HistoryRetention.Duration = 30 * 24 * time.Hour
+	}
+	if c.Storage.Backend == "" {
+		c.Storage.Backend = "sqlite"
+	}
+	if c.Storage.Backend == "sqlite" && c.Storage.SQLite.Path == "" {
+		c.Storage.SQLite.Path = "./upag.sqlite"
 	}
 	if !c.Storage.probeResultsSet {
 		c.Storage.ProbeResults.Retention.Duration = c.Defaults.HistoryRetention.Duration
@@ -479,6 +502,18 @@ func (c Config) Validate() error {
 	validateRetention("storage.probe_minute_rollups", c.Storage.ProbeMinuteRollups.Retention)
 	validateRetention("storage.probe_hourly_rollups", c.Storage.ProbeHourlyRollups.Retention)
 	validateRetention("storage.probe_daily_rollups", c.Storage.ProbeDailyRollups.Retention)
+	switch c.Storage.Backend {
+	case "sqlite":
+		if strings.TrimSpace(c.Storage.SQLite.Path) == "" {
+			errs = append(errs, errors.New("storage.sqlite.path is required when storage.backend is sqlite"))
+		}
+	case "postgres":
+		if strings.TrimSpace(c.Storage.Postgres.DSN) == "" {
+			errs = append(errs, errors.New("storage.postgres.dsn is required when storage.backend is postgres"))
+		}
+	default:
+		errs = append(errs, errors.New("storage.backend must be one of: sqlite, postgres"))
+	}
 	if c.HTTP.Port < 0 || c.HTTP.Port > 65535 {
 		errs = append(errs, errors.New("http.port must be a TCP port number from 0 through 65535"))
 	}
