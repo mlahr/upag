@@ -458,6 +458,59 @@ monitors:
 	}
 }
 
+func TestParseAcceptsAlertsProvidersTelegram(t *testing.T) {
+	cfg, err := Parse([]byte(`
+alerts:
+  providers:
+    telegram:
+      token: token-123
+      chat_ids: ["123456789"]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alerts.Providers.Telegram.Endpoint != "https://api.telegram.org" {
+		t.Fatalf("telegram endpoint = %q, want default endpoint", cfg.Alerts.Providers.Telegram.Endpoint)
+	}
+}
+
+func TestParseAcceptsAlertsProvidersSMTPAndMailtrap(t *testing.T) {
+	cfg, err := Parse([]byte(`
+alerts:
+  providers:
+    smtp:
+      host: smtp.example.com
+      from: alerts@example.com
+      to: [ops@example.com]
+    mailtrap:
+      token: token-123
+      from: alerts@example.com
+      to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Alerts.Providers.SMTP.Port != 587 {
+		t.Fatalf("provider SMTP port = %d, want 587", cfg.Alerts.Providers.SMTP.Port)
+	}
+	if cfg.Alerts.Providers.SMTP.TLS != "starttls" {
+		t.Fatalf("provider SMTP TLS = %q, want starttls", cfg.Alerts.Providers.SMTP.TLS)
+	}
+	if cfg.Alerts.Providers.Mailtrap.Endpoint != "https://send.api.mailtrap.io/api/send" {
+		t.Fatalf("provider mailtrap endpoint = %q, want default endpoint", cfg.Alerts.Providers.Mailtrap.Endpoint)
+	}
+}
+
 func TestParseAcceptsResponseBodyAssertions(t *testing.T) {
 	cfg, err := Parse([]byte(`
 smtp:
@@ -570,6 +623,55 @@ monitors:
 		if !strings.Contains(message, want) {
 			t.Fatalf("validation error %q does not contain %q", message, want)
 		}
+	}
+}
+
+func TestParseRejectsMissingTelegramFields(t *testing.T) {
+	_, err := Parse([]byte(`
+alerts:
+  providers:
+    telegram:
+      chat_ids: [""]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	message := err.Error()
+	for _, want := range []string{"alerts.providers.telegram.token is required", "alerts.providers.telegram.chat_ids[0] is required"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("validation error %q does not contain %q", message, want)
+		}
+	}
+}
+
+func TestParseRejectsDuplicateLegacyAndProviderConfig(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+alerts:
+  providers:
+    smtp:
+      host: smtp2.example.com
+      from: alerts@example.com
+      to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected validation error")
+	}
+	if !strings.Contains(err.Error(), "smtp must be configured either at top level or alerts.providers.smtp, not both") {
+		t.Fatalf("validation error %q does not contain duplicate smtp error", err)
 	}
 }
 

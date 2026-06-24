@@ -1,23 +1,26 @@
-smtp:
-  host: smtp.example.com
-  port: 587
-  tls: starttls
-  username: alerts@example.com
-  password: change-me
-  from: alerts@example.com
-  to:
-    - ops@example.com
-
-# To also use Mailtrap's HTTPS Transactional Email API, configure this block.
-# If both smtp and mailtrap are configured, alerts are sent through both.
-# mailtrap:
-#   token: change-me
-#   from: alerts@example.com
-#   from_name: upag
-#   to:
-#     - ops@example.com
-
 alerts:
+  providers:
+    smtp:
+      host: smtp.example.com
+      port: 587
+      tls: starttls
+      username: alerts@example.com
+      password: change-me
+      from: alerts@example.com
+      to:
+        - ops@example.com
+    # To also use Mailtrap's HTTPS Transactional Email API, configure this block.
+    # mailtrap:
+    #   token: change-me
+    #   from: alerts@example.com
+    #   from_name: upag
+    #   to:
+    #     - ops@example.com
+    # To also use Telegram Bot API alerts, configure this block.
+    # telegram:
+    #   token: change-me
+    #   chat_ids:
+    #     - "123456789"
   notification_retries:
     max_attempts: 3
     backoff: [1m, 5m, 15m]

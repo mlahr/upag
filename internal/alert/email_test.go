@@ -183,6 +183,122 @@ func TestSendIncidentMailtrapRejectsNon2xx(t *testing.T) {
 	}
 }
 
+func TestSendIncidentTelegram(t *testing.T) {
+	var requests []telegramMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		if r.URL.Path != "/bottoken-123/sendMessage" {
+			t.Fatalf("path = %s, want /bottoken-123/sendMessage", r.URL.Path)
+		}
+		if r.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("content type = %q, want application/json", r.Header.Get("Content-Type"))
+		}
+		var message telegramMessage
+		if err := json.NewDecoder(r.Body).Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		requests = append(requests, message)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	sender := NewTelegramSender(config.TelegramConfig{
+		Token:    "token-123",
+		ChatIDs:  []string{"123", "456"},
+		Endpoint: server.URL,
+	})
+	results := sender.SendIncident(storage.Incident{
+		MonitorID:  testIncident.MonitorID,
+		Name:       testIncident.Name,
+		Transition: testIncident.Transition,
+		ObservedAt: testIncident.ObservedAt,
+		Error:      testIncident.Error,
+		StatusCode: testIncident.StatusCode,
+	}, storage.MonitorState{
+		MonitorID:          testMonitorState.MonitorID,
+		Name:               testMonitorState.Name,
+		URL:                testMonitorState.URL,
+		ExpectedStatusCode: testMonitorState.ExpectedStatusCode,
+	})
+	if err := SendResultsError(results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Provider != "telegram" {
+		t.Fatalf("results = %+v, want one telegram result", results)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("request count = %d, want 2", len(requests))
+	}
+	if requests[0].ChatID != "123" || requests[1].ChatID != "456" {
+		t.Fatalf("chat IDs = %#v, want 123 and 456", requests)
+	}
+	for _, request := range requests {
+		if !strings.Contains(request.Text, "[upag] Home DOWN") {
+			t.Fatalf("text did not contain subject: %q", request.Text)
+		}
+		if !strings.Contains(request.Text, "Error: timeout") {
+			t.Fatalf("text did not contain error: %q", request.Text)
+		}
+	}
+}
+
+func TestSendIncidentTelegramRejectsNon2xx(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "invalid token", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	sender := NewTelegramSender(config.TelegramConfig{
+		Token:    "bad-token",
+		ChatIDs:  []string{"123"},
+		Endpoint: server.URL,
+	})
+	results := sender.SendIncident(testIncident, testMonitorState)
+	err := SendResultsError(results)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "status=401") {
+		t.Fatalf("error = %q, want status=401", err)
+	}
+	if strings.Contains(err.Error(), "bad-token") {
+		t.Fatalf("error = %q, want token redacted", err)
+	}
+}
+
+func TestNewIncidentSenderIncludesConfiguredProviders(t *testing.T) {
+	sender := NewIncidentSender(config.Config{
+		Alerts: config.AlertsConfig{
+			Providers: config.AlertProvidersConfig{
+				SMTP: config.SMTPConfig{
+					Host: "smtp.example.com",
+					Port: 587,
+					TLS:  "none",
+					From: "alerts@example.com",
+					To:   []string{"ops@example.com"},
+				},
+				Mailtrap: config.MailtrapConfig{
+					Token:    "token-123",
+					Endpoint: "https://send.api.mailtrap.io/api/send",
+					From:     "alerts@example.com",
+					To:       []string{"ops@example.com"},
+				},
+				Telegram: config.TelegramConfig{
+					Token:    "telegram-token",
+					ChatIDs:  []string{"123"},
+					Endpoint: "https://api.telegram.org",
+				},
+			},
+		},
+	})
+	got := strings.Join(sender.Providers(), ",")
+	if got != "smtp,mailtrap,telegram" {
+		t.Fatalf("providers = %q, want smtp,mailtrap,telegram", got)
+	}
+}
+
 func TestMultiSenderSendsToAllProviders(t *testing.T) {
 	first := &fakeSender{}
 	second := &fakeSender{}

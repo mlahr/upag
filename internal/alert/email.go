@@ -43,9 +43,16 @@ func NewIncidentSender(cfg config.Config) IncidentSender {
 	var senders []IncidentSender
 	if cfg.SMTP.IsConfigured() {
 		senders = append(senders, NewEmailer(cfg.SMTP))
+	} else if cfg.Alerts.Providers.SMTP.IsConfigured() {
+		senders = append(senders, NewEmailer(cfg.Alerts.Providers.SMTP))
 	}
 	if cfg.Mailtrap.IsConfigured() {
 		senders = append(senders, NewMailtrapEmailer(cfg.Mailtrap))
+	} else if cfg.Alerts.Providers.Mailtrap.IsConfigured() {
+		senders = append(senders, NewMailtrapEmailer(cfg.Alerts.Providers.Mailtrap))
+	}
+	if cfg.Alerts.Providers.Telegram.IsConfigured() {
+		senders = append(senders, NewTelegramSender(cfg.Alerts.Providers.Telegram))
 	}
 	return MultiSender{senders: senders}
 }
@@ -279,6 +286,87 @@ func mailtrapRecipients(recipients []string) []mailtrapAddress {
 		addresses = append(addresses, mailtrapAddress{Email: recipient})
 	}
 	return addresses
+}
+
+type TelegramSender struct {
+	cfg    config.TelegramConfig
+	client *http.Client
+}
+
+func NewTelegramSender(cfg config.TelegramConfig) *TelegramSender {
+	return &TelegramSender{
+		cfg: cfg,
+		client: &http.Client{
+			Timeout: 10 * time.Second,
+		},
+	}
+}
+
+func (s *TelegramSender) Providers() []string {
+	return []string{"telegram"}
+}
+
+func (s *TelegramSender) SendIncident(incident storage.Incident, current storage.MonitorState) []SendResult {
+	return []SendResult{s.SendProvider("telegram", incident, current)}
+}
+
+func (s *TelegramSender) SendProvider(provider string, incident storage.Incident, current storage.MonitorState) SendResult {
+	if provider != "telegram" {
+		return SendResult{Provider: provider, Error: fmt.Errorf("telegram sender cannot send provider %q", provider)}
+	}
+	return SendResult{Provider: "telegram", Error: s.sendIncident(incident, current)}
+}
+
+func (s *TelegramSender) sendIncident(incident storage.Incident, current storage.MonitorState) error {
+	subject, body := buildIncidentContent(incident, current)
+	text := strings.TrimRight(subject+"\r\n"+body, "\r\n")
+	var errs []error
+	for _, chatID := range s.cfg.ChatIDs {
+		if err := s.sendMessage(chatID, text); err != nil {
+			errs = append(errs, fmt.Errorf("chat_id %q: %w", chatID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func (s *TelegramSender) sendMessage(chatID string, text string) error {
+	payload := telegramMessage{
+		ChatID: chatID,
+		Text:   text,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimRight(s.cfg.Endpoint, "/") + "/bot" + s.cfg.Token + "/sendMessage"
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(data))
+	if err != nil {
+		return sanitizeTelegramError(err, s.cfg.Token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return sanitizeTelegramError(err, s.cfg.Token)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("telegram send failed: status=%d body=%q", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func sanitizeTelegramError(err error, token string) error {
+	if err == nil || token == "" {
+		return err
+	}
+	return errors.New(strings.ReplaceAll(err.Error(), token, "[redacted]"))
+}
+
+type telegramMessage struct {
+	ChatID string `json:"chat_id"`
+	Text   string `json:"text"`
 }
 
 func buildIncidentContent(incident storage.Incident, current storage.MonitorState) (string, string) {

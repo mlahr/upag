@@ -30,11 +30,18 @@ type HTTPConfig struct {
 
 type AlertsConfig struct {
 	NotificationRetries NotificationRetriesConfig `yaml:"notification_retries"`
+	Providers           AlertProvidersConfig      `yaml:"providers"`
 }
 
 type NotificationRetriesConfig struct {
 	MaxAttempts int        `yaml:"max_attempts"`
 	Backoff     []Duration `yaml:"backoff"`
+}
+
+type AlertProvidersConfig struct {
+	SMTP     SMTPConfig     `yaml:"smtp"`
+	Mailtrap MailtrapConfig `yaml:"mailtrap"`
+	Telegram TelegramConfig `yaml:"telegram"`
 }
 
 type SMTPConfig struct {
@@ -54,6 +61,12 @@ type MailtrapConfig struct {
 	From     string   `yaml:"from"`
 	FromName string   `yaml:"from_name"`
 	To       []string `yaml:"to"`
+}
+
+type TelegramConfig struct {
+	Token    string   `yaml:"token"`
+	ChatIDs  []string `yaml:"chat_ids"`
+	Endpoint string   `yaml:"endpoint"`
 }
 
 type ObserverConfig struct {
@@ -351,8 +364,20 @@ func (c *Config) ApplyDefaults() {
 	if c.SMTP.TLS == "" {
 		c.SMTP.TLS = "starttls"
 	}
+	if c.Alerts.Providers.SMTP.Port == 0 {
+		c.Alerts.Providers.SMTP.Port = 587
+	}
+	if c.Alerts.Providers.SMTP.TLS == "" {
+		c.Alerts.Providers.SMTP.TLS = "starttls"
+	}
 	if c.Mailtrap.Endpoint == "" {
 		c.Mailtrap.Endpoint = "https://send.api.mailtrap.io/api/send"
+	}
+	if c.Alerts.Providers.Mailtrap.Endpoint == "" {
+		c.Alerts.Providers.Mailtrap.Endpoint = "https://send.api.mailtrap.io/api/send"
+	}
+	if c.Alerts.Providers.Telegram.Endpoint == "" {
+		c.Alerts.Providers.Telegram.Endpoint = "https://api.telegram.org"
 	}
 	if !c.Observer.enabledSet {
 		c.Observer.Enabled = true
@@ -433,47 +458,97 @@ func (c MailtrapConfig) IsConfigured() bool {
 		len(c.To) != 0
 }
 
+func (c TelegramConfig) IsConfigured() bool {
+	return c.Token != "" ||
+		len(c.ChatIDs) != 0
+}
+
+func validateSMTPConfig(path string, c SMTPConfig, errs *[]error) {
+	if c.Host == "" {
+		*errs = append(*errs, fmt.Errorf("%s.host is required", path))
+	}
+	if c.Port <= 0 || c.Port > 65535 {
+		*errs = append(*errs, fmt.Errorf("%s.port must be a TCP port number from 1 through 65535", path))
+	}
+	switch c.TLS {
+	case "none", "starttls", "tls":
+	default:
+		*errs = append(*errs, fmt.Errorf("%s.tls must be one of: none, starttls, tls", path))
+	}
+	if c.From == "" {
+		*errs = append(*errs, fmt.Errorf("%s.from is required", path))
+	}
+	if len(c.To) == 0 {
+		*errs = append(*errs, fmt.Errorf("%s.to must contain at least one recipient", path))
+	}
+}
+
+func validateMailtrapConfig(path string, c MailtrapConfig, errs *[]error) {
+	if c.Token == "" {
+		*errs = append(*errs, fmt.Errorf("%s.token is required", path))
+	}
+	if c.Endpoint == "" {
+		*errs = append(*errs, fmt.Errorf("%s.endpoint is required", path))
+	} else if err := validateHTTPURL(c.Endpoint); err != nil {
+		*errs = append(*errs, fmt.Errorf("%s.endpoint: %w", path, err))
+	}
+	if c.From == "" {
+		*errs = append(*errs, fmt.Errorf("%s.from is required", path))
+	}
+	if len(c.To) == 0 {
+		*errs = append(*errs, fmt.Errorf("%s.to must contain at least one recipient", path))
+	}
+}
+
+func validateTelegramConfig(path string, c TelegramConfig, errs *[]error) {
+	if c.Token == "" {
+		*errs = append(*errs, fmt.Errorf("%s.token is required", path))
+	}
+	if len(c.ChatIDs) == 0 {
+		*errs = append(*errs, fmt.Errorf("%s.chat_ids must contain at least one chat ID", path))
+	}
+	for i, chatID := range c.ChatIDs {
+		if strings.TrimSpace(chatID) == "" {
+			*errs = append(*errs, fmt.Errorf("%s.chat_ids[%d] is required", path, i))
+		}
+	}
+	if c.Endpoint == "" {
+		*errs = append(*errs, fmt.Errorf("%s.endpoint is required", path))
+	} else if err := validateHTTPURL(c.Endpoint); err != nil {
+		*errs = append(*errs, fmt.Errorf("%s.endpoint: %w", path, err))
+	}
+}
+
 func (c Config) Validate() error {
 	var errs []error
 	smtpConfigured := c.SMTP.IsConfigured()
 	mailtrapConfigured := c.Mailtrap.IsConfigured()
-	if !smtpConfigured && !mailtrapConfigured {
+	providerSMTPConfigured := c.Alerts.Providers.SMTP.IsConfigured()
+	providerMailtrapConfigured := c.Alerts.Providers.Mailtrap.IsConfigured()
+	telegramConfigured := c.Alerts.Providers.Telegram.IsConfigured()
+	if !smtpConfigured && !mailtrapConfigured && !providerSMTPConfigured && !providerMailtrapConfigured && !telegramConfigured {
 		errs = append(errs, errors.New("at least one alert provider must be configured"))
 	}
+	if smtpConfigured && providerSMTPConfigured {
+		errs = append(errs, errors.New("smtp must be configured either at top level or alerts.providers.smtp, not both"))
+	}
+	if mailtrapConfigured && providerMailtrapConfigured {
+		errs = append(errs, errors.New("mailtrap must be configured either at top level or alerts.providers.mailtrap, not both"))
+	}
 	if smtpConfigured {
-		if c.SMTP.Host == "" {
-			errs = append(errs, errors.New("smtp.host is required"))
-		}
-		if c.SMTP.Port <= 0 || c.SMTP.Port > 65535 {
-			errs = append(errs, errors.New("smtp.port must be a TCP port number from 1 through 65535"))
-		}
-		switch c.SMTP.TLS {
-		case "none", "starttls", "tls":
-		default:
-			errs = append(errs, errors.New("smtp.tls must be one of: none, starttls, tls"))
-		}
-		if c.SMTP.From == "" {
-			errs = append(errs, errors.New("smtp.from is required"))
-		}
-		if len(c.SMTP.To) == 0 {
-			errs = append(errs, errors.New("smtp.to must contain at least one recipient"))
-		}
+		validateSMTPConfig("smtp", c.SMTP, &errs)
+	}
+	if providerSMTPConfigured {
+		validateSMTPConfig("alerts.providers.smtp", c.Alerts.Providers.SMTP, &errs)
 	}
 	if mailtrapConfigured {
-		if c.Mailtrap.Token == "" {
-			errs = append(errs, errors.New("mailtrap.token is required"))
-		}
-		if c.Mailtrap.Endpoint == "" {
-			errs = append(errs, errors.New("mailtrap.endpoint is required"))
-		} else if err := validateHTTPURL(c.Mailtrap.Endpoint); err != nil {
-			errs = append(errs, fmt.Errorf("mailtrap.endpoint: %w", err))
-		}
-		if c.Mailtrap.From == "" {
-			errs = append(errs, errors.New("mailtrap.from is required"))
-		}
-		if len(c.Mailtrap.To) == 0 {
-			errs = append(errs, errors.New("mailtrap.to must contain at least one recipient"))
-		}
+		validateMailtrapConfig("mailtrap", c.Mailtrap, &errs)
+	}
+	if providerMailtrapConfigured {
+		validateMailtrapConfig("alerts.providers.mailtrap", c.Alerts.Providers.Mailtrap, &errs)
+	}
+	if telegramConfigured {
+		validateTelegramConfig("alerts.providers.telegram", c.Alerts.Providers.Telegram, &errs)
 	}
 	if c.Defaults.Interval.Duration <= 0 {
 		errs = append(errs, errors.New("defaults.interval must be positive"))

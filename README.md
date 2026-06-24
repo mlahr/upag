@@ -2,8 +2,8 @@
 
 `upag` is a lightweight HTTP(S) uptime monitor for self-hosted systems. It runs
 as a single Go daemon, reads monitor definitions from YAML, stores state and
-probe history in SQLite, and sends email alerts when monitored endpoints
-transition DOWN or UP.
+probe history in SQLite, and sends alerts when monitored endpoints transition
+DOWN or UP.
 
 ## Features
 
@@ -17,8 +17,8 @@ transition DOWN or UP.
   the monitoring host itself loses outbound network connectivity.
 - SQLite persistence for monitor state, probe history, incidents, and alert
   notification attempts, with automatic startup migrations.
-- Email incident alerts through SMTP, the Mailtrap Transactional Email API, or
-  both.
+- Incident alerts through SMTP, the Mailtrap Transactional Email API, Telegram,
+  or any configured combination.
 - Retry storage for failed alert notification attempts.
 - Foreground and background daemon commands.
 - Configuration reload by signal without restarting the daemon process.
@@ -112,15 +112,17 @@ cp config.example.yaml config.yaml
 Edit `config.yaml` with at least one alert provider and one monitor:
 
 ```yaml
-smtp:
-  host: smtp.example.com
-  port: 587
-  tls: starttls
-  username: alerts@example.com
-  password: change-me
-  from: alerts@example.com
-  to:
-    - ops@example.com
+alerts:
+  providers:
+    smtp:
+      host: smtp.example.com
+      port: 587
+      tls: starttls
+      username: alerts@example.com
+      password: change-me
+      from: alerts@example.com
+      to:
+        - ops@example.com
 
 defaults:
   interval: 60s
@@ -182,26 +184,29 @@ as `500ms`, `10s`, `1m`, or `720h`. Storage retention also accepts `d` for
 Complete example:
 
 ```yaml
-smtp:
-  host: smtp.example.com
-  port: 587
-  tls: starttls
-  username: alerts@example.com
-  password: change-me
-  from: alerts@example.com
-  to:
-    - ops@example.com
-
-# To also use Mailtrap's HTTPS Transactional Email API, configure this block.
-# If both smtp and mailtrap are configured, alerts are sent through both.
-# mailtrap:
-#   token: change-me
-#   from: alerts@example.com
-#   from_name: upag
-#   to:
-#     - ops@example.com
-
 alerts:
+  providers:
+    smtp:
+      host: smtp.example.com
+      port: 587
+      tls: starttls
+      username: alerts@example.com
+      password: change-me
+      from: alerts@example.com
+      to:
+        - ops@example.com
+    # To also use Mailtrap's HTTPS Transactional Email API, configure this block.
+    # mailtrap:
+    #   token: change-me
+    #   from: alerts@example.com
+    #   from_name: upag
+    #   to:
+    #     - ops@example.com
+    # To also use Telegram Bot API alerts, configure this block.
+    # telegram:
+    #   token: change-me
+    #   chat_ids:
+    #     - "123456789"
   notification_retries:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
@@ -256,10 +261,14 @@ monitors:
 
 ### Alert Providers
 
-Configure at least one alert provider. If both `smtp` and `mailtrap` are
-configured, each incident alert is sent through both providers.
+Configure at least one alert provider under `alerts.providers`. If multiple
+providers are configured, each incident alert is sent through each provider.
 
-`smtp` fields:
+Existing top-level `smtp` and `mailtrap` blocks remain supported for
+compatibility. Do not configure the same provider both at top level and under
+`alerts.providers`.
+
+`alerts.providers.smtp` fields:
 
 - `host`: SMTP server hostname. Required when SMTP is configured.
 - `port`: SMTP server TCP port. Defaults to `587`.
@@ -271,7 +280,7 @@ configured, each incident alert is sent through both providers.
 - `to`: recipient email addresses. Must contain at least one recipient.
 - `local_name`: optional local name used by the SMTP client.
 
-`mailtrap` fields:
+`alerts.providers.mailtrap` fields:
 
 - `token`: Mailtrap API token. Required when Mailtrap is configured.
 - `endpoint`: Mailtrap API endpoint. Defaults to
@@ -279,6 +288,14 @@ configured, each incident alert is sent through both providers.
 - `from`: sender email address. Required when Mailtrap is configured.
 - `from_name`: optional sender display name.
 - `to`: recipient email addresses. Must contain at least one recipient.
+
+`alerts.providers.telegram` fields:
+
+- `token`: Telegram bot token. Required when Telegram is configured.
+- `chat_ids`: Telegram chat IDs. Must contain at least one chat ID. Quote chat
+  IDs in YAML so negative group IDs are parsed as strings.
+- `endpoint`: Telegram Bot API endpoint. Defaults to
+  `https://api.telegram.org`.
 
 ### Alert Retry Policy
 

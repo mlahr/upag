@@ -1,14 +1,14 @@
-smtp:
-  host: smtp.example.com
-  port: 587
-  tls: starttls
-  username: alerts@example.com
-  password: change-me
-  from: alerts@example.com
-  to:
-    - ops@example.com
-
 alerts:
+  providers:
+    smtp:
+      host: smtp.example.com
+      port: 587
+      tls: starttls
+      username: alerts@example.com
+      password: change-me
+      from: alerts@example.com
+      to:
+        - ops@example.com
   notification_retries:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
