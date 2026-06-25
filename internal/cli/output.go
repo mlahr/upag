@@ -11,7 +11,7 @@ import (
 
 func PrintStates(w io.Writer, states []storage.MonitorState, activeMaintenance map[string]storage.MaintenanceWindow) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tFAILURES\tLAST CHECK\tLAST STATUS\tMAINTENANCE\tMAINTENANCE UNTIL\tNAME\tURL\tERROR"); err != nil {
+	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tFAILURES\tLAST CHECK\tLAST FAILED\tLAST STATUS\tMAINTENANCE\tMAINTENANCE UNTIL\tNAME\tURL\tERROR"); err != nil {
 		return err
 	}
 	for _, state := range states {
@@ -21,11 +21,12 @@ func PrintStates(w io.Writer, states []storage.MonitorState, activeMaintenance m
 			maintenanceID = fmt.Sprintf("%d", window.ID)
 			maintenanceUntil = formatCLITime(window.EndsAt)
 		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n",
 			state.MonitorID,
 			state.Status,
 			state.ConsecutiveFailures,
 			formatCLITime(state.LastCheckedAt),
+			formatCLITime(state.LastFailureAt),
 			state.LastObservedStatusCode,
 			maintenanceID,
 			maintenanceUntil,

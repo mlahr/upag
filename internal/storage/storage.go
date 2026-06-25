@@ -717,7 +717,7 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 		monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at
-		FROM monitor_states ORDER BY monitor_id`)
+		FROM monitor_states ORDER BY last_checked_at DESC, monitor_id`)
 	if err != nil {
 		return nil, err
 	}
