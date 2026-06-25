@@ -24,6 +24,8 @@ type Result struct {
 	CheckedAt          time.Time
 }
 
+const maxResponseBodyBytes int64 = 10 << 20
+
 func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	start := time.Now().UTC()
 	result := Result{CheckedAt: start}
@@ -47,6 +49,7 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: monitor.InsecureSkipVerify},
 		},
 	}
+	defer client.CloseIdleConnections()
 
 	resp, err := client.Do(req)
 	result.Latency = time.Since(start)
@@ -57,10 +60,15 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	defer resp.Body.Close()
 
 	result.ObservedStatusCode = resp.StatusCode
+	if resp.StatusCode != monitor.ExpectedStatusCode && monitor.MaxResponseTime.Duration == 0 {
+		result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
+		return result
+	}
+
 	var bodyBytes []byte
 	var bodyText string
 	if monitor.ResponseBody.Configured() || monitor.MaxResponseTime.Duration > 0 {
-		body, err := io.ReadAll(resp.Body)
+		body, err := readLimitedResponseBody(resp.Body, maxResponseBodyBytes)
 		result.ResponseTime = time.Since(start)
 		if err != nil {
 			result.Error = fmt.Sprintf("read response body: %v", err)
@@ -101,6 +109,17 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 
 	result.OK = true
 	return result
+}
+
+func readLimitedResponseBody(r io.Reader, limit int64) ([]byte, error) {
+	body, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("response body exceeds %d bytes", limit)
+	}
+	return body, nil
 }
 
 func runResponseBodyCommand(ctx context.Context, assertion config.ResponseBodyAssertions, body []byte) error {

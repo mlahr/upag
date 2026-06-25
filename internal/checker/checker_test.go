@@ -270,6 +270,26 @@ func TestCheckStatusMismatchSkipsResponseBodyCommand(t *testing.T) {
 	}
 }
 
+func TestReadLimitedResponseBodyAllowsExactLimit(t *testing.T) {
+	body, err := readLimitedResponseBody(strings.NewReader("abcd"), 4)
+	if err != nil {
+		t.Fatalf("readLimitedResponseBody returned error: %v", err)
+	}
+	if string(body) != "abcd" {
+		t.Fatalf("body = %q, want abcd", body)
+	}
+}
+
+func TestReadLimitedResponseBodyRejectsOversizedBody(t *testing.T) {
+	_, err := readLimitedResponseBody(strings.NewReader("abcde"), 4)
+	if err == nil {
+		t.Fatal("expected oversized body error")
+	}
+	if !strings.Contains(err.Error(), "response body exceeds 4 bytes") {
+		t.Fatalf("error = %q, want size limit failure", err.Error())
+	}
+}
+
 func TestCheckWithoutResponseBodyAssertionsKeepsStatusOnlyBehavior(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("any response body"))

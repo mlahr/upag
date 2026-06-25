@@ -107,6 +107,7 @@ func checkSentinel(ctx context.Context, timeout time.Duration, sentinel config.S
 			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 		},
 	}
+	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	result.LatencyMS = time.Since(start).Milliseconds()
 	if err != nil {
