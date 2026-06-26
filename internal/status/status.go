@@ -42,7 +42,7 @@ type Server struct {
 	shutdownErr  error
 }
 
-func Start(ctx context.Context, address string, port int, store Store, metadata MetadataProvider) (*Server, error) {
+func Start(ctx context.Context, address string, port int, store Store, tenantID string, metadata MetadataProvider) (*Server, error) {
 	listenAddress := ListenAddress(address, port)
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -50,7 +50,7 @@ func Start(ctx context.Context, address string, port int, store Store, metadata 
 	}
 
 	server := &http.Server{
-		Handler: NewHandler(store, metadata),
+		Handler: NewHandler(store, tenantID, metadata),
 	}
 	serverCtx, cancel := context.WithCancel(ctx)
 	statusServer := &Server{
@@ -81,7 +81,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdownErr
 }
 
-func NewHandler(store Store, metadata MetadataProvider) http.Handler {
+func NewHandler(store Store, tenantID string, metadata MetadataProvider) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !allowGet(w, r) {
@@ -99,6 +99,7 @@ func NewHandler(store Store, metadata MetadataProvider) http.Handler {
 			return
 		}
 		ctx := r.Context()
+		ctx = storage.WithTenant(ctx, tenantID)
 		states, err := store.ListStates(ctx)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})

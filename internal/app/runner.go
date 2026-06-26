@@ -40,6 +40,8 @@ type Runner struct {
 	statusServer  *httpstatus.Server
 	statusAddress string
 	statusPort    int
+	statusTenant  string
+	tenantID      string
 }
 
 type monitorWorker struct {
@@ -61,15 +63,17 @@ type observerWorker struct {
 
 func NewRunner(configPath string, cfg config.Config, store storage.Backend, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
 	return &Runner{
-		configPath: configPath,
-		version:    version,
-		startedAt:  time.Now().UTC(),
-		cfg:        cfg,
-		store:      store,
-		out:        out,
-		errOut:     errOut,
-		emailer:    alert.NewIncidentSender(cfg),
-		workers:    map[string]monitorWorker{},
+		configPath:   configPath,
+		version:      version,
+		startedAt:    time.Now().UTC(),
+		cfg:          cfg,
+		store:        store,
+		out:          out,
+		errOut:       errOut,
+		emailer:      alert.NewIncidentSender(cfg),
+		workers:      map[string]monitorWorker{},
+		tenantID:     cfg.TenantID,
+		statusTenant: cfg.TenantID,
 	}, nil
 }
 
@@ -80,7 +84,7 @@ func (r *Runner) Run(ctx context.Context) error {
 
 	r.logInfo("daemon_start", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
 	r.applyConfig(ctx, r.cfg)
-	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Address, r.cfg.HTTP.Port); err != nil {
+	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Address, r.cfg.HTTP.Port, r.cfg.TenantID); err != nil {
 		return err
 	}
 	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
@@ -103,7 +107,7 @@ func (r *Runner) Run(ctx context.Context) error {
 				continue
 			}
 			r.applyConfig(ctx, cfg)
-			if err := r.applyStatusServer(ctx, cfg.HTTP.Address, cfg.HTTP.Port); err != nil {
+			if err := r.applyStatusServer(ctx, cfg.HTTP.Address, cfg.HTTP.Port, cfg.TenantID); err != nil {
 				r.logError("status_http_reload_failed", "address=%q error=%q", httpstatus.ListenAddress(cfg.HTTP.Address, cfg.HTTP.Port), err)
 				continue
 			}
@@ -112,13 +116,20 @@ func (r *Runner) Run(ctx context.Context) error {
 			r.mu.Lock()
 			retention := probeRetentionPolicy(r.cfg)
 			r.mu.Unlock()
-			if err := r.store.RollupAndPruneProbeResults(ctx, retention, time.Now().UTC()); err != nil {
+			if err := r.store.RollupAndPruneProbeResults(r.storageContext(ctx), retention, time.Now().UTC()); err != nil {
 				r.logError("history_prune_failed", "error=%q", err)
 			}
 		case <-retryTicker.C:
 			r.retryAlertNotifications(ctx)
 		}
 	}
+}
+
+func (r *Runner) storageContext(parent context.Context) context.Context {
+	r.mu.Lock()
+	tenantID := r.tenantID
+	r.mu.Unlock()
+	return storage.WithTenant(parent, tenantID)
 }
 
 func probeRetentionPolicy(cfg config.Config) storage.ProbeRetentionPolicy {
@@ -140,6 +151,7 @@ func rollupRetention(retention config.RetentionDuration) storage.RollupRetention
 func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.tenantID = cfg.TenantID
 
 	desired := map[string]config.MonitorConfig{}
 	desiredIDs := make([]string, 0, len(cfg.Monitors))
@@ -153,7 +165,7 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 			delete(r.workers, id)
 		}
 	}
-	if err := r.store.DeleteStatesExcept(parent, desiredIDs); err != nil {
+	if err := r.store.DeleteStatesExcept(storage.WithTenant(parent, cfg.TenantID), desiredIDs); err != nil {
 		r.logError("stale_monitor_cleanup_failed", "error=%q", err)
 	}
 	for _, mon := range cfg.Monitors {
@@ -190,20 +202,21 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	r.emailer = alert.NewIncidentSender(cfg)
 }
 
-func (r *Runner) applyStatusServer(parent context.Context, address string, port int) error {
+func (r *Runner) applyStatusServer(parent context.Context, address string, port int, tenantID string) error {
 	r.mu.Lock()
 	currentServer := r.statusServer
 	currentAddress := r.statusAddress
 	currentPort := r.statusPort
+	currentTenant := r.statusTenant
 	r.mu.Unlock()
-	if currentAddress == address && currentPort == port {
+	if currentAddress == address && currentPort == port && currentTenant == tenantID {
 		return nil
 	}
 
 	var nextServer *httpstatus.Server
 	if port > 0 {
 		var err error
-		nextServer, err = httpstatus.Start(parent, address, port, r.store, r.statusMetadata)
+		nextServer, err = httpstatus.Start(parent, address, port, r.store, tenantID, r.statusMetadata)
 		if err != nil {
 			return err
 		}
@@ -225,6 +238,7 @@ func (r *Runner) applyStatusServer(parent context.Context, address string, port 
 	r.statusServer = nextServer
 	r.statusAddress = address
 	r.statusPort = port
+	r.statusTenant = tenantID
 	r.mu.Unlock()
 	if port > 0 {
 		r.logInfo("status_http_start", "address=%q", httpstatus.ListenAddress(address, port))
@@ -242,6 +256,7 @@ func (r *Runner) stopStatusServer() {
 	r.statusServer = nil
 	r.statusAddress = ""
 	r.statusPort = 0
+	r.statusTenant = ""
 	r.mu.Unlock()
 	if server == nil {
 		return
@@ -293,6 +308,7 @@ func (r *Runner) runObserver(ctx context.Context, cfg config.ObserverConfig) {
 }
 
 func (r *Runner) probeObserver(ctx context.Context, cfg config.ObserverConfig) {
+	ctx = r.storageContext(ctx)
 	select {
 	case <-ctx.Done():
 		return
@@ -370,6 +386,7 @@ func monitorInitialDelay(monitorID string, interval time.Duration) time.Duration
 }
 
 func (r *Runner) probe(ctx context.Context, threshold int, probeRetries int, probeRetryBackoff time.Duration, mon config.MonitorConfig) {
+	ctx = r.storageContext(ctx)
 	select {
 	case <-ctx.Done():
 		return
@@ -500,7 +517,7 @@ func (r *Runner) sendIncidentNotifications(ctx context.Context, incidentID int64
 	attemptedAt := time.Now().UTC()
 	results := emailer.SendIncident(incident, current)
 	notifications := alertNotifications(incidentID, incident.MonitorID, attemptedAt, 1, r.retryPolicy(), results)
-	if err := r.store.SaveAlertNotifications(ctx, notifications); err != nil {
+	if err := r.store.SaveAlertNotifications(r.storageContext(ctx), notifications); err != nil {
 		r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d error=%q", incident.MonitorID, incidentID, err)
 	}
 	if err := alert.SendResultsError(results); err != nil {
@@ -536,7 +553,7 @@ func (r *Runner) checkWithRetries(ctx context.Context, mon config.MonitorConfig,
 
 func (r *Runner) retryAlertNotifications(ctx context.Context) {
 	now := time.Now().UTC()
-	due, err := r.store.ListDueAlertNotificationRetries(ctx, now, 50)
+	due, err := r.store.ListDueAlertNotificationRetries(r.storageContext(ctx), now, 50)
 	if err != nil {
 		r.logError("alert_retry_query_failed", "error=%q", err)
 		return
@@ -568,7 +585,7 @@ func (r *Runner) retryAlertNotifications(ctx context.Context) {
 			notification.RetryExhausted = true
 			notification.NextRetryAt = time.Time{}
 		}
-		if err := r.store.SaveAlertNotifications(ctx, []storage.AlertNotification{notification}); err != nil {
+		if err := r.store.SaveAlertNotifications(r.storageContext(ctx), []storage.AlertNotification{notification}); err != nil {
 			r.logError("alert_notification_write_failed", "monitor_id=%q incident_id=%d provider=%q error=%q", retry.Notification.MonitorID, retry.Notification.IncidentID, retry.Notification.Provider, err)
 			continue
 		}

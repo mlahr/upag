@@ -36,6 +36,28 @@ type Backend interface {
 	RollupAndPruneProbeResults(context.Context, ProbeRetentionPolicy, time.Time) error
 }
 
+const defaultTenantID = "default"
+
+type tenantContextKey struct{}
+
+func WithTenant(ctx context.Context, tenantID string) context.Context {
+	if strings.TrimSpace(tenantID) == "" {
+		tenantID = defaultTenantID
+	}
+	return context.WithValue(ctx, tenantContextKey{}, tenantID)
+}
+
+func TenantFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return defaultTenantID
+	}
+	tenant, ok := ctx.Value(tenantContextKey{}).(string)
+	if !ok || strings.TrimSpace(tenant) == "" {
+		return defaultTenantID
+	}
+	return tenant
+}
+
 type Store struct {
 	db *sql.DB
 }

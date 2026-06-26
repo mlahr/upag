@@ -46,6 +46,8 @@ observer:
   #     url: https://example.com/health
   #     expected_status_code: 200
 
+tenant_id: default
+
 defaults:
   interval: 60s
   timeout: 10s

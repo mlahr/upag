@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -593,6 +594,63 @@ func TestApplyConfigStopsRemovedWorker(t *testing.T) {
 	if _, ok := runner.workers["removed"]; ok {
 		t.Fatal("removed worker still registered")
 	}
+}
+
+func TestApplyStatusServerRestartsWhenTenantChanges(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := context.Background()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("open ephemeral status port: %v", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatalf("close ephemeral status port listener: %v", err)
+	}
+	changedPort := port
+	for changedPort == port {
+		listenerBeta, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("open second ephemeral status port: %v", err)
+		}
+		changedPort = listenerBeta.Addr().(*net.TCPAddr).Port
+		if err := listenerBeta.Close(); err != nil {
+			t.Fatalf("close second ephemeral status port listener: %v", err)
+		}
+	}
+
+	if err := runner.applyStatusServer(ctx, "127.0.0.1", port, "tenant-alpha"); err != nil {
+		t.Fatalf("apply status server first start: %v", err)
+	}
+	first := runner.statusServer
+	if first == nil {
+		t.Fatal("status server not started")
+	}
+
+	if err := runner.applyStatusServer(ctx, "127.0.0.1", port, "tenant-alpha"); err != nil {
+		t.Fatalf("apply status server same tenant: %v", err)
+	}
+	if runner.statusServer != first {
+		t.Fatal("status server restarted for unchanged tenant")
+	}
+
+	if err := runner.applyStatusServer(ctx, "127.0.0.1", changedPort, "tenant-beta"); err != nil {
+		t.Fatalf("apply status server different tenant: %v", err)
+	}
+	if runner.statusServer == first {
+		t.Fatal("status server not restarted when tenant changed")
+	}
+	runner.stopStatusServer()
 }
 
 func monitorIDWithMinimumDelay(t *testing.T, interval time.Duration, minimum time.Duration) string {

@@ -145,6 +145,8 @@ storage:
   probe_daily_rollups:
     retention: forever
 
+tenant_id: default
+
 monitors:
   - id: homepage
     name: Homepage
@@ -174,6 +176,10 @@ upag maintenance add --config ./config.yaml --monitor homepage \
 upag maintenance list --config ./config.yaml
 upag maintenance cancel --config ./config.yaml --id 1 --reason "finished"
 ```
+
+For PostgreSQL backends, `tenant_id` defines the tenant namespace used for all
+status, incidents, rollups, maintenance windows, and alert rows. If omitted, it
+defaults to `default`.
 
 ## Configuration
 
@@ -245,6 +251,8 @@ storage:
     retention: 1y
   probe_daily_rollups:
     retention: forever
+
+tenant_id: default
 
 monitors:
   - id: example

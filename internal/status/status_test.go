@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -46,9 +47,59 @@ func (s fakeStore) ListObserverSentinelResults(context.Context) ([]storage.Obser
 	return s.sentinels, nil
 }
 
+type tenantAwareStore struct {
+	mu              sync.Mutex
+	fakeStore       fakeStore
+	observedTenants []string
+}
+
+func (s *tenantAwareStore) recordTenant(ctx context.Context) {
+	s.mu.Lock()
+	s.observedTenants = append(s.observedTenants, storage.TenantFromContext(ctx))
+	s.mu.Unlock()
+}
+
+func (s *tenantAwareStore) recordedTenants() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tenants := make([]string, len(s.observedTenants))
+	copy(tenants, s.observedTenants)
+	return tenants
+}
+
+func (s *tenantAwareStore) ListStates(ctx context.Context) ([]storage.MonitorState, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListStates(ctx)
+}
+
+func (s *tenantAwareStore) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]storage.UptimeStats, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListUptimeStats(ctx, now, failureThreshold)
+}
+
+func (s *tenantAwareStore) ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListActionableAlertDeliveryFailures(ctx, limit)
+}
+
+func (s *tenantAwareStore) ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListMaintenanceWindows(ctx, filter)
+}
+
+func (s *tenantAwareStore) GetObserverState(ctx context.Context) (storage.ObserverState, bool, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.GetObserverState(ctx)
+}
+
+func (s *tenantAwareStore) ListObserverSentinelResults(ctx context.Context) ([]storage.ObserverSentinelResult, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListObserverSentinelResults(ctx)
+}
+
 func TestHealthReturnsLivenessJSON(t *testing.T) {
 	startedAt := time.Date(2026, 6, 22, 2, 15, 4, 0, time.UTC)
-	handler := NewHandler(fakeStore{}, func() Metadata {
+	handler := NewHandler(fakeStore{}, "tenant-one", func() Metadata {
 		return Metadata{Version: "test", StartedAt: startedAt}
 	})
 
@@ -67,6 +118,32 @@ func TestHealthReturnsLivenessJSON(t *testing.T) {
 	}
 	if body["started_at"] != "2026-06-22T02:15:04Z" {
 		t.Fatalf("started_at = %#v, want RFC3339 UTC timestamp", body["started_at"])
+	}
+}
+
+func TestNewHandlerUsesTenantInStoreContext(t *testing.T) {
+	store := &tenantAwareStore{
+		fakeStore: fakeStore{},
+	}
+	handler := NewHandler(store, "tenant-blue", func() Metadata {
+		return Metadata{
+			Version:   "test",
+			StartedAt: time.Date(2026, 6, 22, 2, 15, 4, 0, time.UTC),
+		}
+	})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status code = %d, want 200", recorder.Code)
+	}
+	tenants := store.recordedTenants()
+	if len(tenants) == 0 {
+		t.Fatal("store context was not observed")
+	}
+	for _, tenant := range tenants {
+		if tenant != "tenant-blue" {
+			t.Fatalf("tenant context = %q, want tenant-blue", tenant)
+		}
 	}
 }
 
@@ -180,7 +257,7 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 				CheckedAt:          checkedAt,
 			},
 		},
-	}, func() Metadata {
+	}, "tenant-one", func() Metadata {
 		return Metadata{
 			Version:      "test",
 			StartedAt:    startedAt,
@@ -313,7 +390,7 @@ func TestStatusReturnsMonitorStateAndAlertFailures(t *testing.T) {
 }
 
 func TestHandlerRejectsUnsupportedMethod(t *testing.T) {
-	handler := NewHandler(fakeStore{}, func() Metadata { return Metadata{} })
+	handler := NewHandler(fakeStore{}, "tenant-one", func() Metadata { return Metadata{} })
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/status", strings.NewReader("")))
@@ -327,7 +404,7 @@ func TestHandlerRejectsUnsupportedMethod(t *testing.T) {
 }
 
 func TestHandlerReturnsNotFound(t *testing.T) {
-	handler := NewHandler(fakeStore{}, func() Metadata { return Metadata{} })
+	handler := NewHandler(fakeStore{}, "tenant-one", func() Metadata { return Metadata{} })
 	recorder := httptest.NewRecorder()
 
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/missing", nil))

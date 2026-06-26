@@ -19,6 +19,7 @@ type Config struct {
 	Mailtrap MailtrapConfig  `yaml:"mailtrap"`
 	Observer ObserverConfig  `yaml:"observer"`
 	Storage  StorageConfig   `yaml:"storage"`
+	TenantID string          `yaml:"tenant_id"`
 	Defaults Defaults        `yaml:"defaults"`
 	Monitors []MonitorConfig `yaml:"monitors"`
 }
@@ -358,6 +359,9 @@ func (c *Config) ApplyDefaults() {
 	if !c.Storage.probeDailyRollupsSet {
 		c.Storage.ProbeDailyRollups.Retention.Forever = true
 	}
+	if strings.TrimSpace(c.TenantID) == "" {
+		c.TenantID = "default"
+	}
 	if c.SMTP.Port == 0 {
 		c.SMTP.Port = 587
 	}
@@ -591,6 +595,9 @@ func (c Config) Validate() error {
 	}
 	if c.HTTP.Port < 0 || c.HTTP.Port > 65535 {
 		errs = append(errs, errors.New("http.port must be a TCP port number from 0 through 65535"))
+	}
+	if strings.TrimSpace(c.TenantID) == "" {
+		errs = append(errs, errors.New("tenant_id is required"))
 	}
 	if err := validateHTTPAddress(c.HTTP.Address); err != nil {
 		errs = append(errs, fmt.Errorf("http.address: %w", err))

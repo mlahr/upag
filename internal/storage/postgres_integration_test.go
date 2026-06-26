@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"upag/internal/state"
 )
 
 var postgresTestDSN string
@@ -249,6 +251,70 @@ func TestPostgresStoreObserverAlertsAndRollups(t *testing.T) {
 	}
 }
 
+func TestPostgresRollupGroupByTenantColumnOrdering(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resetPostgresTestData(t, store)
+
+	now := time.Date(2026, 6, 23, 5, 0, 0, 0, time.UTC)
+	tenantID := "tenant-rollup"
+
+	if _, err := store.SaveProbeAndState(WithTenant(ctx, tenantID), ProbeResult{
+		MonitorID: "shared",
+		CheckedAt: now.Add(-2 * time.Hour),
+		OK:        true,
+	}, MonitorState{
+		MonitorID:              "shared",
+		Name:                   "Tenant Rollup Monitor",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "UP",
+		LastCheckedAt:          now.Add(-2 * time.Hour),
+		LastSuccessAt:          now.Add(-2 * time.Hour),
+		LastObservedStatusCode: 200,
+		UpdatedAt:              now.Add(-2 * time.Hour),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = tx.Rollback(ctx)
+	}()
+
+	if err := postgresRollupRawProbeResults(ctx, tx, tenantID, "probe_minute_rollups", postgresMinuteBucketExpression("checked_at"), now.Add(-time.Hour)); err != nil {
+		t.Fatalf("raw rollup query: %v", err)
+	}
+	if err := postgresRollupStoredProbeRollups(ctx, tx, tenantID, "probe_minute_rollups", "probe_hourly_rollups", postgresHourlyBucketExpression("bucket_start"), now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("stored rollup query: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := store.ListUptimeStats(WithTenant(ctx, tenantID), now, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := stats["shared"]; !ok {
+		t.Fatalf("tenant-scoped rollup stats missing for shared monitor")
+	}
+	defaultStats, err := store.ListUptimeStats(ctx, now, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := defaultStats["shared"]; ok {
+		t.Fatalf("default tenant unexpectedly has rollup stats for tenant-scoped monitor")
+	}
+}
+
 func TestMigrateSQLiteToPostgres(t *testing.T) {
 	ctx := context.Background()
 	target, err := OpenPostgres(ctx, postgresTestDSN)
@@ -302,7 +368,7 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 	}
 	source.Close()
 
-	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN); err != nil {
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, defaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	migrated, err := OpenPostgres(ctx, postgresTestDSN)
@@ -323,6 +389,390 @@ func TestMigrateSQLiteToPostgres(t *testing.T) {
 	}
 	if len(notifications) != 1 || !notifications[0].Success {
 		t.Fatalf("migrated notifications = %+v, want one successful notification", notifications)
+	}
+}
+
+func TestPostgresStoreTenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resetPostgresTestData(t, store)
+
+	now := time.Date(2026, 6, 23, 4, 0, 0, 0, time.UTC)
+	tenantA := "tenant-a"
+	tenantB := "tenant-b"
+
+	aIncidentID, err := store.SaveProbeAndState(WithTenant(ctx, tenantA), ProbeResult{
+		MonitorID:          "shared",
+		CheckedAt:          now,
+		OK:                 false,
+		ObservedStatusCode: 503,
+		LatencyMS:          200,
+		ResponseTimeMS:     210,
+		Error:              "timeout",
+	}, MonitorState{
+		MonitorID:              "shared",
+		Name:                   "Tenant A shared",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "DOWN",
+		ConsecutiveFailures:    1,
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "timeout",
+		LastObservedStatusCode: 503,
+		UpdatedAt:              now,
+	}, &Incident{
+		MonitorID:  "shared",
+		Name:       "Tenant A shared",
+		Transition: state.Down,
+		ObservedAt: now,
+		Error:      "timeout",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.SaveProbeAndState(WithTenant(ctx, tenantA), ProbeResult{
+		MonitorID: "stale",
+		CheckedAt: now.Add(time.Minute),
+		OK:        true,
+	}, MonitorState{
+		MonitorID:              "stale",
+		Name:                   "Tenant A stale",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "UP",
+		ConsecutiveFailures:    0,
+		LastCheckedAt:          now.Add(time.Minute),
+		LastSuccessAt:          now.Add(time.Minute),
+		LastObservedStatusCode: 200,
+		UpdatedAt:              now.Add(time.Minute),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if aIncidentID == 0 {
+		t.Fatalf("incident id = %d, want nonzero", aIncidentID)
+	}
+
+	bIncidentID, err := store.SaveProbeAndState(WithTenant(ctx, tenantB), ProbeResult{
+		MonitorID:          "shared",
+		CheckedAt:          now,
+		OK:                 false,
+		ObservedStatusCode: 502,
+		Error:              "down",
+	}, MonitorState{
+		MonitorID:              "shared",
+		Name:                   "Tenant B shared",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "DOWN",
+		ConsecutiveFailures:    1,
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "down",
+		LastObservedStatusCode: 502,
+		UpdatedAt:              now,
+	}, &Incident{
+		MonitorID:  "shared",
+		Name:       "Tenant B shared",
+		Transition: state.Down,
+		ObservedAt: now,
+		Error:      "down",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bIncidentID == 0 {
+		t.Fatalf("incident id = %d, want nonzero", bIncidentID)
+	}
+
+	aWindowID, err := store.AddMaintenanceWindow(WithTenant(ctx, tenantA), MaintenanceWindow{
+		MonitorID: "shared",
+		StartsAt:  now.Add(-time.Minute),
+		EndsAt:    now.Add(time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "tenant-a",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bWindowID, err := store.AddMaintenanceWindow(WithTenant(ctx, tenantB), MaintenanceWindow{
+		MonitorID: "shared",
+		StartsAt:  now.Add(-time.Minute),
+		EndsAt:    now.Add(time.Hour),
+		Reason:    "deploy",
+		CreatedBy: "tenant-b",
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aWindowID == 0 || bWindowID == 0 {
+		t.Fatalf("window ids = %d and %d, want nonzero", aWindowID, bWindowID)
+	}
+
+	if err := store.SaveAlertNotifications(WithTenant(ctx, tenantA), []AlertNotification{
+		{
+			IncidentID:    aIncidentID,
+			MonitorID:     "shared",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary",
+			NextRetryAt:   now.Add(5 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveAlertNotifications(WithTenant(ctx, tenantB), []AlertNotification{
+		{
+			IncidentID:    bIncidentID,
+			MonitorID:     "shared",
+			Provider:      "smtp",
+			AttemptedAt:   now,
+			AttemptNumber: 1,
+			Success:       false,
+			Error:         "temporary",
+			NextRetryAt:   now.Add(5 * time.Minute),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stateA, ok, err := store.GetState(WithTenant(ctx, tenantA), "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || stateA.Name != "Tenant A shared" {
+		t.Fatalf("tenant A state = %+v ok=%t, want Tenant A shared", stateA, ok)
+	}
+	stateB, ok, err := store.GetState(WithTenant(ctx, tenantB), "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || stateB.Name != "Tenant B shared" {
+		t.Fatalf("tenant B state = %+v ok=%t, want Tenant B shared", stateB, ok)
+	}
+
+	tenA, err := store.ListStates(WithTenant(ctx, tenantA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tenA) != 2 {
+		t.Fatalf("tenant A state count = %d, want 2", len(tenA))
+	}
+	tenB, err := store.ListStates(WithTenant(ctx, tenantB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tenB) != 1 {
+		t.Fatalf("tenant B state count = %d, want 1", len(tenB))
+	}
+
+	windowA, err := store.ListMaintenanceWindows(WithTenant(ctx, tenantA), MaintenanceWindowFilter{MonitorID: "shared", IncludeAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windowA) != 1 || windowA[0].ID != aWindowID {
+		t.Fatalf("tenant A windows = %+v, want one window %d", windowA, aWindowID)
+	}
+	windowB, err := store.ListMaintenanceWindows(WithTenant(ctx, tenantB), MaintenanceWindowFilter{MonitorID: "shared", IncludeAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windowB) != 1 || windowB[0].ID != bWindowID {
+		t.Fatalf("tenant B windows = %+v, want one window %d", windowB, bWindowID)
+	}
+
+	incidentsA, err := store.ListIncidents(WithTenant(ctx, tenantA), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidentsA) != 1 || incidentsA[0].MonitorID != "shared" || incidentsA[0].Transition != "DOWN" {
+		t.Fatalf("tenant A incidents = %+v, want one down incident for shared", incidentsA)
+	}
+	incidentsB, err := store.ListIncidents(WithTenant(ctx, tenantB), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(incidentsB) != 1 || incidentsB[0].MonitorID != "shared" || incidentsB[0].Transition != "DOWN" {
+		t.Fatalf("tenant B incidents = %+v, want one down incident for shared", incidentsB)
+	}
+
+	failuresA, err := store.ListActionableAlertDeliveryFailures(WithTenant(ctx, tenantA), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failuresA) != 1 || failuresA[0].MonitorID != "shared" || failuresA[0].Provider != "smtp" {
+		t.Fatalf("tenant A failures = %+v, want one smtp failure", failuresA)
+	}
+	failuresB, err := store.ListActionableAlertDeliveryFailures(WithTenant(ctx, tenantB), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(failuresB) != 1 || failuresB[0].MonitorID != "shared" || failuresB[0].Provider != "smtp" {
+		t.Fatalf("tenant B failures = %+v, want one smtp failure", failuresB)
+	}
+
+	if err := store.DeleteStatesExcept(WithTenant(ctx, tenantA), []string{"shared"}); err != nil {
+		t.Fatal(err)
+	}
+	afterTenantA, err := store.ListStates(WithTenant(ctx, tenantA))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterTenantA) != 1 || afterTenantA[0].MonitorID != "shared" {
+		t.Fatalf("tenant A states after cleanup = %+v, want one shared state", afterTenantA)
+	}
+	afterTenantB, err := store.ListStates(WithTenant(ctx, tenantB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(afterTenantB) != 1 {
+		t.Fatalf("tenant B states after tenant A cleanup = %d, want 1", len(afterTenantB))
+	}
+}
+
+func TestMigrateSQLiteToPostgresDefaultsTenantID(t *testing.T) {
+	ctx := context.Background()
+	target, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetPostgresTestData(t, target)
+	target.Close()
+
+	sqlitePath := filepath.Join(t.TempDir(), "source.sqlite")
+	source, err := Open(sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 23, 3, 0, 0, 0, time.UTC)
+	_, err = source.SaveProbeAndState(ctx, ProbeResult{
+		MonitorID: "tenantless",
+		CheckedAt: now,
+		OK:        false,
+		Error:     "down",
+	}, MonitorState{
+		MonitorID:              "tenantless",
+		Name:                   "Tenantless",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "DOWN",
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "down",
+		LastObservedStatusCode: 0,
+		UpdatedAt:              now,
+	}, &Incident{
+		MonitorID:  "tenantless",
+		Name:       "Tenantless",
+		Transition: "DOWN",
+		ObservedAt: now,
+		Error:      "down",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Close()
+
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "   "); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+
+	state, ok, err := migrated.GetState(ctx, "tenantless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || state.Status != "DOWN" {
+		t.Fatalf("default tenant state = %+v ok=%t, want DOWN", state, ok)
+	}
+
+	stateTenant, ok, err := migrated.GetState(WithTenant(ctx, "team-custom"), "tenantless")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("custom tenant state = %+v, want missing", stateTenant)
+	}
+}
+
+func TestMigrateSQLiteToPostgresUsesExplicitTenantID(t *testing.T) {
+	ctx := context.Background()
+	target, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetPostgresTestData(t, target)
+	target.Close()
+
+	sqlitePath := filepath.Join(t.TempDir(), "source.sqlite")
+	source, err := Open(sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 6, 23, 4, 0, 0, 0, time.UTC)
+	tenantID := "tenant-migrated"
+	_, err = source.SaveProbeAndState(ctx, ProbeResult{
+		MonitorID: "tenant-specific",
+		CheckedAt: now,
+		OK:        false,
+		Error:     "down",
+	}, MonitorState{
+		MonitorID:              "tenant-specific",
+		Name:                   "Tenant specific",
+		URL:                    "https://example.com/",
+		ExpectedStatusCode:     200,
+		Status:                 "DOWN",
+		LastCheckedAt:          now,
+		LastFailureAt:          now,
+		LastError:              "down",
+		LastObservedStatusCode: 0,
+		UpdatedAt:              now,
+	}, &Incident{
+		MonitorID:  "tenant-specific",
+		Name:       "Tenant specific",
+		Transition: "DOWN",
+		ObservedAt: now,
+		Error:      "down",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.Close()
+
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, tenantID); err != nil {
+		t.Fatal(err)
+	}
+	migrated, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+
+	state, ok, err := migrated.GetState(WithTenant(ctx, tenantID), "tenant-specific")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || state.Status != "DOWN" {
+		t.Fatalf("tenant state = %+v ok=%t, want DOWN", state, ok)
+	}
+	stateDefault, ok, err := migrated.GetState(ctx, "tenant-specific")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("default tenant state = %+v, want missing", stateDefault)
 	}
 }
 

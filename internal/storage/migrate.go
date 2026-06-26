@@ -4,11 +4,16 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN string) error {
+func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN string, tenantID string) error {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		tenantID = defaultTenantID
+	}
 	source, err := Open(sqlitePath)
 	if err != nil {
 		return err
@@ -31,37 +36,37 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN
 	}
 	defer tx.Rollback(ctx)
 
-	if err := copyMonitorStates(ctx, source.db, tx); err != nil {
+	if err := copyMonitorStates(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyObserverState(ctx, source.db, tx); err != nil {
+	if err := copyObserverState(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyObserverSentinelResults(ctx, source.db, tx); err != nil {
+	if err := copyObserverSentinelResults(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyMaintenanceWindows(ctx, source.db, tx); err != nil {
+	if err := copyMaintenanceWindows(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyProbeResults(ctx, source.db, tx); err != nil {
+	if err := copyProbeResults(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyIncidents(ctx, source.db, tx); err != nil {
+	if err := copyIncidents(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyAlertNotifications(ctx, source.db, tx); err != nil {
+	if err := copyAlertNotifications(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
-	if err := copyProbeRollups(ctx, source.db, tx, "probe_minute_rollups"); err != nil {
+	if err := copyProbeRollups(ctx, source.db, tx, tenantID, "probe_minute_rollups"); err != nil {
 		return err
 	}
-	if err := copyProbeRollups(ctx, source.db, tx, "probe_hourly_rollups"); err != nil {
+	if err := copyProbeRollups(ctx, source.db, tx, tenantID, "probe_hourly_rollups"); err != nil {
 		return err
 	}
-	if err := copyProbeRollups(ctx, source.db, tx, "probe_daily_rollups"); err != nil {
+	if err := copyProbeRollups(ctx, source.db, tx, tenantID, "probe_daily_rollups"); err != nil {
 		return err
 	}
-	if err := copyProbeOutcomeRuns(ctx, source.db, tx); err != nil {
+	if err := copyProbeOutcomeRuns(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
 	if err := resetPostgresSequences(ctx, tx); err != nil {
@@ -95,7 +100,7 @@ func ensurePostgresTargetEmpty(ctx context.Context, target *PostgresStore) error
 	return nil
 }
 
-func copyMonitorStates(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyMonitorStates(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT monitor_id, name, url, expected_status_code, status, status_before_maintenance,
 		consecutive_failures, last_checked_at, last_success_at, last_failure_at, last_error, last_observed_status_code, updated_at
 		FROM monitor_states ORDER BY monitor_id`)
@@ -110,10 +115,10 @@ func copyMonitorStates(ctx context.Context, db *sql.DB, tx postgresTx) error {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO monitor_states
-			(monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
+			(tenant_id, monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 			 last_checked_at, last_success_at, last_failure_at, last_error, last_observed_status_code, updated_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-			state.MonitorID, state.Name, state.URL, state.ExpectedStatusCode, state.Status, state.StatusBeforeMaintenance, state.ConsecutiveFailures,
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+			tenantID, state.MonitorID, state.Name, state.URL, state.ExpectedStatusCode, state.Status, state.StatusBeforeMaintenance, state.ConsecutiveFailures,
 			postgresNullableTime(parseTime(lastChecked)), postgresNullableTime(parseTime(lastSuccess)), postgresNullableTime(parseTime(lastFailure)), state.LastError,
 			state.LastObservedStatusCode, parseTime(updated)); err != nil {
 			return err
@@ -122,7 +127,7 @@ func copyMonitorStates(ctx context.Context, db *sql.DB, tx postgresTx) error {
 	return rows.Err()
 }
 
-func copyObserverState(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyObserverState(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT status, consecutive_failures, consecutive_successes, last_checked_at, last_success_at, last_failure_at, last_error, updated_at FROM observer_state WHERE id = 1`)
 	if err != nil {
 		return err
@@ -135,9 +140,9 @@ func copyObserverState(ctx context.Context, db *sql.DB, tx postgresTx) error {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO observer_state
-			(id, status, consecutive_failures, consecutive_successes, last_checked_at, last_success_at, last_failure_at, last_error, updated_at)
-			VALUES (1,$1,$2,$3,$4,$5,$6,$7,$8)`,
-			state.Status, state.ConsecutiveFailures, state.ConsecutiveSuccesses, postgresNullableTime(parseTime(lastChecked)),
+			(tenant_id, id, status, consecutive_failures, consecutive_successes, last_checked_at, last_success_at, last_failure_at, last_error, updated_at)
+			VALUES ($1, 1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+			tenantID, state.Status, state.ConsecutiveFailures, state.ConsecutiveSuccesses, postgresNullableTime(parseTime(lastChecked)),
 			postgresNullableTime(parseTime(lastSuccess)), postgresNullableTime(parseTime(lastFailure)), state.LastError, parseTime(updated)); err != nil {
 			return err
 		}
@@ -145,7 +150,7 @@ func copyObserverState(ctx context.Context, db *sql.DB, tx postgresTx) error {
 	return rows.Err()
 }
 
-func copyObserverSentinelResults(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyObserverSentinelResults(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at FROM observer_sentinel_results ORDER BY sentinel_id`)
 	if err != nil {
 		return err
@@ -159,16 +164,16 @@ func copyObserverSentinelResults(ctx context.Context, db *sql.DB, tx postgresTx)
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO observer_sentinel_results
-			(sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.Error, parseTime(checkedAt)); err != nil {
+			(tenant_id, sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			tenantID, result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.Error, parseTime(checkedAt)); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyMaintenanceWindows(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyMaintenanceWindows(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason FROM maintenance_windows ORDER BY id`)
 	if err != nil {
 		return err
@@ -182,16 +187,16 @@ func copyMaintenanceWindows(ctx context.Context, db *sql.DB, tx postgresTx) erro
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO maintenance_windows
-			(id, monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			window.ID, window.MonitorID, parseTime(startsAt), parseTime(endsAt), window.Reason, window.CreatedBy, parseTime(createdAt), postgresNullableTime(parseNullTime(cancelledAt)), window.CancelledBy, window.CancellationReason); err != nil {
+			(tenant_id, id, monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			tenantID, window.ID, window.MonitorID, parseTime(startsAt), parseTime(endsAt), window.Reason, window.CreatedBy, parseTime(createdAt), postgresNullableTime(parseNullTime(cancelledAt)), window.CancelledBy, window.CancellationReason); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyProbeResults(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyProbeResults(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed FROM probe_results ORDER BY id`)
 	if err != nil {
 		return err
@@ -207,16 +212,16 @@ func copyProbeResults(ctx context.Context, db *sql.DB, tx postgresTx) error {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO probe_results
-			(id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
-			id, result.MonitorID, parseTime(checkedAt), intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.AttemptCount, result.Error, nullInt64Value(maintenanceID), intBool(suppressed)); err != nil {
+			(tenant_id, id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			tenantID, id, result.MonitorID, parseTime(checkedAt), intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.AttemptCount, result.Error, nullInt64Value(maintenanceID), intBool(suppressed)); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyIncidents(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyIncidents(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, name, transition, observed_at, error, status_code FROM incidents ORDER BY id`)
 	if err != nil {
 		return err
@@ -229,16 +234,16 @@ func copyIncidents(ctx context.Context, db *sql.DB, tx postgresTx) error {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO incidents
-			(id, monitor_id, name, transition, observed_at, error, status_code)
-			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-			incident.ID, incident.MonitorID, incident.Name, incident.Transition, parseTime(observedAt), incident.Error, incident.StatusCode); err != nil {
+			(tenant_id, id, monitor_id, name, transition, observed_at, error, status_code)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+			tenantID, incident.ID, incident.MonitorID, incident.Name, incident.Transition, parseTime(observedAt), incident.Error, incident.StatusCode); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyAlertNotifications(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyAlertNotifications(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted FROM alert_notifications ORDER BY id`)
 	if err != nil {
 		return err
@@ -253,16 +258,16 @@ func copyAlertNotifications(ctx context.Context, db *sql.DB, tx postgresTx) erro
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO alert_notifications
-			(id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-			notification.ID, notification.IncidentID, notification.MonitorID, notification.Provider, parseTime(attemptedAt), notification.AttemptNumber, intBool(success), notification.Error, postgresNullableTime(parseNullTime(nextRetry)), intBool(exhausted)); err != nil {
+			(tenant_id, id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+			tenantID, notification.ID, notification.IncidentID, notification.MonitorID, notification.Provider, parseTime(attemptedAt), notification.AttemptNumber, intBool(success), notification.Error, postgresNullableTime(parseNullTime(nextRetry)), intBool(exhausted)); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyProbeRollups(ctx context.Context, db *sql.DB, tx postgresTx, table string) error {
+func copyProbeRollups(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string, table string) error {
 	rows, err := db.QueryContext(ctx, `SELECT monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, observer_suppressed_checks, first_reportable_at, last_reportable_at FROM `+table+` ORDER BY monitor_id, bucket_start`)
 	if err != nil {
 		return err
@@ -276,16 +281,16 @@ func copyProbeRollups(ctx context.Context, db *sql.DB, tx postgresTx, table stri
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO `+table+`
-			(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, observer_suppressed_checks, first_reportable_at, last_reportable_at)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-			monitorID, parseTime(bucketStart), total, successful, maintenance, maintenanceFailed, suppressed, postgresNullableTime(parseNullTime(first)), postgresNullableTime(parseNullTime(last))); err != nil {
+			(tenant_id, monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks, observer_suppressed_checks, first_reportable_at, last_reportable_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+			tenantID, monitorID, parseTime(bucketStart), total, successful, maintenance, maintenanceFailed, suppressed, postgresNullableTime(parseNullTime(first)), postgresNullableTime(parseNullTime(last))); err != nil {
 			return err
 		}
 	}
 	return rows.Err()
 }
 
-func copyProbeOutcomeRuns(ctx context.Context, db *sql.DB, tx postgresTx) error {
+func copyProbeOutcomeRuns(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
 	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, started_at, ended_at, ok, probe_count FROM probe_outcome_runs ORDER BY id`)
 	if err != nil {
 		return err
@@ -300,9 +305,9 @@ func copyProbeOutcomeRuns(ctx context.Context, db *sql.DB, tx postgresTx) error 
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO probe_outcome_runs
-			(id, monitor_id, started_at, ended_at, ok, probe_count)
-			VALUES ($1,$2,$3,$4,$5,$6)`,
-			id, monitorID, parseTime(startedAt), parseTime(endedAt), intBool(ok), probeCount); err != nil {
+			(tenant_id, id, monitor_id, started_at, ended_at, ok, probe_count)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			tenantID, id, monitorID, parseTime(startedAt), parseTime(endedAt), intBool(ok), probeCount); err != nil {
 			return err
 		}
 	}

@@ -92,7 +92,8 @@ func postgresMigrations() []postgresMigration {
 			ID: "0001_current_schema",
 			SQL: `
 CREATE TABLE IF NOT EXISTS monitor_states (
-	monitor_id TEXT PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	monitor_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	url TEXT NOT NULL,
 	expected_status_code INTEGER NOT NULL,
@@ -104,10 +105,12 @@ CREATE TABLE IF NOT EXISTS monitor_states (
 	last_failure_at TIMESTAMPTZ,
 	last_error TEXT NOT NULL,
 	last_observed_status_code INTEGER NOT NULL,
-	updated_at TIMESTAMPTZ NOT NULL
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (tenant_id, monitor_id)
 );
 CREATE TABLE IF NOT EXISTS probe_results (
 	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	monitor_id TEXT NOT NULL,
 	checked_at TIMESTAMPTZ NOT NULL,
 	ok BOOLEAN NOT NULL,
@@ -119,10 +122,11 @@ CREATE TABLE IF NOT EXISTS probe_results (
 	maintenance_window_id BIGINT,
 	observer_suppressed BOOLEAN NOT NULL DEFAULT FALSE
 );
-CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked ON probe_results (monitor_id, checked_at DESC);
-CREATE INDEX IF NOT EXISTS idx_probe_results_checked ON probe_results (checked_at);
+CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked ON probe_results (tenant_id, monitor_id, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_probe_results_checked ON probe_results (tenant_id, checked_at);
 CREATE TABLE IF NOT EXISTS incidents (
 	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	monitor_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	transition TEXT NOT NULL,
@@ -130,9 +134,10 @@ CREATE TABLE IF NOT EXISTS incidents (
 	error TEXT NOT NULL,
 	status_code INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_incidents_observed ON incidents (observed_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incidents_observed ON incidents (tenant_id, monitor_id, observed_at DESC);
 CREATE TABLE IF NOT EXISTS alert_notifications (
 	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	incident_id BIGINT NOT NULL REFERENCES incidents(id),
 	monitor_id TEXT NOT NULL,
 	provider TEXT NOT NULL,
@@ -143,11 +148,12 @@ CREATE TABLE IF NOT EXISTS alert_notifications (
 	next_retry_at TIMESTAMPTZ,
 	retry_exhausted BOOLEAN NOT NULL DEFAULT FALSE
 );
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident ON alert_notifications (incident_id);
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_monitor_attempted ON alert_notifications (monitor_id, attempted_at DESC);
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_attempted ON alert_notifications (attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident ON alert_notifications (tenant_id, incident_id);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_monitor_attempted ON alert_notifications (tenant_id, monitor_id, attempted_at DESC);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_attempted ON alert_notifications (tenant_id, attempted_at DESC);
 CREATE TABLE IF NOT EXISTS maintenance_windows (
 	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	monitor_id TEXT NOT NULL,
 	starts_at TIMESTAMPTZ NOT NULL,
 	ends_at TIMESTAMPTZ NOT NULL,
@@ -158,9 +164,10 @@ CREATE TABLE IF NOT EXISTS maintenance_windows (
 	cancelled_by TEXT NOT NULL DEFAULT '',
 	cancellation_reason TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS idx_maintenance_windows_monitor_time ON maintenance_windows (monitor_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_monitor_time ON maintenance_windows (tenant_id, monitor_id, starts_at, ends_at);
 CREATE TABLE IF NOT EXISTS observer_state (
-	id INTEGER PRIMARY KEY CHECK (id = 1),
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	id INTEGER NOT NULL CHECK (id = 1),
 	status TEXT NOT NULL,
 	consecutive_failures INTEGER NOT NULL,
 	consecutive_successes INTEGER NOT NULL,
@@ -168,10 +175,12 @@ CREATE TABLE IF NOT EXISTS observer_state (
 	last_success_at TIMESTAMPTZ,
 	last_failure_at TIMESTAMPTZ,
 	last_error TEXT NOT NULL,
-	updated_at TIMESTAMPTZ NOT NULL
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (tenant_id)
 );
 CREATE TABLE IF NOT EXISTS observer_sentinel_results (
-	sentinel_id TEXT PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	sentinel_id TEXT NOT NULL,
 	name TEXT NOT NULL,
 	url TEXT NOT NULL,
 	expected_status_code INTEGER NOT NULL,
@@ -179,9 +188,11 @@ CREATE TABLE IF NOT EXISTS observer_sentinel_results (
 	observed_status_code INTEGER NOT NULL,
 	latency_ms BIGINT NOT NULL,
 	error TEXT NOT NULL,
-	checked_at TIMESTAMPTZ NOT NULL
+	checked_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (tenant_id, sentinel_id)
 );
 CREATE TABLE IF NOT EXISTS probe_minute_rollups (
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	monitor_id TEXT NOT NULL,
 	bucket_start TIMESTAMPTZ NOT NULL,
 	total_checks INTEGER NOT NULL,
@@ -191,45 +202,168 @@ CREATE TABLE IF NOT EXISTS probe_minute_rollups (
 	observer_suppressed_checks INTEGER NOT NULL DEFAULT 0,
 	first_reportable_at TIMESTAMPTZ,
 	last_reportable_at TIMESTAMPTZ,
-	PRIMARY KEY (monitor_id, bucket_start)
+	PRIMARY KEY (tenant_id, monitor_id, bucket_start)
 );
 CREATE TABLE IF NOT EXISTS probe_hourly_rollups (LIKE probe_minute_rollups INCLUDING ALL);
 CREATE TABLE IF NOT EXISTS probe_daily_rollups (LIKE probe_minute_rollups INCLUDING ALL);
 CREATE TABLE IF NOT EXISTS probe_outcome_runs (
 	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
 	monitor_id TEXT NOT NULL,
 	started_at TIMESTAMPTZ NOT NULL,
 	ended_at TIMESTAMPTZ NOT NULL,
 	ok BOOLEAN NOT NULL,
 	probe_count INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_monitor_started ON probe_outcome_runs (monitor_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_monitor_started ON probe_outcome_runs (tenant_id, monitor_id, started_at);
 `,
 		},
 		{
 			ID: "0002_query_path_indexes",
 			SQL: `
-CREATE INDEX IF NOT EXISTS idx_incidents_monitor_observed ON incidents (monitor_id, observed_at);
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident_provider_id ON alert_notifications (incident_id, provider, id);
-CREATE INDEX IF NOT EXISTS idx_alert_notifications_due_retries ON alert_notifications (next_retry_at, id)
+CREATE INDEX IF NOT EXISTS idx_incidents_monitor_observed ON incidents (tenant_id, monitor_id, observed_at);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident_provider_id ON alert_notifications (tenant_id, incident_id, provider, id);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_due_retries ON alert_notifications (tenant_id, next_retry_at, id)
 	WHERE success = FALSE
 		AND retry_exhausted = FALSE
 		AND next_retry_at IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_probe_minute_rollups_bucket_start ON probe_minute_rollups (bucket_start);
-CREATE INDEX IF NOT EXISTS idx_probe_hourly_rollups_bucket_start ON probe_hourly_rollups (bucket_start);
-CREATE INDEX IF NOT EXISTS idx_probe_daily_rollups_bucket_start ON probe_daily_rollups (bucket_start);
-CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_ended ON probe_outcome_runs (ended_at);
+CREATE INDEX IF NOT EXISTS idx_probe_minute_rollups_bucket_start ON probe_minute_rollups (tenant_id, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_hourly_rollups_bucket_start ON probe_hourly_rollups (tenant_id, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_daily_rollups_bucket_start ON probe_daily_rollups (tenant_id, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_ended ON probe_outcome_runs (tenant_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_observer_sentinel_results_tenant_sentinel ON observer_sentinel_results (tenant_id, sentinel_id);
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_tenant_monitor_time ON maintenance_windows (tenant_id, monitor_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_tenant_id ON maintenance_windows (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_monitor_states_tenant_id_monitor ON monitor_states (tenant_id, monitor_id);
+CREATE INDEX IF NOT EXISTS idx_probe_results_tenant_monitor_checked ON probe_results (tenant_id, monitor_id, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_id ON incidents (tenant_id);
+`,
+		},
+		{
+			ID: "0003_tenant_isolation",
+			SQL: `
+ALTER TABLE monitor_states ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE monitor_states SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE monitor_states ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE monitor_states ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE monitor_states DROP CONSTRAINT IF EXISTS monitor_states_pkey;
+ALTER TABLE monitor_states ADD CONSTRAINT monitor_states_pkey PRIMARY KEY (tenant_id, monitor_id);
+
+ALTER TABLE probe_results ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE probe_results SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE probe_results ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE probe_results ALTER COLUMN tenant_id SET DEFAULT 'default';
+
+ALTER TABLE incidents ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE incidents SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE incidents ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE incidents ALTER COLUMN tenant_id SET DEFAULT 'default';
+
+ALTER TABLE alert_notifications ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE alert_notifications SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE alert_notifications ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE alert_notifications ALTER COLUMN tenant_id SET DEFAULT 'default';
+
+ALTER TABLE maintenance_windows ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE maintenance_windows SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE maintenance_windows ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE maintenance_windows ALTER COLUMN tenant_id SET DEFAULT 'default';
+
+ALTER TABLE observer_state ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE observer_state SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE observer_state ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE observer_state ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE observer_state DROP CONSTRAINT IF EXISTS observer_state_pkey;
+ALTER TABLE observer_state ADD CONSTRAINT observer_state_pkey PRIMARY KEY (tenant_id);
+
+ALTER TABLE observer_sentinel_results ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE observer_sentinel_results SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE observer_sentinel_results ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE observer_sentinel_results ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE observer_sentinel_results DROP CONSTRAINT IF EXISTS observer_sentinel_results_pkey;
+ALTER TABLE observer_sentinel_results ADD CONSTRAINT observer_sentinel_results_pkey PRIMARY KEY (tenant_id, sentinel_id);
+
+ALTER TABLE probe_minute_rollups ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE probe_minute_rollups SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE probe_minute_rollups ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE probe_minute_rollups ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE probe_minute_rollups DROP CONSTRAINT IF EXISTS probe_minute_rollups_pkey;
+ALTER TABLE probe_minute_rollups ADD CONSTRAINT probe_minute_rollups_pkey PRIMARY KEY (tenant_id, monitor_id, bucket_start);
+
+ALTER TABLE probe_hourly_rollups ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE probe_hourly_rollups SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE probe_hourly_rollups ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE probe_hourly_rollups ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE probe_hourly_rollups DROP CONSTRAINT IF EXISTS probe_hourly_rollups_pkey;
+ALTER TABLE probe_hourly_rollups ADD CONSTRAINT probe_hourly_rollups_pkey PRIMARY KEY (tenant_id, monitor_id, bucket_start);
+
+ALTER TABLE probe_daily_rollups ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE probe_daily_rollups SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE probe_daily_rollups ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE probe_daily_rollups ALTER COLUMN tenant_id SET DEFAULT 'default';
+ALTER TABLE probe_daily_rollups DROP CONSTRAINT IF EXISTS probe_daily_rollups_pkey;
+ALTER TABLE probe_daily_rollups ADD CONSTRAINT probe_daily_rollups_pkey PRIMARY KEY (tenant_id, monitor_id, bucket_start);
+
+ALTER TABLE probe_outcome_runs ADD COLUMN IF NOT EXISTS tenant_id TEXT DEFAULT 'default';
+UPDATE probe_outcome_runs SET tenant_id = 'default' WHERE tenant_id IS NULL OR tenant_id = '';
+ALTER TABLE probe_outcome_runs ALTER COLUMN tenant_id SET NOT NULL;
+ALTER TABLE probe_outcome_runs ALTER COLUMN tenant_id SET DEFAULT 'default';
+
+DROP INDEX IF EXISTS idx_probe_results_monitor_checked;
+DROP INDEX IF EXISTS idx_probe_results_checked;
+CREATE INDEX IF NOT EXISTS idx_probe_results_monitor_checked ON probe_results (tenant_id, monitor_id, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_probe_results_checked ON probe_results (tenant_id, checked_at);
+
+DROP INDEX IF EXISTS idx_incidents_observed;
+DROP INDEX IF EXISTS idx_incidents_monitor_observed;
+CREATE INDEX IF NOT EXISTS idx_incidents_monitor_observed ON incidents (tenant_id, monitor_id, observed_at DESC);
+
+DROP INDEX IF EXISTS idx_alert_notifications_incident;
+DROP INDEX IF EXISTS idx_alert_notifications_monitor_attempted;
+DROP INDEX IF EXISTS idx_alert_notifications_attempted;
+DROP INDEX IF EXISTS idx_alert_notifications_incident_provider_id;
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_incident_provider_id ON alert_notifications (tenant_id, incident_id, provider, id);
+CREATE INDEX IF NOT EXISTS idx_alert_notifications_due_retries ON alert_notifications (tenant_id, next_retry_at, id)
+	WHERE success = FALSE
+		AND retry_exhausted = FALSE
+		AND next_retry_at IS NOT NULL;
+
+DROP INDEX IF EXISTS idx_maintenance_windows_monitor_time;
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_monitor_time ON maintenance_windows (tenant_id, monitor_id, starts_at, ends_at);
+
+DROP INDEX IF EXISTS idx_probe_minute_rollups_bucket_start;
+DROP INDEX IF EXISTS idx_probe_hourly_rollups_bucket_start;
+DROP INDEX IF EXISTS idx_probe_daily_rollups_bucket_start;
+CREATE INDEX IF NOT EXISTS idx_probe_minute_rollups_bucket_start ON probe_minute_rollups (tenant_id, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_hourly_rollups_bucket_start ON probe_hourly_rollups (tenant_id, bucket_start);
+CREATE INDEX IF NOT EXISTS idx_probe_daily_rollups_bucket_start ON probe_daily_rollups (tenant_id, bucket_start);
+
+DROP INDEX IF EXISTS idx_probe_outcome_runs_monitor_started;
+DROP INDEX IF EXISTS idx_probe_outcome_runs_ended;
+CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_monitor_started ON probe_outcome_runs (tenant_id, monitor_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_probe_outcome_runs_ended ON probe_outcome_runs (tenant_id, ended_at);
+
+DROP INDEX IF EXISTS idx_observer_sentinel_results_tenant_sentinel;
+CREATE INDEX IF NOT EXISTS idx_observer_sentinel_results_tenant_sentinel ON observer_sentinel_results (tenant_id, sentinel_id);
+
+DROP INDEX IF EXISTS idx_maintenance_windows_tenant_monitor_time;
+DROP INDEX IF EXISTS idx_maintenance_windows_tenant_id;
+DROP INDEX IF EXISTS idx_incidents_tenant_id;
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_tenant_monitor_time ON maintenance_windows (tenant_id, monitor_id, starts_at, ends_at);
+CREATE INDEX IF NOT EXISTS idx_maintenance_windows_tenant_id ON maintenance_windows (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_tenant_id ON incidents (tenant_id);
 `,
 		},
 	}
 }
 
 func (s *PostgresStore) GetState(ctx context.Context, monitorID string) (MonitorState, bool, error) {
+	tenantID := TenantFromContext(ctx)
 	row := s.pool.QueryRow(ctx, `SELECT
 		monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at
-		FROM monitor_states WHERE monitor_id = $1`, monitorID)
+		FROM monitor_states WHERE tenant_id = $1 AND monitor_id = $2`, tenantID, monitorID)
 	state, err := scanPostgresState(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MonitorState{}, false, nil
@@ -241,6 +375,7 @@ func (s *PostgresStore) GetState(ctx context.Context, monitorID string) (Monitor
 }
 
 func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident) (int64, error) {
+	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -252,18 +387,18 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 		attemptCount = 1
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		result.MonitorID, postgresNullableTime(result.CheckedAt), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed); err != nil {
+		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		tenantID, result.MonitorID, postgresNullableTime(result.CheckedAt), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
 	if _, err := tx.Exec(ctx, `INSERT INTO monitor_states
-		(monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
+		(tenant_id, monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-		ON CONFLICT(monitor_id) DO UPDATE SET
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+		ON CONFLICT(tenant_id, monitor_id) DO UPDATE SET
 			name = EXCLUDED.name,
 			url = EXCLUDED.url,
 			expected_status_code = EXCLUDED.expected_status_code,
@@ -276,7 +411,7 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 			last_error = EXCLUDED.last_error,
 			last_observed_status_code = EXCLUDED.last_observed_status_code,
 			updated_at = EXCLUDED.updated_at`,
-		next.MonitorID, next.Name, next.URL, next.ExpectedStatusCode, next.Status, next.StatusBeforeMaintenance, next.ConsecutiveFailures,
+		tenantID, next.MonitorID, next.Name, next.URL, next.ExpectedStatusCode, next.Status, next.StatusBeforeMaintenance, next.ConsecutiveFailures,
 		postgresNullableTime(next.LastCheckedAt), postgresNullableTime(next.LastSuccessAt), postgresNullableTime(next.LastFailureAt), next.LastError,
 		next.LastObservedStatusCode, next.UpdatedAt.UTC()); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
@@ -285,10 +420,10 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 	var incidentID int64
 	if incident != nil {
 		if err := tx.QueryRow(ctx, `INSERT INTO incidents
-			(monitor_id, name, transition, observed_at, error, status_code)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			(tenant_id, monitor_id, name, transition, observed_at, error, status_code)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			RETURNING id`,
-			incident.MonitorID, incident.Name, incident.Transition, incident.ObservedAt.UTC(), incident.Error, incident.StatusCode).Scan(&incidentID); err != nil {
+			tenantID, incident.MonitorID, incident.Name, incident.Transition, incident.ObservedAt.UTC(), incident.Error, incident.StatusCode).Scan(&incidentID); err != nil {
 			return 0, fmt.Errorf("insert incident: %w", err)
 		}
 		incident.ID = incidentID
@@ -298,14 +433,15 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 }
 
 func (s *PostgresStore) SaveProbeResult(ctx context.Context, result ProbeResult) error {
+	tenantID := TenantFromContext(ctx)
 	attemptCount := result.AttemptCount
 	if attemptCount == 0 {
 		attemptCount = 1
 	}
 	_, err := s.pool.Exec(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-		result.MonitorID, result.CheckedAt.UTC(), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed)
+		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+		tenantID, result.MonitorID, result.CheckedAt.UTC(), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed)
 	if err != nil {
 		return fmt.Errorf("insert probe result: %w", err)
 	}
@@ -313,10 +449,11 @@ func (s *PostgresStore) SaveProbeResult(ctx context.Context, result ProbeResult)
 }
 
 func (s *PostgresStore) GetObserverState(ctx context.Context) (ObserverState, bool, error) {
+	tenantID := TenantFromContext(ctx)
 	row := s.pool.QueryRow(ctx, `SELECT
 		status, consecutive_failures, consecutive_successes, last_checked_at,
 		last_success_at, last_failure_at, last_error, updated_at
-		FROM observer_state WHERE id = 1`)
+		FROM observer_state WHERE tenant_id = $1 AND id = 1`, tenantID)
 	state, err := scanPostgresObserverState(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ObserverState{}, false, nil
@@ -328,10 +465,11 @@ func (s *PostgresStore) GetObserverState(ctx context.Context) (ObserverState, bo
 }
 
 func (s *PostgresStore) ListObserverSentinelResults(ctx context.Context) ([]ObserverSentinelResult, error) {
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
 		latency_ms, error, checked_at
-		FROM observer_sentinel_results ORDER BY sentinel_id ASC`)
+		FROM observer_sentinel_results WHERE tenant_id = $1 ORDER BY sentinel_id ASC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -348,6 +486,7 @@ func (s *PostgresStore) ListObserverSentinelResults(ctx context.Context) ([]Obse
 }
 
 func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverState, results []ObserverSentinelResult, incident *Incident) (int64, error) {
+	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
@@ -355,10 +494,10 @@ func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverSta
 	defer tx.Rollback(ctx)
 
 	if _, err := tx.Exec(ctx, `INSERT INTO observer_state
-		(id, status, consecutive_failures, consecutive_successes, last_checked_at,
+		(tenant_id, id, status, consecutive_failures, consecutive_successes, last_checked_at,
 		 last_success_at, last_failure_at, last_error, updated_at)
-		VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT(id) DO UPDATE SET
+		VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT(tenant_id) DO UPDATE SET
 			status = EXCLUDED.status,
 			consecutive_failures = EXCLUDED.consecutive_failures,
 			consecutive_successes = EXCLUDED.consecutive_successes,
@@ -367,15 +506,15 @@ func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverSta
 			last_failure_at = EXCLUDED.last_failure_at,
 			last_error = EXCLUDED.last_error,
 			updated_at = EXCLUDED.updated_at`,
-		state.Status, state.ConsecutiveFailures, state.ConsecutiveSuccesses, postgresNullableTime(state.LastCheckedAt),
+		tenantID, state.Status, state.ConsecutiveFailures, state.ConsecutiveSuccesses, postgresNullableTime(state.LastCheckedAt),
 		postgresNullableTime(state.LastSuccessAt), postgresNullableTime(state.LastFailureAt), state.LastError, state.UpdatedAt.UTC()); err != nil {
 		return 0, fmt.Errorf("save observer state: %w", err)
 	}
 	for _, result := range results {
 		if _, err := tx.Exec(ctx, `INSERT INTO observer_sentinel_results
-			(sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-			ON CONFLICT(sentinel_id) DO UPDATE SET
+			(tenant_id, sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+			ON CONFLICT(tenant_id, sentinel_id) DO UPDATE SET
 				name = EXCLUDED.name,
 				url = EXCLUDED.url,
 				expected_status_code = EXCLUDED.expected_status_code,
@@ -384,7 +523,7 @@ func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverSta
 				latency_ms = EXCLUDED.latency_ms,
 				error = EXCLUDED.error,
 				checked_at = EXCLUDED.checked_at`,
-			result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, result.OK,
+			tenantID, result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, result.OK,
 			result.ObservedStatusCode, result.LatencyMS, result.Error, result.CheckedAt.UTC()); err != nil {
 			return 0, fmt.Errorf("save observer sentinel result: %w", err)
 		}
@@ -393,10 +532,10 @@ func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverSta
 	var incidentID int64
 	if incident != nil {
 		if err := tx.QueryRow(ctx, `INSERT INTO incidents
-			(monitor_id, name, transition, observed_at, error, status_code)
-			VALUES ($1, $2, $3, $4, $5, $6)
+			(tenant_id, monitor_id, name, transition, observed_at, error, status_code)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			RETURNING id`,
-			incident.MonitorID, incident.Name, incident.Transition, incident.ObservedAt.UTC(), incident.Error, incident.StatusCode).Scan(&incidentID); err != nil {
+			tenantID, incident.MonitorID, incident.Name, incident.Transition, incident.ObservedAt.UTC(), incident.Error, incident.StatusCode).Scan(&incidentID); err != nil {
 			return 0, fmt.Errorf("insert incident: %w", err)
 		}
 		incident.ID = incidentID
@@ -408,6 +547,7 @@ func (s *PostgresStore) SaveAlertNotifications(ctx context.Context, notification
 	if len(notifications) == 0 {
 		return nil
 	}
+	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -419,9 +559,9 @@ func (s *PostgresStore) SaveAlertNotifications(ctx context.Context, notification
 			attemptNumber = 1
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO alert_notifications
-			(incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			notification.IncidentID, notification.MonitorID, notification.Provider, notification.AttemptedAt.UTC(),
+			(tenant_id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			tenantID, notification.IncidentID, notification.MonitorID, notification.Provider, notification.AttemptedAt.UTC(),
 			attemptNumber, notification.Success, notification.Error, postgresNullableTime(notification.NextRetryAt),
 			notification.RetryExhausted); err != nil {
 			return fmt.Errorf("insert alert notification: %w", err)
@@ -431,11 +571,12 @@ func (s *PostgresStore) SaveAlertNotifications(ctx context.Context, notification
 }
 
 func (s *PostgresStore) ListStates(ctx context.Context) ([]MonitorState, error) {
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		monitor_id, name, url, expected_status_code, status, status_before_maintenance, consecutive_failures,
 		last_checked_at, last_success_at, last_failure_at, last_error,
 		last_observed_status_code, updated_at
-		FROM monitor_states ORDER BY last_checked_at DESC, monitor_id`)
+		FROM monitor_states WHERE tenant_id = $1 ORDER BY last_checked_at DESC, monitor_id`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -489,13 +630,16 @@ func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, fail
 }
 
 func (s *PostgresStore) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
+	tenantID := TenantFromContext(ctx)
 	rawWhere := ""
 	rollupWhere := ""
-	args := []any{}
+	args := []any{tenantID}
+	rawWhere = ` WHERE tenant_id = $1`
+	rollupWhere = ` WHERE tenant_id = $1`
 	if !cutoff.IsZero() {
-		rawWhere = ` WHERE checked_at >= $1`
-		rollupWhere = ` WHERE bucket_start >= $1`
 		args = append(args, cutoff.UTC())
+		rawWhere = ` WHERE tenant_id = $1 AND checked_at >= $2`
+		rollupWhere = ` WHERE tenant_id = $1 AND bucket_start >= $2`
 	}
 	rows, err := s.pool.Query(ctx, `SELECT monitor_id,
 			COALESCE(SUM(total_checks), 0)::int,
@@ -599,14 +743,17 @@ func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time
 }
 
 func (s *PostgresStore) listReportableUptimeRuns(ctx context.Context) ([]uptimeRun, error) {
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT monitor_id, started_at, ended_at, ok, probe_count
 		FROM probe_outcome_runs
+		WHERE tenant_id = $1
 		UNION ALL
 		SELECT monitor_id, checked_at AS started_at, checked_at AS ended_at, ok, 1 AS probe_count
 		FROM probe_results
-		WHERE maintenance_window_id IS NULL
+		WHERE tenant_id = $1
+			AND maintenance_window_id IS NULL
 			AND observer_suppressed = FALSE
-		ORDER BY monitor_id ASC, started_at ASC`)
+		ORDER BY monitor_id ASC, started_at ASC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -633,12 +780,14 @@ func (s *PostgresStore) listReportableUptimeRuns(ctx context.Context) ([]uptimeR
 }
 
 func (s *PostgresStore) listUncancelledMaintenanceWindows(ctx context.Context) ([]MaintenanceWindow, error) {
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
 		cancelled_at, cancelled_by, cancellation_reason
 		FROM maintenance_windows
-		WHERE cancelled_at IS NULL
-		ORDER BY monitor_id ASC, starts_at ASC, id ASC`)
+		WHERE tenant_id = $1
+			AND cancelled_at IS NULL
+		ORDER BY monitor_id ASC, starts_at ASC, id ASC`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -658,27 +807,32 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, limit int) ([]Inciden
 	if limit <= 0 {
 		limit = 50
 	}
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		id, monitor_id, name, transition, observed_at, error, status_code
 		FROM (
 			SELECT id, monitor_id, name, transition, observed_at, error, status_code
 			FROM incidents
+			WHERE tenant_id = $1
 			UNION ALL
 			SELECT 0 AS id, probe_results.monitor_id, COALESCE(monitor_states.name, '') AS name,
 				'FAILURE' AS transition, probe_results.checked_at AS observed_at, probe_results.error,
 				probe_results.observed_status_code AS status_code
 			FROM probe_results
-			LEFT JOIN monitor_states ON monitor_states.monitor_id = probe_results.monitor_id
-			WHERE probe_results.ok = FALSE
+			LEFT JOIN monitor_states ON monitor_states.tenant_id = probe_results.tenant_id
+				AND monitor_states.monitor_id = probe_results.monitor_id
+			WHERE probe_results.tenant_id = $1
+				AND probe_results.ok = FALSE
 				AND probe_results.maintenance_window_id IS NULL
 				AND probe_results.observer_suppressed = FALSE
 				AND NOT EXISTS (
 					SELECT 1 FROM incidents
-					WHERE incidents.monitor_id = probe_results.monitor_id
+					WHERE tenant_id = $1
+						AND incidents.monitor_id = probe_results.monitor_id
 						AND incidents.observed_at = probe_results.checked_at
 				)
 		) all_incidents
-		ORDER BY observed_at DESC, id DESC LIMIT $1`, limit)
+		ORDER BY observed_at DESC, id DESC LIMIT $2`, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -699,10 +853,12 @@ func (s *PostgresStore) ListAlertNotifications(ctx context.Context, limit int) (
 	if limit <= 0 {
 		limit = 50
 	}
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted
 		FROM alert_notifications
-		ORDER BY attempted_at DESC, id DESC LIMIT $1`, limit)
+		WHERE tenant_id = $1
+		ORDER BY attempted_at DESC, id DESC LIMIT $2`, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -722,17 +878,20 @@ func (s *PostgresStore) ListActionableAlertDeliveryFailures(ctx context.Context,
 	if limit <= 0 {
 		limit = 50
 	}
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number, n.success, n.error, n.next_retry_at, n.retry_exhausted
 		FROM alert_notifications n
-		WHERE n.success = FALSE
+		WHERE n.tenant_id = $1
+			AND n.success = FALSE
 			AND NOT EXISTS (
 				SELECT 1 FROM alert_notifications newer
-				WHERE newer.incident_id = n.incident_id
+					WHERE newer.tenant_id = n.tenant_id
+						AND newer.incident_id = n.incident_id
 					AND newer.provider = n.provider
 					AND newer.id > n.id
 			)
-		ORDER BY n.attempted_at DESC, n.id DESC LIMIT $1`, limit)
+		ORDER BY n.attempted_at DESC, n.id DESC LIMIT $2`, tenantID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -752,6 +911,7 @@ func (s *PostgresStore) ListDueAlertNotificationRetries(ctx context.Context, now
 	if limit <= 0 {
 		limit = 50
 	}
+	tenantID := TenantFromContext(ctx)
 	rows, err := s.pool.Query(ctx, `SELECT
 		n.id, n.incident_id, n.monitor_id, n.provider, n.attempted_at, n.attempt_number,
 		n.success, n.error, n.next_retry_at, n.retry_exhausted,
@@ -763,26 +923,32 @@ func (s *PostgresStore) ListDueAlertNotificationRetries(ctx context.Context, now
 		COALESCE(s.last_observed_status_code, 0), COALESCE(s.updated_at, o.updated_at)
 		FROM alert_notifications n
 		INNER JOIN incidents i ON i.id = n.incident_id
-		LEFT JOIN monitor_states s ON s.monitor_id = n.monitor_id
+			AND i.tenant_id = n.tenant_id
+		LEFT JOIN monitor_states s ON s.tenant_id = n.tenant_id
+			AND s.monitor_id = n.monitor_id
 		LEFT JOIN observer_state o ON n.monitor_id = '__observer__'
-		WHERE n.success = FALSE
+			AND o.tenant_id = n.tenant_id
+		WHERE n.tenant_id = $1
+			AND n.success = FALSE
 			AND n.retry_exhausted = FALSE
 			AND n.next_retry_at IS NOT NULL
-			AND n.next_retry_at <= $1
+			AND n.next_retry_at <= $2
 			AND NOT EXISTS (
 				SELECT 1 FROM alert_notifications newer
-				WHERE newer.incident_id = n.incident_id
+					WHERE newer.tenant_id = n.tenant_id
+						AND newer.incident_id = n.incident_id
 					AND newer.provider = n.provider
 					AND newer.id > n.id
 			)
 			AND NOT EXISTS (
 				SELECT 1 FROM alert_notifications successful
-				WHERE successful.incident_id = n.incident_id
+					WHERE successful.tenant_id = n.tenant_id
+						AND successful.incident_id = n.incident_id
 					AND successful.provider = n.provider
 					AND successful.success = TRUE
 					AND successful.id > n.id
 			)
-		ORDER BY n.next_retry_at ASC, n.id ASC LIMIT $2`, now.UTC(), limit)
+		ORDER BY n.next_retry_at ASC, n.id ASC LIMIT $3`, tenantID, now.UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -816,6 +982,7 @@ func (s *PostgresStore) ListDueAlertNotificationRetries(ctx context.Context, now
 }
 
 func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window MaintenanceWindow) (int64, error) {
+	tenantID := TenantFromContext(ctx)
 	if !window.EndsAt.After(window.StartsAt) {
 		return 0, fmt.Errorf("maintenance end must be after start")
 	}
@@ -826,7 +993,7 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 		return 0, fmt.Errorf("maintenance created_by is required")
 	}
 	var exists int
-	if err := s.pool.QueryRow(ctx, `SELECT 1 FROM monitor_states WHERE monitor_id = $1`, window.MonitorID).Scan(&exists); err != nil {
+	if err := s.pool.QueryRow(ctx, `SELECT 1 FROM monitor_states WHERE tenant_id = $1 AND monitor_id = $2`, tenantID, window.MonitorID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, fmt.Errorf("monitor %q does not exist in monitor_states", window.MonitorID)
 		}
@@ -834,12 +1001,13 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 	}
 	var overlappingID int64
 	err := s.pool.QueryRow(ctx, `SELECT id FROM maintenance_windows
-		WHERE monitor_id = $1
+		WHERE tenant_id = $1
+			AND monitor_id = $2
 			AND cancelled_at IS NULL
-			AND starts_at < $2
-			AND ends_at > $3
+			AND starts_at < $3
+			AND ends_at > $4
 		ORDER BY starts_at ASC LIMIT 1`,
-		window.MonitorID, window.EndsAt.UTC(), window.StartsAt.UTC()).Scan(&overlappingID)
+		tenantID, window.MonitorID, window.EndsAt.UTC(), window.StartsAt.UTC()).Scan(&overlappingID)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return 0, err
 	}
@@ -852,10 +1020,10 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 	}
 	var id int64
 	err = s.pool.QueryRow(ctx, `INSERT INTO maintenance_windows
-		(monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		(tenant_id, monitor_id, starts_at, ends_at, reason, created_by, created_at, cancelled_at, cancelled_by, cancellation_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`,
-		window.MonitorID, window.StartsAt.UTC(), window.EndsAt.UTC(), window.Reason, window.CreatedBy,
+		tenantID, window.MonitorID, window.StartsAt.UTC(), window.EndsAt.UTC(), window.Reason, window.CreatedBy,
 		createdAt.UTC(), postgresNullableTime(window.CancelledAt), window.CancelledBy, window.CancellationReason).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("insert maintenance window: %w", err)
@@ -864,6 +1032,7 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 }
 
 func (s *PostgresStore) CancelMaintenanceWindow(ctx context.Context, id int64, cancelledAt time.Time, cancelledBy string, reason string) error {
+	tenantID := TenantFromContext(ctx)
 	if strings.TrimSpace(cancelledBy) == "" {
 		return fmt.Errorf("maintenance cancelled_by is required")
 	}
@@ -871,15 +1040,15 @@ func (s *PostgresStore) CancelMaintenanceWindow(ctx context.Context, id int64, c
 		cancelledAt = time.Now().UTC()
 	}
 	result, err := s.pool.Exec(ctx, `UPDATE maintenance_windows
-		SET cancelled_at = $1, cancelled_by = $2, cancellation_reason = $3
-		WHERE id = $4 AND cancelled_at IS NULL`,
-		cancelledAt.UTC(), cancelledBy, reason, id)
+		SET cancelled_at = $3, cancelled_by = $4, cancellation_reason = $5
+		WHERE tenant_id = $1 AND id = $2 AND cancelled_at IS NULL`,
+		tenantID, id, cancelledAt.UTC(), cancelledBy, reason)
 	if err != nil {
 		return fmt.Errorf("cancel maintenance window: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		var existing int
-		if err := s.pool.QueryRow(ctx, `SELECT 1 FROM maintenance_windows WHERE id = $1`, id).Scan(&existing); errors.Is(err, pgx.ErrNoRows) {
+		if err := s.pool.QueryRow(ctx, `SELECT 1 FROM maintenance_windows WHERE tenant_id = $1 AND id = $2`, tenantID, id).Scan(&existing); errors.Is(err, pgx.ErrNoRows) {
 			return fmt.Errorf("maintenance window %d does not exist", id)
 		} else if err != nil {
 			return err
@@ -890,15 +1059,17 @@ func (s *PostgresStore) CancelMaintenanceWindow(ctx context.Context, id int64, c
 }
 
 func (s *PostgresStore) ActiveMaintenanceWindow(ctx context.Context, monitorID string, at time.Time) (MaintenanceWindow, bool, error) {
+	tenantID := TenantFromContext(ctx)
 	row := s.pool.QueryRow(ctx, `SELECT
 		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
 		cancelled_at, cancelled_by, cancellation_reason
 		FROM maintenance_windows
-		WHERE monitor_id = $1
+		WHERE tenant_id = $1
+			AND monitor_id = $2
 			AND cancelled_at IS NULL
-			AND starts_at <= $2
-			AND ends_at > $2
-		ORDER BY starts_at ASC LIMIT 1`, monitorID, at.UTC())
+			AND starts_at <= $3
+			AND ends_at > $3
+		ORDER BY starts_at ASC LIMIT 1`, tenantID, monitorID, at.UTC())
 	window, err := scanPostgresMaintenanceWindow(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return MaintenanceWindow{}, false, nil
@@ -910,12 +1081,15 @@ func (s *PostgresStore) ActiveMaintenanceWindow(ctx context.Context, monitorID s
 }
 
 func (s *PostgresStore) ListMaintenanceWindows(ctx context.Context, filter MaintenanceWindowFilter) ([]MaintenanceWindow, error) {
+	tenantID := TenantFromContext(ctx)
 	query := `SELECT
 		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
 		cancelled_at, cancelled_by, cancellation_reason
 		FROM maintenance_windows`
 	var conditions []string
 	var args []any
+	args = append(args, tenantID)
+	conditions = append(conditions, fmt.Sprintf(`tenant_id = $%d`, len(args)))
 	if filter.MonitorID != "" {
 		args = append(args, filter.MonitorID)
 		conditions = append(conditions, fmt.Sprintf(`monitor_id = $%d`, len(args)))
@@ -927,9 +1101,7 @@ func (s *PostgresStore) ListMaintenanceWindows(ctx context.Context, filter Maint
 			conditions = append(conditions, fmt.Sprintf(`ends_at > $%d`, len(args)))
 		}
 	}
-	if len(conditions) > 0 {
-		query += ` WHERE ` + strings.Join(conditions, ` AND `)
-	}
+	query += ` WHERE ` + strings.Join(conditions, ` AND `)
 	query += ` ORDER BY starts_at ASC, id ASC`
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -948,21 +1120,24 @@ func (s *PostgresStore) ListMaintenanceWindows(ctx context.Context, filter Maint
 }
 
 func (s *PostgresStore) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
+	tenantID := TenantFromContext(ctx)
 	if len(monitorIDs) == 0 {
-		_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states`)
+		_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states WHERE tenant_id = $1`, tenantID)
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states WHERE NOT (monitor_id = ANY($1))`, monitorIDs)
+	_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states WHERE tenant_id = $1 AND NOT (monitor_id = ANY($2))`, tenantID, monitorIDs)
 	return err
 }
 
 func (s *PostgresStore) PruneProbeResults(ctx context.Context, retention time.Duration, now time.Time) error {
+	tenantID := TenantFromContext(ctx)
 	cutoff := now.UTC().Add(-retention)
-	_, err := s.pool.Exec(ctx, `DELETE FROM probe_results WHERE checked_at < $1`, cutoff)
+	_, err := s.pool.Exec(ctx, `DELETE FROM probe_results WHERE tenant_id = $1 AND checked_at < $2`, tenantID, cutoff)
 	return err
 }
 
 func (s *PostgresStore) RollupAndPruneProbeResults(ctx context.Context, policy ProbeRetentionPolicy, now time.Time) error {
+	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -970,53 +1145,54 @@ func (s *PostgresStore) RollupAndPruneProbeResults(ctx context.Context, policy P
 	defer tx.Rollback(ctx)
 	if !policy.ProbeResults.Forever {
 		cutoff := now.UTC().Add(-policy.ProbeResults.Duration)
-		if err := postgresCompactRawOutcomeRuns(ctx, tx, cutoff); err != nil {
+		if err := postgresCompactRawOutcomeRuns(ctx, tx, tenantID, cutoff); err != nil {
 			return err
 		}
-		if err := postgresRollupRawProbeResults(ctx, tx, "probe_minute_rollups", postgresMinuteBucketExpression("checked_at"), cutoff); err != nil {
+		if err := postgresRollupRawProbeResults(ctx, tx, tenantID, "probe_minute_rollups", postgresMinuteBucketExpression("checked_at"), cutoff); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM probe_results WHERE checked_at < $1`, cutoff); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM probe_results WHERE tenant_id = $1 AND checked_at < $2`, tenantID, cutoff); err != nil {
 			return err
 		}
 	}
 	if !policy.ProbeMinuteRollups.Forever {
 		cutoff := now.UTC().Add(-policy.ProbeMinuteRollups.Duration)
-		if err := postgresRollupStoredProbeRollups(ctx, tx, "probe_minute_rollups", "probe_hourly_rollups", postgresHourlyBucketExpression("bucket_start"), cutoff); err != nil {
+		if err := postgresRollupStoredProbeRollups(ctx, tx, tenantID, "probe_minute_rollups", "probe_hourly_rollups", postgresHourlyBucketExpression("bucket_start"), cutoff); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM probe_minute_rollups WHERE bucket_start < $1`, cutoff); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM probe_minute_rollups WHERE tenant_id = $1 AND bucket_start < $2`, tenantID, cutoff); err != nil {
 			return err
 		}
 	}
 	if !policy.ProbeHourlyRollups.Forever {
 		cutoff := now.UTC().Add(-policy.ProbeHourlyRollups.Duration)
-		if err := postgresRollupStoredProbeRollups(ctx, tx, "probe_hourly_rollups", "probe_daily_rollups", postgresDailyBucketExpression("bucket_start"), cutoff); err != nil {
+		if err := postgresRollupStoredProbeRollups(ctx, tx, tenantID, "probe_hourly_rollups", "probe_daily_rollups", postgresDailyBucketExpression("bucket_start"), cutoff); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM probe_hourly_rollups WHERE bucket_start < $1`, cutoff); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM probe_hourly_rollups WHERE tenant_id = $1 AND bucket_start < $2`, tenantID, cutoff); err != nil {
 			return err
 		}
 	}
 	if !policy.ProbeDailyRollups.Forever {
 		cutoff := now.UTC().Add(-policy.ProbeDailyRollups.Duration)
-		if _, err := tx.Exec(ctx, `DELETE FROM probe_daily_rollups WHERE bucket_start < $1`, cutoff); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM probe_daily_rollups WHERE tenant_id = $1 AND bucket_start < $2`, tenantID, cutoff); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(ctx, `DELETE FROM probe_outcome_runs WHERE ended_at < $1`, cutoff); err != nil {
+		if _, err := tx.Exec(ctx, `DELETE FROM probe_outcome_runs WHERE tenant_id = $1 AND ended_at < $2`, tenantID, cutoff); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
 }
 
-func postgresCompactRawOutcomeRuns(ctx context.Context, tx pgx.Tx, cutoff time.Time) error {
+func postgresCompactRawOutcomeRuns(ctx context.Context, tx pgx.Tx, tenantID string, cutoff time.Time) error {
 	rows, err := tx.Query(ctx, `SELECT monitor_id, checked_at, ok
 		FROM probe_results
-		WHERE checked_at < $1
+		WHERE tenant_id = $1
+			AND checked_at < $2
 			AND maintenance_window_id IS NULL
 			AND observer_suppressed = FALSE
-		ORDER BY monitor_id ASC, checked_at ASC, id ASC`, cutoff)
+		ORDER BY monitor_id ASC, checked_at ASC, id ASC`, tenantID, cutoff)
 	if err != nil {
 		return err
 	}
@@ -1040,40 +1216,41 @@ func postgresCompactRawOutcomeRuns(ctx context.Context, tx pgx.Tx, cutoff time.T
 	}
 	rows.Close()
 	for _, run := range rawRuns {
-		if err := postgresAppendOutcomeRun(ctx, tx, run.monitorID, run.checkedAt.UTC(), run.ok); err != nil {
+		if err := postgresAppendOutcomeRun(ctx, tx, tenantID, run.monitorID, run.checkedAt.UTC(), run.ok); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func postgresAppendOutcomeRun(ctx context.Context, tx pgx.Tx, monitorID string, checkedAt time.Time, ok bool) error {
+func postgresAppendOutcomeRun(ctx context.Context, tx pgx.Tx, tenantID string, monitorID string, checkedAt time.Time, ok bool) error {
 	var id int64
 	var lastOK bool
 	err := tx.QueryRow(ctx, `SELECT id, ok
 		FROM probe_outcome_runs
-		WHERE monitor_id = $1
-		ORDER BY started_at DESC, id DESC LIMIT 1`, monitorID).Scan(&id, &lastOK)
+		WHERE tenant_id = $1
+			AND monitor_id = $2
+		ORDER BY started_at DESC, id DESC LIMIT 1`, tenantID, monitorID).Scan(&id, &lastOK)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return err
 	}
 	if err == nil && lastOK == ok {
 		_, err = tx.Exec(ctx, `UPDATE probe_outcome_runs
 			SET ended_at = $1, probe_count = probe_count + 1
-			WHERE id = $2`, checkedAt, id)
+			WHERE tenant_id = $2 AND id = $3`, checkedAt.UTC(), tenantID, id)
 		return err
 	}
 	_, err = tx.Exec(ctx, `INSERT INTO probe_outcome_runs
-		(monitor_id, started_at, ended_at, ok, probe_count)
-		VALUES ($1, $2, $3, $4, 1)`, monitorID, checkedAt, checkedAt, ok)
+		(tenant_id, monitor_id, started_at, ended_at, ok, probe_count)
+		VALUES ($1, $2, $3, $4, $5, 1)`, tenantID, monitorID, checkedAt, checkedAt, ok)
 	return err
 }
 
-func postgresRollupRawProbeResults(ctx context.Context, tx pgx.Tx, target string, bucketExpr string, cutoff time.Time) error {
+func postgresRollupRawProbeResults(ctx context.Context, tx pgx.Tx, tenantID string, target string, bucketExpr string, cutoff time.Time) error {
 	query := `INSERT INTO ` + target + `
-		(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
+		(tenant_id, monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
 			observer_suppressed_checks, first_reportable_at, last_reportable_at)
-		SELECT monitor_id, ` + bucketExpr + ` AS bucket_start,
+		SELECT $1, monitor_id, ` + bucketExpr + ` AS bucket_start,
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN 1 ELSE 0 END), 0)::int,
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND ok THEN 1 ELSE 0 END), 0)::int,
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0)::int,
@@ -1082,9 +1259,10 @@ func postgresRollupRawProbeResults(ctx context.Context, tx pgx.Tx, target string
 			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END),
 			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END)
 		FROM probe_results
-		WHERE checked_at < $1
-		GROUP BY monitor_id, 2
-		ON CONFLICT(monitor_id, bucket_start) DO UPDATE SET
+		WHERE tenant_id = $1
+			AND checked_at < $2
+			GROUP BY monitor_id, 3
+		ON CONFLICT(tenant_id, monitor_id, bucket_start) DO UPDATE SET
 			total_checks = ` + target + `.total_checks + EXCLUDED.total_checks,
 			successful_checks = ` + target + `.successful_checks + EXCLUDED.successful_checks,
 			maintenance_checks = ` + target + `.maintenance_checks + EXCLUDED.maintenance_checks,
@@ -1092,15 +1270,15 @@ func postgresRollupRawProbeResults(ctx context.Context, tx pgx.Tx, target string
 			observer_suppressed_checks = ` + target + `.observer_suppressed_checks + EXCLUDED.observer_suppressed_checks,
 			first_reportable_at = COALESCE(LEAST(` + target + `.first_reportable_at, EXCLUDED.first_reportable_at), ` + target + `.first_reportable_at, EXCLUDED.first_reportable_at),
 			last_reportable_at = COALESCE(GREATEST(` + target + `.last_reportable_at, EXCLUDED.last_reportable_at), ` + target + `.last_reportable_at, EXCLUDED.last_reportable_at)`
-	_, err := tx.Exec(ctx, query, cutoff)
+	_, err := tx.Exec(ctx, query, tenantID, cutoff)
 	return err
 }
 
-func postgresRollupStoredProbeRollups(ctx context.Context, tx pgx.Tx, source string, target string, bucketExpr string, cutoff time.Time) error {
+func postgresRollupStoredProbeRollups(ctx context.Context, tx pgx.Tx, tenantID string, source string, target string, bucketExpr string, cutoff time.Time) error {
 	query := `INSERT INTO ` + target + `
-		(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
+		(tenant_id, monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
 			observer_suppressed_checks, first_reportable_at, last_reportable_at)
-		SELECT monitor_id, ` + bucketExpr + ` AS bucket_start,
+		SELECT tenant_id, monitor_id, ` + bucketExpr + ` AS bucket_start,
 			COALESCE(SUM(total_checks), 0)::int,
 			COALESCE(SUM(successful_checks), 0)::int,
 			COALESCE(SUM(maintenance_checks), 0)::int,
@@ -1109,9 +1287,10 @@ func postgresRollupStoredProbeRollups(ctx context.Context, tx pgx.Tx, source str
 			MIN(first_reportable_at),
 			MAX(last_reportable_at)
 		FROM ` + source + `
-		WHERE bucket_start < $1
-		GROUP BY monitor_id, 2
-		ON CONFLICT(monitor_id, bucket_start) DO UPDATE SET
+		WHERE tenant_id = $1
+			AND bucket_start < $2
+			GROUP BY tenant_id, monitor_id, 3
+		ON CONFLICT(tenant_id, monitor_id, bucket_start) DO UPDATE SET
 			total_checks = ` + target + `.total_checks + EXCLUDED.total_checks,
 			successful_checks = ` + target + `.successful_checks + EXCLUDED.successful_checks,
 			maintenance_checks = ` + target + `.maintenance_checks + EXCLUDED.maintenance_checks,
@@ -1119,7 +1298,7 @@ func postgresRollupStoredProbeRollups(ctx context.Context, tx pgx.Tx, source str
 			observer_suppressed_checks = ` + target + `.observer_suppressed_checks + EXCLUDED.observer_suppressed_checks,
 			first_reportable_at = COALESCE(LEAST(` + target + `.first_reportable_at, EXCLUDED.first_reportable_at), ` + target + `.first_reportable_at, EXCLUDED.first_reportable_at),
 			last_reportable_at = COALESCE(GREATEST(` + target + `.last_reportable_at, EXCLUDED.last_reportable_at), ` + target + `.last_reportable_at, EXCLUDED.last_reportable_at)`
-	_, err := tx.Exec(ctx, query, cutoff)
+	_, err := tx.Exec(ctx, query, tenantID, cutoff)
 	return err
 }
 

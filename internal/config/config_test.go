@@ -90,6 +90,30 @@ monitors:
 	if cfg.Observer.Sentinels[2].ID != "cloudflare-ip" || cfg.Observer.Sentinels[2].URL != "http://1.1.1.1/cdn-cgi/trace" || cfg.Observer.Sentinels[2].ExpectedStatusCode != 301 {
 		t.Fatalf("observer IP sentinel = %+v, want cloudflare-ip over literal IPv4 with HTTP 301", cfg.Observer.Sentinels[2])
 	}
+	if cfg.TenantID != "default" {
+		t.Fatalf("tenant_id = %q, want default", cfg.TenantID)
+	}
+}
+
+func TestParseAcceptsTenantID(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: team-blue
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TenantID != "team-blue" {
+		t.Fatalf("tenant_id = %q, want team-blue", cfg.TenantID)
+	}
 }
 
 func TestParsePostgresStorage(t *testing.T) {

@@ -271,18 +271,19 @@ func runMonitors(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	rows, err := store.ListStates(context.Background())
+	rows, err := store.ListStates(ctx)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	windows, err := store.ListMaintenanceWindows(context.Background(), storage.MaintenanceWindowFilter{Now: now})
+	windows, err := store.ListMaintenanceWindows(ctx, storage.MaintenanceWindowFilter{Now: now})
 	if err != nil {
 		return err
 	}
@@ -306,13 +307,14 @@ func runIncidents(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	rows, err := store.ListIncidents(context.Background(), *limit)
+	rows, err := store.ListIncidents(ctx, *limit)
 	if err != nil {
 		return err
 	}
@@ -511,7 +513,8 @@ func runStorageMigrate(args []string) error {
 	if cfg.Storage.Backend != "postgres" {
 		return fmt.Errorf("storage migrate target config must use storage.backend: postgres")
 	}
-	if err := storage.MigrateSQLiteToPostgres(context.Background(), *fromSQLite, cfg.Storage.Postgres.DSN); err != nil {
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	if err := storage.MigrateSQLiteToPostgres(ctx, *fromSQLite, cfg.Storage.Postgres.DSN, cfg.TenantID); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stdout, "SQLite data migrated to PostgreSQL storage")
@@ -553,12 +556,13 @@ func runMaintenanceAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	id, err := store.AddMaintenanceWindow(context.Background(), storage.MaintenanceWindow{
+	id, err := store.AddMaintenanceWindow(ctx, storage.MaintenanceWindow{
 		MonitorID: *monitorID,
 		StartsAt:  start,
 		EndsAt:    end,
@@ -602,12 +606,13 @@ func runMaintenanceCancel(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
-	if err := store.CancelMaintenanceWindow(context.Background(), id, time.Now().UTC(), by, *reason); err != nil {
+	if err := store.CancelMaintenanceWindow(ctx, id, time.Now().UTC(), by, *reason); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stdout, "maintenance window %d cancelled\n", id)
@@ -631,7 +636,8 @@ func runMaintenanceList(args []string) error {
 	if err != nil {
 		return err
 	}
-	store, err := storage.OpenBackend(context.Background(), cfg.Storage)
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
 	if err != nil {
 		return err
 	}
@@ -641,7 +647,7 @@ func runMaintenanceList(args []string) error {
 	if !*includeAll {
 		filter.Now = now
 	}
-	windows, err := store.ListMaintenanceWindows(context.Background(), filter)
+	windows, err := store.ListMaintenanceWindows(ctx, filter)
 	if err != nil {
 		return err
 	}

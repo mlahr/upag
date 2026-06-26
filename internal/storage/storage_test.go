@@ -10,6 +10,26 @@ import (
 	"upag/internal/state"
 )
 
+func TestTenantContextDefaultsToDefaultTenant(t *testing.T) {
+	ctx := WithTenant(context.Background(), "")
+	if got := TenantFromContext(ctx); got != defaultTenantID {
+		t.Fatalf("tenant = %q, want %q", got, defaultTenantID)
+	}
+}
+
+func TestTenantContextTrimsWhitespaceToDefaultTenant(t *testing.T) {
+	ctx := WithTenant(context.Background(), "   ")
+	if got := TenantFromContext(ctx); got != defaultTenantID {
+		t.Fatalf("tenant = %q, want %q", got, defaultTenantID)
+	}
+}
+
+func TestTenantContextFallsBackToDefaultWithoutTenantValue(t *testing.T) {
+	if got := TenantFromContext(context.Background()); got != defaultTenantID {
+		t.Fatalf("tenant = %q, want %q", got, defaultTenantID)
+	}
+}
+
 func TestSaveProbeAndStatePersistsIncident(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
