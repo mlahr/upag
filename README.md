@@ -181,6 +181,12 @@ For PostgreSQL backends, `tenant_id` defines the tenant namespace used for all
 status, incidents, rollups, maintenance windows, and alert rows. If omitted, it
 defaults to `default`.
 
+`tenant_id` must be 1–63 characters and match `^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,61}[a-zA-Z0-9])?$`.
+Whitespace inside, leading/trailing, and non-ASCII characters are not accepted.
+If you are migrating into PostgreSQL in a multi-tenant topology, explicitly set
+`--tenant-id` during migration to avoid writing legacy rows to the default
+namespace accidentally.
+
 ## Configuration
 
 `upag` reads a YAML configuration file. Durations use Go duration syntax, such
@@ -511,6 +517,7 @@ Migrate an existing SQLite database into a PostgreSQL/Supabase-backed config:
 
 ```sh
 upag storage migrate --from-sqlite ./upag.sqlite --config ./config.yaml
+upag storage migrate --from-sqlite ./upag.sqlite --config ./config.yaml --tenant-id tenant-blue
 ```
 
 The target config must use `storage.backend: postgres`, and the PostgreSQL

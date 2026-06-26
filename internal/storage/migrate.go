@@ -4,31 +4,61 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
-func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN string, tenantID string) error {
-	tenantID = strings.TrimSpace(tenantID)
-	if tenantID == "" {
-		tenantID = defaultTenantID
+const maxMigrationTenantIDLength = 63
+
+var migrationTenantIDPattern = regexp.MustCompile(`^[a-zA-Z0-9](?:[a-zA-Z0-9._-]{0,61}[a-zA-Z0-9])?$`)
+
+type MigrationLogger func(format string, args ...any)
+
+type migrationOptions struct {
+	logger MigrationLogger
+}
+
+type MigrationOption func(*migrationOptions)
+
+func WithMigrationLogger(logger MigrationLogger) MigrationOption {
+	return func(opts *migrationOptions) {
+		opts.logger = logger
 	}
+}
+
+func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN string, tenantID string, opts ...MigrationOption) error {
+	options := migrationOptions{
+		logger: func(string, ...any) {},
+	}
+	for _, apply := range opts {
+		apply(&options)
+	}
+
+	tenantID, err := normalizeMigrationTenantID(tenantID)
+	if err != nil {
+		return err
+	}
+	options.logger("starting migration tenant=%q source=%q", tenantID, sqlitePath)
 	source, err := Open(sqlitePath)
 	if err != nil {
 		return err
 	}
 	defer source.Close()
+	options.logger("sqlite source opened")
 
 	target, err := OpenPostgres(ctx, postgresDSN)
 	if err != nil {
 		return err
 	}
 	defer target.Close()
+	options.logger("postgres target opened")
 
 	if err := ensurePostgresTargetEmpty(ctx, target); err != nil {
 		return err
 	}
+	options.logger("target tables confirmed empty")
 
 	tx, err := target.pool.Begin(ctx)
 	if err != nil {
@@ -36,6 +66,7 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN
 	}
 	defer tx.Rollback(ctx)
 
+	options.logger("copying sqlite rows into tenant=%q", tenantID)
 	if err := copyMonitorStates(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
@@ -69,10 +100,33 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN
 	if err := copyProbeOutcomeRuns(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
+	options.logger("sqlite row copy complete for tenant=%q", tenantID)
 	if err := resetPostgresSequences(ctx, tx); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	options.logger("reset postgres sequences")
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	options.logger("migration committed successfully for tenant=%q", tenantID)
+	return nil
+}
+
+func normalizeMigrationTenantID(raw string) (string, error) {
+	tenantID := strings.TrimSpace(raw)
+	if tenantID == "" {
+		return "", fmt.Errorf("migration tenant_id is required")
+	}
+	if tenantID != raw {
+		return "", fmt.Errorf("migration tenant_id must not have leading or trailing whitespace")
+	}
+	if len(tenantID) > maxMigrationTenantIDLength {
+		return "", fmt.Errorf("migration tenant_id must not exceed %d characters", maxMigrationTenantIDLength)
+	}
+	if !migrationTenantIDPattern.MatchString(tenantID) {
+		return "", fmt.Errorf("migration tenant_id must match %s", migrationTenantIDPattern.String())
+	}
+	return tenantID, nil
 }
 
 func ensurePostgresTargetEmpty(ctx context.Context, target *PostgresStore) error {

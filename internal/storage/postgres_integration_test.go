@@ -558,6 +558,13 @@ func TestPostgresStoreTenantIsolation(t *testing.T) {
 	if !ok || stateB.Name != "Tenant B shared" {
 		t.Fatalf("tenant B state = %+v ok=%t, want Tenant B shared", stateB, ok)
 	}
+	stateDefault, ok, err := store.GetState(ctx, "shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok {
+		t.Fatalf("default tenant state = %+v, want missing", stateDefault)
+	}
 
 	tenA, err := store.ListStates(WithTenant(ctx, tenantA))
 	if err != nil {
@@ -681,7 +688,7 @@ func TestMigrateSQLiteToPostgresDefaultsTenantID(t *testing.T) {
 	}
 	source.Close()
 
-	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "   "); err != nil {
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, defaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	migrated, err := OpenPostgres(ctx, postgresTestDSN)
@@ -704,6 +711,39 @@ func TestMigrateSQLiteToPostgresDefaultsTenantID(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("custom tenant state = %+v, want missing", stateTenant)
+	}
+}
+
+func TestMigrateSQLiteToPostgresRejectsInvalidTenantID(t *testing.T) {
+	ctx := context.Background()
+	target, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resetPostgresTestData(t, target)
+	target.Close()
+
+	sqlitePath := filepath.Join(t.TempDir(), "source.sqlite")
+	emptySource, err := Open(sqlitePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptySource.Close()
+
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "tenant with space"); err == nil {
+		t.Fatal("expected tenant validation error")
+	}
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "   "); err == nil {
+		t.Fatal("expected tenant validation error for whitespace tenant_id")
+	}
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, " tenant"); err == nil {
+		t.Fatal("expected tenant validation error for leading whitespace in tenant_id")
+	}
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "tenant "); err == nil {
+		t.Fatal("expected tenant validation error for trailing whitespace in tenant_id")
+	}
+	if err := MigrateSQLiteToPostgres(ctx, sqlitePath, postgresTestDSN, "ténant"); err == nil {
+		t.Fatal("expected tenant validation error for unicode tenant_id")
 	}
 }
 

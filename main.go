@@ -495,6 +495,7 @@ func runStorageMigrate(args []string) error {
 	fs := flag.NewFlagSet("storage migrate", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	fromSQLite := fs.String("from-sqlite", "", "source SQLite database path")
+	tenantID := fs.String("tenant-id", "", "tenant namespace for migrated rows; defaults to config tenant_id")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -513,8 +514,23 @@ func runStorageMigrate(args []string) error {
 	if cfg.Storage.Backend != "postgres" {
 		return fmt.Errorf("storage migrate target config must use storage.backend: postgres")
 	}
-	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
-	if err := storage.MigrateSQLiteToPostgres(ctx, *fromSQLite, cfg.Storage.Postgres.DSN, cfg.TenantID); err != nil {
+	effectiveTenant := cfg.TenantID
+	if *tenantID != "" {
+		if strings.TrimSpace(*tenantID) == "" {
+			return fmt.Errorf("storage migrate --tenant-id must be a non-empty tenant_id")
+		}
+		effectiveTenant = *tenantID
+	}
+	ctx := storage.WithTenant(context.Background(), effectiveTenant)
+	if err := storage.MigrateSQLiteToPostgres(
+		ctx,
+		*fromSQLite,
+		cfg.Storage.Postgres.DSN,
+		effectiveTenant,
+		storage.WithMigrationLogger(func(format string, args ...any) {
+			_, _ = fmt.Fprintf(os.Stderr, "migrate sqlite->postgres: "+format+"\n", args...)
+		}),
+	); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stdout, "SQLite data migrated to PostgreSQL storage")

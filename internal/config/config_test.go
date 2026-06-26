@@ -116,6 +116,111 @@ monitors:
 	}
 }
 
+func TestParseRejectsWhitespaceOnlyTenantID(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: "   "
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "tenant_id is required") {
+		t.Fatalf("parse error = %v, want tenant_id is required", err)
+	}
+}
+
+func TestParseRejectsMalformedTenantIDCharacters(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: "tenant blue"
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "tenant_id must match") {
+		t.Fatalf("parse error = %v, want tenant_id policy mismatch", err)
+	}
+}
+
+func TestParseRejectsTenantIDWithLeadingOrTrailingWhitespace(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: " team-blue "
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "tenant_id must not have leading or trailing whitespace") {
+		t.Fatalf("parse error = %v, want tenant_id whitespace mismatch", err)
+	}
+}
+
+func TestParseRejectsUnicodeTenantID(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: "ténant"
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "tenant_id must match") {
+		t.Fatalf("parse error = %v, want tenant_id policy mismatch", err)
+	}
+}
+
+func TestParseAcceptsTenantIDWithAllowedSymbols(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+tenant_id: team-blue_01
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TenantID != "team-blue_01" {
+		t.Fatalf("tenant_id = %q, want team-blue_01", cfg.TenantID)
+	}
+}
+
 func TestParsePostgresStorage(t *testing.T) {
 	cfg, err := Parse([]byte(`
 smtp:

@@ -82,12 +82,12 @@ func (r *Runner) Run(ctx context.Context) error {
 	signal.Notify(reloadCh, syscall.SIGHUP)
 	defer signal.Stop(reloadCh)
 
-	r.logInfo("daemon_start", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
+	r.logInfo("daemon_start", "config=%q tenant=%q monitors=%d", r.configPath, r.cfg.TenantID, len(r.cfg.Monitors))
 	r.applyConfig(ctx, r.cfg)
 	if err := r.applyStatusServer(ctx, r.cfg.HTTP.Address, r.cfg.HTTP.Port, r.cfg.TenantID); err != nil {
 		return err
 	}
-	r.logInfo("daemon_ready", "config=%q monitors=%d", r.configPath, len(r.cfg.Monitors))
+	r.logInfo("daemon_ready", "config=%q tenant=%q monitors=%d", r.configPath, r.cfg.TenantID, len(r.cfg.Monitors))
 	pruneTicker := time.NewTicker(time.Hour)
 	defer pruneTicker.Stop()
 	retryTicker := time.NewTicker(30 * time.Second)
@@ -241,9 +241,9 @@ func (r *Runner) applyStatusServer(parent context.Context, address string, port 
 	r.statusTenant = tenantID
 	r.mu.Unlock()
 	if port > 0 {
-		r.logInfo("status_http_start", "address=%q", httpstatus.ListenAddress(address, port))
+		r.logInfo("status_http_start", "address=%q tenant=%q", httpstatus.ListenAddress(address, port), tenantID)
 	} else if currentPort > 0 {
-		r.logInfo("status_http_stop", "address=%q", httpstatus.ListenAddress(currentAddress, currentPort))
+		r.logInfo("status_http_stop", "address=%q tenant=%q", httpstatus.ListenAddress(currentAddress, currentPort), currentTenant)
 	}
 	return nil
 }
