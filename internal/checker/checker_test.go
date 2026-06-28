@@ -60,7 +60,7 @@ func TestCheckSucceedsWhenResponseBodyContainsRequiredString(t *testing.T) {
 		ExpectedStatusCode: http.StatusOK,
 		Timeout:            config.Duration{Duration: time.Second},
 		ResponseBody: config.ResponseBodyAssertions{
-			MustContain: "Welcome",
+			MustContain: []string{"Welcome"},
 		},
 	})
 	if !result.OK {
@@ -79,7 +79,7 @@ func TestCheckFailsWhenResponseBodyDoesNotContainRequiredString(t *testing.T) {
 		ExpectedStatusCode: http.StatusOK,
 		Timeout:            config.Duration{Duration: time.Second},
 		ResponseBody: config.ResponseBodyAssertions{
-			MustContain: "Welcome",
+			MustContain: []string{"Welcome"},
 		},
 	})
 	if result.OK {
@@ -87,6 +87,47 @@ func TestCheckFailsWhenResponseBodyDoesNotContainRequiredString(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, `does not contain required string "Welcome"`) {
 		t.Fatalf("error = %q, want required string failure", result.Error)
+	}
+}
+
+func TestCheckSucceedsWithMultipleRequiredStrings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Welcome to the homepage of Example"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			MustContain: []string{"Welcome", "Example"},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected multiple must_contain assertions to pass, got error %q", result.Error)
+	}
+}
+
+func TestCheckFailsWhenOneOfMultipleRequiredStringsMissing(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Welcome to the homepage"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			MustContain: []string{"Welcome", "MissingString"},
+		},
+	})
+	if result.OK {
+		t.Fatal("expected missing string in multiple must_contain to fail")
+	}
+	if !strings.Contains(result.Error, `MissingString`) {
+		t.Fatalf("error = %q, want failure for missing string", result.Error)
 	}
 }
 
@@ -101,7 +142,7 @@ func TestCheckSucceedsWhenResponseBodyDoesNotContainForbiddenString(t *testing.T
 		ExpectedStatusCode: http.StatusOK,
 		Timeout:            config.Duration{Duration: time.Second},
 		ResponseBody: config.ResponseBodyAssertions{
-			MustNotContain: "Maintenance mode",
+			MustNotContain: []string{"Maintenance mode"},
 		},
 	})
 	if !result.OK {
@@ -120,7 +161,7 @@ func TestCheckFailsWhenResponseBodyContainsForbiddenString(t *testing.T) {
 		ExpectedStatusCode: http.StatusOK,
 		Timeout:            config.Duration{Duration: time.Second},
 		ResponseBody: config.ResponseBodyAssertions{
-			MustNotContain: "Maintenance mode",
+			MustNotContain: []string{"Maintenance mode"},
 		},
 	})
 	if result.OK {
@@ -128,6 +169,47 @@ func TestCheckFailsWhenResponseBodyContainsForbiddenString(t *testing.T) {
 	}
 	if !strings.Contains(result.Error, `contains forbidden string "Maintenance mode"`) {
 		t.Fatalf("error = %q, want forbidden string failure", result.Error)
+	}
+}
+
+func TestCheckSucceedsWithMultipleForbiddenStrings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Welcome to the homepage"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			MustNotContain: []string{"Error", "Maintenance mode"},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected multiple must_not_contain assertions to pass, got error %q", result.Error)
+	}
+}
+
+func TestCheckFailsWhenResponseBodyContainsOneOfMultipleForbiddenStrings(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("Welcome to the homepage, Error occurred"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			MustNotContain: []string{"Error", "Maintenance mode"},
+		},
+	})
+	if result.OK {
+		t.Fatal("expected one of multiple must_not_contain to fail")
+	}
+	if !strings.Contains(result.Error, `Error`) {
+		t.Fatalf("error = %q, want failure for forbidden string", result.Error)
 	}
 }
 
@@ -143,7 +225,7 @@ func TestCheckStatusMismatchSkipsResponseBodyAssertions(t *testing.T) {
 		ExpectedStatusCode: http.StatusOK,
 		Timeout:            config.Duration{Duration: time.Second},
 		ResponseBody: config.ResponseBodyAssertions{
-			MustContain: "Welcome",
+			MustContain: []string{"Welcome"},
 		},
 	})
 	if result.OK {

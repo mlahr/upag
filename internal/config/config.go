@@ -138,14 +138,14 @@ type MonitorConfig struct {
 }
 
 type ResponseBodyAssertions struct {
-	MustContain    string   `yaml:"must_contain"`
-	MustNotContain string   `yaml:"must_not_contain"`
+	MustContain    []string `yaml:"must_contain"`
+	MustNotContain []string `yaml:"must_not_contain"`
 	Command        []string `yaml:"command"`
 	CommandTimeout Duration `yaml:"command_timeout"`
 }
 
 func (a ResponseBodyAssertions) Configured() bool {
-	return a.MustContain != "" || a.MustNotContain != "" || len(a.Command) != 0
+	return len(a.MustContain) > 0 || len(a.MustNotContain) > 0 || len(a.Command) != 0
 }
 
 type Duration struct {

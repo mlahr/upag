@@ -652,19 +652,19 @@ monitors:
     url: https://example.com/
     expected_status_code: 200
     response_body:
-      must_contain: "Welcome"
-      must_not_contain: "Maintenance mode"
+      must_contain: ["Welcome"]
+      must_not_contain: ["Maintenance mode"]
       command: ["jq", "-e", ".ok == true"]
       command_timeout: 2s
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Monitors[0].ResponseBody.MustContain != "Welcome" {
-		t.Fatalf("response_body.must_contain = %q, want Welcome", cfg.Monitors[0].ResponseBody.MustContain)
+	if len(cfg.Monitors[0].ResponseBody.MustContain) != 1 || cfg.Monitors[0].ResponseBody.MustContain[0] != "Welcome" {
+		t.Fatalf("response_body.must_contain = %q, want [Welcome]", cfg.Monitors[0].ResponseBody.MustContain)
 	}
-	if cfg.Monitors[0].ResponseBody.MustNotContain != "Maintenance mode" {
-		t.Fatalf("response_body.must_not_contain = %q, want Maintenance mode", cfg.Monitors[0].ResponseBody.MustNotContain)
+	if len(cfg.Monitors[0].ResponseBody.MustNotContain) != 1 || cfg.Monitors[0].ResponseBody.MustNotContain[0] != "Maintenance mode" {
+		t.Fatalf("response_body.must_not_contain = %q, want [Maintenance mode]", cfg.Monitors[0].ResponseBody.MustNotContain)
 	}
 	if strings.Join(cfg.Monitors[0].ResponseBody.Command, " ") != "jq -e .ok == true" {
 		t.Fatalf("response_body.command = %#v, want jq argv", cfg.Monitors[0].ResponseBody.Command)

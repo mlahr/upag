@@ -267,8 +267,10 @@ monitors:
     expected_status_code: 200
     max_response_time: 500ms
     response_body:
-      must_contain: Example Domain
-      must_not_contain: Maintenance mode
+      must_contain:
+        - Example Domain
+      must_not_contain:
+        - Maintenance mode
       command: ["jq", "-e", ".status == \"ok\""]
       command_timeout: 10s
 ```
@@ -581,10 +583,10 @@ Optional monitor fields:
 - `timeout`: monitor-specific HTTP request timeout.
 - `max_response_time`: maximum full response duration.
 - `insecure_skip_verify`: disables HTTPS certificate verification when `true`.
-- `response_body.must_contain`: exact, case-sensitive string required in the
-  response body.
-- `response_body.must_not_contain`: exact, case-sensitive string forbidden in
-  the response body.
+- `response_body.must_contain`: list of case-sensitive strings that must all
+  appear in the response body.
+- `response_body.must_not_contain`: list of case-sensitive strings that must
+  all be absent from the response body.
 - `response_body.command`: external command assertion expressed as an argv
   list. The first item is the executable and remaining items are arguments.
 - `response_body.command_timeout`: maximum external command runtime. Defaults

@@ -88,13 +88,17 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 		return result
 	}
 
-	if monitor.ResponseBody.MustContain != "" && !strings.Contains(bodyText, monitor.ResponseBody.MustContain) {
-		result.Error = fmt.Sprintf("response body does not contain required string %q", monitor.ResponseBody.MustContain)
-		return result
+	for _, s := range monitor.ResponseBody.MustContain {
+		if !strings.Contains(bodyText, s) {
+			result.Error = fmt.Sprintf("response body does not contain required string %q", s)
+			return result
+		}
 	}
-	if monitor.ResponseBody.MustNotContain != "" && strings.Contains(bodyText, monitor.ResponseBody.MustNotContain) {
-		result.Error = fmt.Sprintf("response body contains forbidden string %q", monitor.ResponseBody.MustNotContain)
-		return result
+	for _, s := range monitor.ResponseBody.MustNotContain {
+		if strings.Contains(bodyText, s) {
+			result.Error = fmt.Sprintf("response body contains forbidden string %q", s)
+			return result
+		}
 	}
 	if len(monitor.ResponseBody.Command) != 0 {
 		if err := runResponseBodyCommand(ctx, monitor.ResponseBody, bodyBytes); err != nil {
