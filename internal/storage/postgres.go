@@ -354,6 +354,26 @@ CREATE INDEX IF NOT EXISTS idx_maintenance_windows_tenant_id ON maintenance_wind
 CREATE INDEX IF NOT EXISTS idx_incidents_tenant_id ON incidents (tenant_id);
 `,
 		},
+		{
+			ID: "0004_observer_sentinel_events",
+			SQL: `
+CREATE TABLE IF NOT EXISTS observer_sentinel_events (
+	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	sentinel_id TEXT NOT NULL,
+	name TEXT NOT NULL,
+	url TEXT NOT NULL,
+	expected_status_code INTEGER NOT NULL,
+	ok BOOLEAN NOT NULL,
+	observed_status_code INTEGER NOT NULL,
+	latency_ms BIGINT NOT NULL,
+	error TEXT NOT NULL,
+	checked_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_observer_sentinel_events_checked
+	ON observer_sentinel_events (tenant_id, checked_at DESC);
+`,
+		},
 	}
 }
 
@@ -526,6 +546,15 @@ func (s *PostgresStore) SaveObserverCheck(ctx context.Context, state ObserverSta
 			tenantID, result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, result.OK,
 			result.ObservedStatusCode, result.LatencyMS, result.Error, result.CheckedAt.UTC()); err != nil {
 			return 0, fmt.Errorf("save observer sentinel result: %w", err)
+		}
+		if !result.OK {
+			if _, err := tx.Exec(ctx, `INSERT INTO observer_sentinel_events
+				(tenant_id, sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+				tenantID, result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, result.OK,
+				result.ObservedStatusCode, result.LatencyMS, result.Error, result.CheckedAt.UTC()); err != nil {
+				return 0, fmt.Errorf("save observer sentinel event: %w", err)
+			}
 		}
 	}
 
@@ -847,6 +876,56 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, limit int) ([]Inciden
 		incidents = append(incidents, incident)
 	}
 	return incidents, rows.Err()
+}
+
+func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, limit int) ([]ProbeResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	tenantID := TenantFromContext(ctx)
+	rows, err := s.pool.Query(ctx, `SELECT
+		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
+		attempt_count, error, maintenance_window_id, observer_suppressed
+		FROM probe_results WHERE tenant_id = $1 AND ok = FALSE
+		ORDER BY checked_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ProbeResult
+	for rows.Next() {
+		result, err := scanPostgresFailedProbeResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
+func (s *PostgresStore) ListObserverSentinelEvents(ctx context.Context, limit int) ([]ObserverSentinelResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	tenantID := TenantFromContext(ctx)
+	rows, err := s.pool.Query(ctx, `SELECT
+		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
+		latency_ms, error, checked_at
+		FROM observer_sentinel_events WHERE tenant_id = $1
+		ORDER BY checked_at DESC LIMIT $2`, tenantID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ObserverSentinelResult
+	for rows.Next() {
+		result, err := scanPostgresObserverSentinelResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
 }
 
 func (s *PostgresStore) ListAlertNotifications(ctx context.Context, limit int) ([]AlertNotification, error) {
@@ -1358,6 +1437,25 @@ func scanPostgresObserverSentinelResult(row pgx.Row) (ObserverSentinelResult, er
 		return ObserverSentinelResult{}, err
 	}
 	result.CheckedAt = result.CheckedAt.UTC()
+	return result, nil
+}
+
+func scanPostgresFailedProbeResult(row pgx.Row) (ProbeResult, error) {
+	var result ProbeResult
+	var checkedAt *time.Time
+	var maintenanceWindowID *int64
+	err := row.Scan(
+		&result.MonitorID, &checkedAt, &result.OK, &result.ObservedStatusCode,
+		&result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount,
+		&result.Error, &maintenanceWindowID, &result.ObserverSuppressed,
+	)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	result.CheckedAt = derefTime(checkedAt)
+	if maintenanceWindowID != nil {
+		result.MaintenanceWindowID = *maintenanceWindowID
+	}
 	return result, nil
 }
 

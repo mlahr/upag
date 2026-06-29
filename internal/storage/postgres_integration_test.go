@@ -829,7 +829,8 @@ func resetPostgresTestData(t *testing.T, store *PostgresStore) {
 		maintenance_windows,
 		monitor_states,
 		observer_state,
-		observer_sentinel_results
+		observer_sentinel_results,
+		observer_sentinel_events
 		RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatal(err)

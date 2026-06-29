@@ -24,6 +24,8 @@ type Backend interface {
 	ListStates(context.Context) ([]MonitorState, error)
 	ListUptimeStats(context.Context, time.Time, int) (map[string]UptimeStats, error)
 	ListIncidents(context.Context, int) ([]Incident, error)
+	ListFailedProbeResults(context.Context, int) ([]ProbeResult, error)
+	ListObserverSentinelEvents(context.Context, int) ([]ObserverSentinelResult, error)
 	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
 	ListActionableAlertDeliveryFailures(context.Context, int) ([]AlertNotification, error)
 	ListDueAlertNotificationRetries(context.Context, time.Time, int) ([]AlertNotificationRetry, error)
@@ -259,6 +261,7 @@ func migrations() []migration {
 		{ID: "0006_probe_attempt_count", Fn: migrateProbeAttemptCount},
 		{ID: "0007_observer_health", Fn: migrateObserverHealth},
 		{ID: "0008_probe_rollups", Fn: migrateProbeRollups},
+		{ID: "0009_observer_sentinel_events", Fn: migrateObserverSentinelEvents},
 	}
 }
 
@@ -469,6 +472,25 @@ func rollupTableStatement(name string) string {
 		last_reportable_at TEXT,
 		PRIMARY KEY (monitor_id, bucket_start)
 	)`
+}
+
+func migrateObserverSentinelEvents(ctx context.Context, tx *sql.Tx) error {
+	return execMigrationStatements(ctx, tx, []string{
+		`CREATE TABLE IF NOT EXISTS observer_sentinel_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			sentinel_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			expected_status_code INTEGER NOT NULL,
+			ok INTEGER NOT NULL,
+			observed_status_code INTEGER NOT NULL,
+			latency_ms INTEGER NOT NULL,
+			error TEXT NOT NULL,
+			checked_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_observer_sentinel_events_checked
+			ON observer_sentinel_events (checked_at DESC)`,
+	})
 }
 
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
@@ -686,6 +708,15 @@ func (s *Store) SaveObserverCheck(ctx context.Context, state ObserverState, resu
 			result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, boolInt(result.OK),
 			result.ObservedStatusCode, result.LatencyMS, result.Error, formatTime(result.CheckedAt)); err != nil {
 			return 0, fmt.Errorf("save observer sentinel result: %w", err)
+		}
+		if !result.OK {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO observer_sentinel_events
+				(sentinel_id, name, url, expected_status_code, ok, observed_status_code, latency_ms, error, checked_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				result.SentinelID, result.Name, result.URL, result.ExpectedStatusCode, boolInt(result.OK),
+				result.ObservedStatusCode, result.LatencyMS, result.Error, formatTime(result.CheckedAt)); err != nil {
+				return 0, fmt.Errorf("save observer sentinel event: %w", err)
+			}
 		}
 	}
 
@@ -1124,6 +1155,54 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 		incidents = append(incidents, incident)
 	}
 	return incidents, rows.Err()
+}
+
+func (s *Store) ListFailedProbeResults(ctx context.Context, limit int) ([]ProbeResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
+		attempt_count, error, maintenance_window_id, observer_suppressed
+		FROM probe_results WHERE ok = 0
+		ORDER BY checked_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ProbeResult
+	for rows.Next() {
+		result, err := scanFailedProbeResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
+}
+
+func (s *Store) ListObserverSentinelEvents(ctx context.Context, limit int) ([]ObserverSentinelResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
+		latency_ms, error, checked_at
+		FROM observer_sentinel_events
+		ORDER BY checked_at DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ObserverSentinelResult
+	for rows.Next() {
+		result, err := scanObserverSentinelResult(rows)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, result)
+	}
+	return results, rows.Err()
 }
 
 func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertNotification, error) {
@@ -1699,6 +1778,29 @@ func scanObserverSentinelResult(scanner rowScanner) (ObserverSentinelResult, err
 	}
 	result.OK = intBool(ok)
 	result.CheckedAt = parseTime(checkedAt)
+	return result, nil
+}
+
+func scanFailedProbeResult(scanner rowScanner) (ProbeResult, error) {
+	var result ProbeResult
+	var checkedAt string
+	var ok int
+	var maintenanceWindowID sql.NullInt64
+	var observerSuppressed int
+	err := scanner.Scan(
+		&result.MonitorID, &checkedAt, &ok, &result.ObservedStatusCode,
+		&result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount,
+		&result.Error, &maintenanceWindowID, &observerSuppressed,
+	)
+	if err != nil {
+		return ProbeResult{}, err
+	}
+	result.CheckedAt = parseTime(checkedAt)
+	result.OK = intBool(ok)
+	if maintenanceWindowID.Valid {
+		result.MaintenanceWindowID = maintenanceWindowID.Int64
+	}
+	result.ObserverSuppressed = intBool(observerSuppressed)
 	return result, nil
 }
 

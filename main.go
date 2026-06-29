@@ -64,6 +64,8 @@ func run(args []string) error {
 		return runMonitors(args[1:])
 	case "incidents":
 		return runIncidents(args[1:])
+	case "failures":
+		return runFailures(args[1:])
 	case "maintenance":
 		return runMaintenance(args[1:])
 	case "storage":
@@ -319,6 +321,45 @@ func runIncidents(args []string) error {
 		return err
 	}
 	return cli.PrintIncidents(os.Stdout, rows)
+}
+
+func runFailures(args []string) error {
+	fs := flag.NewFlagSet("failures", flag.ContinueOnError)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	limit := fs.Int("limit", 50, "maximum number of failures per section")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	failedProbes, err := store.ListFailedProbeResults(ctx, *limit)
+	if err != nil {
+		return err
+	}
+	observerState, observerKnown, err := store.GetObserverState(ctx)
+	if err != nil {
+		return err
+	}
+	sentinelEvents, err := store.ListObserverSentinelEvents(ctx, *limit)
+	if err != nil {
+		return err
+	}
+	return cli.PrintFailures(os.Stdout, failedProbes, observerState, observerKnown, sentinelEvents)
 }
 
 func runMaintenance(args []string) error {
@@ -715,5 +756,5 @@ func storageUsage() error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|maintenance|storage> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|failures|maintenance|storage> [flags]")
 }

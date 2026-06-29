@@ -85,6 +85,69 @@ func PrintIncidents(w io.Writer, incidents []storage.Incident) error {
 	return tw.Flush()
 }
 
+func PrintFailures(w io.Writer, failedProbes []storage.ProbeResult, observerState storage.ObserverState, observerKnown bool, sentinelEvents []storage.ObserverSentinelResult) error {
+	if len(failedProbes) > 0 {
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "TIME\tMONITOR\tSTATUS\tSUPPRESSED\tERROR"); err != nil {
+			return err
+		}
+		for _, p := range failedProbes {
+			suppressed := "no"
+			if p.ObserverSuppressed {
+				suppressed = "yes"
+			}
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
+				formatCLITime(p.CheckedAt),
+				p.MonitorID,
+				p.ObservedStatusCode,
+				suppressed,
+				p.Error,
+			); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if len(sentinelEvents) > 0 {
+		if len(failedProbes) > 0 {
+			fmt.Fprintln(w)
+		}
+		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+		if _, err := fmt.Fprintln(tw, "TIME\tSENTINEL\tSTATUS\tLATENCY\tERROR"); err != nil {
+			return err
+		}
+		for _, se := range sentinelEvents {
+			status := "FAIL"
+			if se.OK {
+				status = "OK"
+			}
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%dms\t%s\n",
+				formatCLITime(se.CheckedAt),
+				se.SentinelID,
+				status,
+				se.LatencyMS,
+				se.Error,
+			); err != nil {
+				return err
+			}
+		}
+		if err := tw.Flush(); err != nil {
+			return err
+		}
+	}
+
+	if observerKnown &&
+		(len(failedProbes) > 0 || len(sentinelEvents) > 0) &&
+		(observerState.Status == "OBSERVER_DOWN" || observerState.ConsecutiveFailures > 0) {
+		fmt.Fprintf(w, "\nOBSERVER: %s (%d failures)\n", observerState.Status, observerState.ConsecutiveFailures)
+	}
+
+	return nil
+}
+
 func maintenanceWindowState(window storage.MaintenanceWindow, now time.Time) string {
 	if !window.CancelledAt.IsZero() {
 		return "CANCELLED"

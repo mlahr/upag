@@ -387,6 +387,143 @@ func TestStorageConformanceUptimeStatsMaintenanceSuppressionAndRollups(t *testin
 	}
 }
 
+func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := context.Background()
+			now := time.Date(2026, 6, 25, 12, 0, 0, 0, time.UTC)
+
+			_, err := store.SaveProbeAndState(ctx, ProbeResult{
+				MonitorID:          "web",
+				CheckedAt:          now.Add(-3 * time.Minute),
+				OK:                 false,
+				ObservedStatusCode: 503,
+				Error:              "timeout",
+			}, MonitorState{
+				MonitorID:              "web",
+				Name:                   "Web",
+				URL:                    "https://example.com",
+				Status:                 state.Failing,
+				LastCheckedAt:          now.Add(-3 * time.Minute),
+				LastFailureAt:          now.Add(-3 * time.Minute),
+				LastError:              "timeout",
+				LastObservedStatusCode: 503,
+				UpdatedAt:              now.Add(-3 * time.Minute),
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = store.SaveProbeAndState(ctx, ProbeResult{
+				MonitorID:          "web",
+				CheckedAt:          now.Add(-2 * time.Minute),
+				OK:                 false,
+				ObservedStatusCode: 503,
+				Error:              "timeout",
+				ObserverSuppressed: true,
+			}, MonitorState{
+				MonitorID:              "web",
+				Name:                   "Web",
+				URL:                    "https://example.com",
+				Status:                 state.Failing,
+				LastCheckedAt:          now.Add(-2 * time.Minute),
+				LastFailureAt:          now.Add(-2 * time.Minute),
+				LastError:              "timeout",
+				LastObservedStatusCode: 503,
+				UpdatedAt:              now.Add(-2 * time.Minute),
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = store.SaveProbeAndState(ctx, ProbeResult{
+				MonitorID: "web",
+				CheckedAt: now.Add(-time.Minute),
+				OK:        true,
+			}, MonitorState{
+				MonitorID:              "web",
+				Name:                   "Web",
+				URL:                    "https://example.com",
+				Status:                 state.Up,
+				LastCheckedAt:          now.Add(-time.Minute),
+				LastSuccessAt:          now.Add(-time.Minute),
+				LastObservedStatusCode: 200,
+				UpdatedAt:              now.Add(-time.Minute),
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			failedProbes, err := store.ListFailedProbeResults(ctx, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(failedProbes) != 2 {
+				t.Fatalf("ListFailedProbeResults = %d, want 2 (got %+v)", len(failedProbes), failedProbes)
+			}
+			if !failedProbes[0].ObserverSuppressed && failedProbes[1].ObserverSuppressed {
+				failedProbes[0], failedProbes[1] = failedProbes[1], failedProbes[0]
+			}
+			if !failedProbes[0].ObserverSuppressed || failedProbes[0].MonitorID != "web" {
+				t.Fatalf("first failed probe = %+v, want suppressed web probe", failedProbes[0])
+			}
+			if failedProbes[1].ObserverSuppressed || failedProbes[1].MonitorID != "web" || failedProbes[1].Error != "timeout" {
+				t.Fatalf("second failed probe = %+v, want non-suppressed web probe with timeout", failedProbes[1])
+			}
+
+			incidentID, err := store.SaveObserverCheck(ctx, ObserverState{
+				Status:               state.ObserverDown,
+				ConsecutiveFailures:  2,
+				ConsecutiveSuccesses: 0,
+				LastCheckedAt:        now,
+				LastFailureAt:        now,
+				LastError:            "sentinel failed",
+				UpdatedAt:            now,
+			}, []ObserverSentinelResult{
+				{
+					SentinelID:         "gstatic",
+					Name:               "Google",
+					URL:                "https://gstatic.com/generate_204",
+					ExpectedStatusCode: 204,
+					OK:                 false,
+					ObservedStatusCode: 0,
+					LatencyMS:          500,
+					Error:              "connection refused",
+					CheckedAt:          now,
+				},
+				{
+					SentinelID:         "cloudflare",
+					Name:               "Cloudflare",
+					URL:                "https://cp.cloudflare.com/generate_204",
+					ExpectedStatusCode: 204,
+					OK:                 true,
+					ObservedStatusCode: 204,
+					LatencyMS:          20,
+					CheckedAt:          now,
+				},
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = incidentID
+
+			sentinelEvents, err := store.ListObserverSentinelEvents(ctx, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(sentinelEvents) != 1 {
+				t.Fatalf("ListObserverSentinelEvents = %d, want 1 (only failed sentinel)", len(sentinelEvents))
+			}
+			if sentinelEvents[0].SentinelID != "gstatic" || sentinelEvents[0].OK {
+				t.Fatalf("sentinel event = %+v, want failed gstatic", sentinelEvents[0])
+			}
+		})
+	}
+}
+
 func saveConformanceState(t *testing.T, store Backend, monitorID string, now time.Time) {
 	t.Helper()
 	_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
