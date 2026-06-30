@@ -87,17 +87,19 @@ func PrintIncidents(w io.Writer, incidents []storage.Incident) error {
 
 func PrintStatusIntervals(w io.Writer, intervals []storage.StatusInterval) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "START\tEND\tDOWNTIME\tSTATUS\tMONITOR"); err != nil {
+	if _, err := fmt.Fprintln(tw, "START\tEND\tDURATION\tDOWNTIME\tSTATUS\tMONITOR"); err != nil {
 		return err
 	}
+	now := time.Now()
 	for _, interval := range intervals {
 		downtime := "no"
 		if interval.Downtime {
 			downtime = "yes"
 		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			formatCLITime(interval.StartedAt),
 			formatCLITime(interval.EndedAt),
+			formatIntervalDuration(interval, now),
 			downtime,
 			interval.Status,
 			interval.MonitorID,
@@ -106,6 +108,20 @@ func PrintStatusIntervals(w io.Writer, intervals []storage.StatusInterval) error
 		}
 	}
 	return tw.Flush()
+}
+
+func formatIntervalDuration(interval storage.StatusInterval, now time.Time) string {
+	if interval.StartedAt.IsZero() {
+		return "-"
+	}
+	end := interval.EndedAt
+	if end.IsZero() {
+		end = now
+	}
+	if end.Before(interval.StartedAt) {
+		return "-"
+	}
+	return end.Sub(interval.StartedAt).Truncate(time.Second).String()
 }
 
 func PrintFailures(w io.Writer, failedProbes []storage.ProbeResult, observerState storage.ObserverState, observerKnown bool, sentinelEvents []storage.ObserverSentinelResult) error {

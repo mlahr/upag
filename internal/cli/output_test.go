@@ -86,7 +86,7 @@ func TestPrintStatusIntervals(t *testing.T) {
 	output := buf.String()
 	t.Logf("Output:\n%s", output)
 
-	for _, want := range []string{"START", "END", "DOWNTIME", "STATUS", "MONITOR", "home", "DOWN", "yes", "api", "UP", "no"} {
+	for _, want := range []string{"START", "END", "DURATION", "DOWNTIME", "STATUS", "MONITOR", "1h0m0s", "home", "DOWN", "yes", "api", "UP", "no"} {
 		if !contains(output, want) {
 			t.Fatalf("missing %q in output %q", want, output)
 		}
