@@ -635,6 +635,59 @@ func TestEnsureStatusIntervalsBackfilledIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestListStatusIntervalsFiltersAndLimits(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, item := range []struct {
+		monitorID string
+		status    string
+		at        time.Time
+	}{
+		{monitorID: "home", status: state.Up, at: base},
+		{monitorID: "api", status: state.Down, at: base.Add(time.Minute)},
+		{monitorID: "home", status: state.Down, at: base.Add(2 * time.Minute)},
+	} {
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID: item.monitorID,
+			CheckedAt: item.at,
+			OK:        item.status == state.Up,
+		}, MonitorState{
+			MonitorID:     item.monitorID,
+			Name:          item.monitorID,
+			URL:           "https://example.com/",
+			Status:        item.status,
+			LastCheckedAt: item.at,
+			UpdatedAt:     item.at,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	intervals, err := store.ListStatusIntervals(context.Background(), StatusIntervalFilter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(intervals) != 2 {
+		t.Fatalf("interval count = %d, want 2", len(intervals))
+	}
+	if intervals[0].MonitorID != "home" || intervals[0].Status != state.Down {
+		t.Fatalf("latest interval = %+v, want home DOWN", intervals[0])
+	}
+	filtered, err := store.ListStatusIntervals(context.Background(), StatusIntervalFilter{MonitorID: "api", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered) != 1 || filtered[0].MonitorID != "api" {
+		t.Fatalf("filtered intervals = %+v, want one api interval", filtered)
+	}
+}
+
 func TestRollupAndPruneProbeResultsCompactsRawProbes(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {

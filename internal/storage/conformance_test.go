@@ -134,6 +134,61 @@ func TestStorageConformanceProbeStateIncidentAndSyntheticFailures(t *testing.T) 
 	}
 }
 
+func TestStorageConformanceStatusIntervals(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := context.Background()
+			base := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+			for _, step := range []struct {
+				status string
+				at     time.Time
+				ok     bool
+			}{
+				{status: state.Up, at: base, ok: true},
+				{status: state.Failing, at: base.Add(time.Minute), ok: false},
+				{status: state.Down, at: base.Add(2 * time.Minute), ok: false},
+				{status: state.Up, at: base.Add(3 * time.Minute), ok: true},
+			} {
+				_, err := store.SaveProbeAndState(ctx, ProbeResult{
+					MonitorID: "home",
+					CheckedAt: step.at,
+					OK:        step.ok,
+				}, MonitorState{
+					MonitorID:     "home",
+					Name:          "Home",
+					URL:           "https://example.com/",
+					Status:        step.status,
+					LastCheckedAt: step.at,
+					UpdatedAt:     step.at,
+				}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			intervals, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{MonitorID: "home", Limit: 10})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(intervals) != 4 {
+				t.Fatalf("interval count = %d, want 4: %+v", len(intervals), intervals)
+			}
+			if intervals[0].Status != state.Up || !intervals[0].EndedAt.IsZero() {
+				t.Fatalf("latest interval = %+v, want open UP", intervals[0])
+			}
+			if intervals[1].Status != state.Down || !intervals[1].Downtime {
+				t.Fatalf("down interval = %+v, want downtime DOWN", intervals[1])
+			}
+			if intervals[2].Status != state.Failing || !intervals[2].Downtime {
+				t.Fatalf("failing interval = %+v, want retroactive downtime FAILING", intervals[2])
+			}
+		})
+	}
+}
+
 func TestStorageConformanceMaintenanceAndStateCleanup(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {

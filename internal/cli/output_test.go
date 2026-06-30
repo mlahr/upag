@@ -72,6 +72,27 @@ func TestPrintFailuresEmpty(t *testing.T) {
 	}
 }
 
+func TestPrintStatusIntervals(t *testing.T) {
+	now := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
+	intervals := []storage.StatusInterval{
+		{MonitorID: "home", Status: "DOWN", StartedAt: now.Add(-time.Hour), EndedAt: now, Downtime: true},
+		{MonitorID: "api", Status: "UP", StartedAt: now, Downtime: false},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintStatusIntervals(&buf, intervals); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	t.Logf("Output:\n%s", output)
+
+	for _, want := range []string{"START", "END", "DOWNTIME", "STATUS", "MONITOR", "home", "DOWN", "yes", "api", "UP", "no"} {
+		if !contains(output, want) {
+			t.Fatalf("missing %q in output %q", want, output)
+		}
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && containsStr(s, substr)
 }

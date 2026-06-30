@@ -85,6 +85,29 @@ func PrintIncidents(w io.Writer, incidents []storage.Incident) error {
 	return tw.Flush()
 }
 
+func PrintStatusIntervals(w io.Writer, intervals []storage.StatusInterval) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
+	if _, err := fmt.Fprintln(tw, "START\tEND\tDOWNTIME\tSTATUS\tMONITOR"); err != nil {
+		return err
+	}
+	for _, interval := range intervals {
+		downtime := "no"
+		if interval.Downtime {
+			downtime = "yes"
+		}
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			formatCLITime(interval.StartedAt),
+			formatCLITime(interval.EndedAt),
+			downtime,
+			interval.Status,
+			interval.MonitorID,
+		); err != nil {
+			return err
+		}
+	}
+	return tw.Flush()
+}
+
 func PrintFailures(w io.Writer, failedProbes []storage.ProbeResult, observerState storage.ObserverState, observerKnown bool, sentinelEvents []storage.ObserverSentinelResult) error {
 	if len(failedProbes) > 0 {
 		tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)

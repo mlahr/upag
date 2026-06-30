@@ -36,6 +36,17 @@ func TestRunRecognizesMonitorsCommand(t *testing.T) {
 	}
 }
 
+func TestRunRecognizesIntervalsCommand(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	seedMonitorState(t, dbPath, "home")
+	if err := run([]string{"intervals", "--config", configPath, "--monitor", "home", "--limit", "10"}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunRecognizesConfigReloadCommand(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 

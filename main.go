@@ -64,6 +64,8 @@ func run(args []string) error {
 		return runMonitors(args[1:])
 	case "incidents":
 		return runIncidents(args[1:])
+	case "intervals":
+		return runIntervals(args[1:])
 	case "failures":
 		return runFailures(args[1:])
 	case "maintenance":
@@ -321,6 +323,44 @@ func runIncidents(args []string) error {
 		return err
 	}
 	return cli.PrintIncidents(os.Stdout, rows)
+}
+
+func runIntervals(args []string) error {
+	fs := flag.NewFlagSet("intervals", flag.ContinueOnError)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	monitorID := fs.String("monitor", "", "monitor ID")
+	limit := fs.Int("limit", 50, "maximum number of intervals to print")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("intervals --limit must be positive")
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
+	}
+
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+
+	intervals, err := store.ListStatusIntervals(ctx, storage.StatusIntervalFilter{
+		MonitorID: *monitorID,
+		Limit:     *limit,
+	})
+	if err != nil {
+		return err
+	}
+	return cli.PrintStatusIntervals(os.Stdout, intervals)
 }
 
 func runFailures(args []string) error {
@@ -756,5 +796,5 @@ func storageUsage() error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|failures|maintenance|storage> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|intervals|failures|maintenance|storage> [flags]")
 }

@@ -24,6 +24,7 @@ type Backend interface {
 	SaveAlertNotifications(context.Context, []AlertNotification) error
 	ListStates(context.Context) ([]MonitorState, error)
 	EnsureStatusIntervalsBackfilled(context.Context, int) error
+	ListStatusIntervals(context.Context, StatusIntervalFilter) ([]StatusInterval, error)
 	ListUptimeStats(context.Context, time.Time, int) (map[string]UptimeStats, error)
 	ListIncidents(context.Context, int) ([]Incident, error)
 	ListFailedProbeResults(context.Context, int) ([]ProbeResult, error)
@@ -140,6 +141,20 @@ type UptimeWindowStats struct {
 	ReportableSeconds       int64
 	WindowStartedAt         time.Time
 	WindowEndedAt           time.Time
+}
+
+type StatusInterval struct {
+	ID        int64
+	MonitorID string
+	Status    string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Downtime  bool
+}
+
+type StatusIntervalFilter struct {
+	MonitorID string
+	Limit     int
 }
 
 type RollupRetention struct {
@@ -851,6 +866,36 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 		states = append(states, state)
 	}
 	return states, rows.Err()
+}
+
+func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFilter) ([]StatusInterval, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	query := `SELECT id, monitor_id, status, started_at, ended_at, downtime
+		FROM monitor_status_intervals`
+	args := []any{}
+	if strings.TrimSpace(filter.MonitorID) != "" {
+		query += ` WHERE monitor_id = ?`
+		args = append(args, strings.TrimSpace(filter.MonitorID))
+	}
+	query += ` ORDER BY started_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var intervals []StatusInterval
+	for rows.Next() {
+		interval, err := scanStatusInterval(rows)
+		if err != nil {
+			return nil, err
+		}
+		intervals = append(intervals, interval)
+	}
+	return intervals, rows.Err()
 }
 
 func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
@@ -1926,6 +1971,20 @@ func scanFailedProbeResult(scanner rowScanner) (ProbeResult, error) {
 	}
 	result.ObserverSuppressed = intBool(observerSuppressed)
 	return result, nil
+}
+
+func scanStatusInterval(scanner rowScanner) (StatusInterval, error) {
+	var interval StatusInterval
+	var startedAt string
+	var endedAt sql.NullString
+	var downtime int
+	if err := scanner.Scan(&interval.ID, &interval.MonitorID, &interval.Status, &startedAt, &endedAt, &downtime); err != nil {
+		return StatusInterval{}, err
+	}
+	interval.StartedAt = parseTime(startedAt)
+	interval.EndedAt = parseNullTime(endedAt)
+	interval.Downtime = intBool(downtime)
+	return interval, nil
 }
 
 func formatTime(t time.Time) string {

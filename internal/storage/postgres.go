@@ -702,6 +702,46 @@ func (s *PostgresStore) ListStates(ctx context.Context) ([]MonitorState, error) 
 	return states, rows.Err()
 }
 
+func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIntervalFilter) ([]StatusInterval, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	tenantID := TenantFromContext(ctx)
+	monitorID := strings.TrimSpace(filter.MonitorID)
+	var rows pgx.Rows
+	var err error
+	if monitorID == "" {
+		rows, err = s.pool.Query(ctx, `SELECT id, monitor_id, status, started_at, ended_at, downtime
+			FROM monitor_status_intervals
+			WHERE tenant_id = $1
+			ORDER BY started_at DESC, id DESC LIMIT $2`, tenantID, limit)
+	} else {
+		rows, err = s.pool.Query(ctx, `SELECT id, monitor_id, status, started_at, ended_at, downtime
+			FROM monitor_status_intervals
+			WHERE tenant_id = $1 AND monitor_id = $2
+			ORDER BY started_at DESC, id DESC LIMIT $3`, tenantID, monitorID, limit)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var intervals []StatusInterval
+	for rows.Next() {
+		var interval StatusInterval
+		var endedAt *time.Time
+		if err := rows.Scan(&interval.ID, &interval.MonitorID, &interval.Status, &interval.StartedAt, &endedAt, &interval.Downtime); err != nil {
+			return nil, err
+		}
+		interval.StartedAt = interval.StartedAt.UTC()
+		if endedAt != nil {
+			interval.EndedAt = endedAt.UTC()
+		}
+		intervals = append(intervals, interval)
+	}
+	return intervals, rows.Err()
+}
+
 func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
 	if err := s.EnsureStatusIntervalsBackfilled(ctx, failureThreshold); err != nil {
 		return nil, err
