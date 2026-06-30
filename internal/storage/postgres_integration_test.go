@@ -242,7 +242,7 @@ func TestPostgresStoreObserverAlertsAndRollups(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := store.ListUptimeStats(ctx, now, 1)
+	stats, err := store.ListUptimeStats(ctx, now, SingleFailureThreshold(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,14 +299,14 @@ func TestPostgresRollupGroupByTenantColumnOrdering(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stats, err := store.ListUptimeStats(WithTenant(ctx, tenantID), now, 1)
+	stats, err := store.ListUptimeStats(WithTenant(ctx, tenantID), now, SingleFailureThreshold(1))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := stats["shared"]; !ok {
 		t.Fatalf("tenant-scoped rollup stats missing for shared monitor")
 	}
-	defaultStats, err := store.ListUptimeStats(ctx, now, 1)
+	defaultStats, err := store.ListUptimeStats(ctx, now, SingleFailureThreshold(1))
 	if err != nil {
 		t.Fatal(err)
 	}

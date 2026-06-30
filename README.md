@@ -152,6 +152,7 @@ monitors:
     name: Homepage
     url: https://example.com/
     expected_status_code: 200
+    failure_threshold: 2
 ```
 
 Run `upag` in the foreground:
@@ -265,6 +266,7 @@ monitors:
     name: Example homepage
     url: https://example.com/
     expected_status_code: 200
+    failure_threshold: 2
     max_response_time: 500ms
     response_body:
       must_contain:
@@ -495,8 +497,9 @@ to two decimal places. For a window with no reportable seconds,
   scheduled check. Defaults to `2`; set to `0` to disable retries.
 - `probe_retry_backoff`: delay between in-probe retry attempts. Defaults to
   `500ms`.
-- `failure_threshold`: consecutive failed checks required before a monitor
-  transitions DOWN. Defaults to `3`.
+- `failure_threshold`: fallback consecutive failed checks required before a
+  monitor transitions DOWN when the monitor does not set
+  `monitors[].failure_threshold`. Defaults to `3`.
 - `history_retention`: legacy raw probe retention fallback. Defaults to `720h`
   and is used only when `storage.probe_results.retention` is unset.
 
@@ -581,6 +584,8 @@ Optional monitor fields:
 
 - `interval`: monitor-specific check interval.
 - `timeout`: monitor-specific HTTP request timeout.
+- `failure_threshold`: monitor-specific consecutive failed checks required
+  before this monitor transitions DOWN. Defaults to `defaults.failure_threshold`.
 - `max_response_time`: maximum full response duration.
 - `insecure_skip_verify`: disables HTTPS certificate verification when `true`.
 - `response_body.must_contain`: list of case-sensitive strings that must all

@@ -79,7 +79,7 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 	if current.Status != state.Maintenance {
 		t.Fatalf("status = %s, want MAINTENANCE", current.Status)
 	}
-	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), 1)
+	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), storage.SingleFailureThreshold(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -379,7 +379,7 @@ func TestProbeSuppressesMonitorTransitionWhenObserverDown(t *testing.T) {
 	if len(incidents) != 0 {
 		t.Fatalf("incidents = %+v, want none", incidents)
 	}
-	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), 1)
+	stats, err := store.ListUptimeStats(ctx, time.Now().UTC(), storage.SingleFailureThreshold(1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestApplyConfigKeepsUnchangedWorker(t *testing.T) {
 	cfg := testRunnerConfig("home", "https://example.com/")
 	workerConfig := monitorWorkerConfig{
 		Monitor:           cfg.Monitors[0],
-		FailureThreshold:  cfg.Defaults.FailureThreshold,
+		FailureThreshold:  cfg.Monitors[0].FailureThreshold,
 		ProbeRetries:      cfg.Defaults.ProbeRetries,
 		ProbeRetryBackoff: cfg.Defaults.ProbeRetryBackoff.Duration,
 	}
@@ -506,7 +506,7 @@ func TestApplyConfigRestartsChangedWorker(t *testing.T) {
 	oldCfg := testRunnerConfig("home", "https://example.com/")
 	oldWorkerConfig := monitorWorkerConfig{
 		Monitor:           oldCfg.Monitors[0],
-		FailureThreshold:  oldCfg.Defaults.FailureThreshold,
+		FailureThreshold:  oldCfg.Monitors[0].FailureThreshold,
 		ProbeRetries:      oldCfg.Defaults.ProbeRetries,
 		ProbeRetryBackoff: oldCfg.Defaults.ProbeRetryBackoff.Duration,
 	}
@@ -546,7 +546,7 @@ func TestApplyConfigRestartsWorkerWhenRelevantDefaultChanges(t *testing.T) {
 	oldCfg := testRunnerConfig("home", "https://example.com/")
 	oldWorkerConfig := monitorWorkerConfig{
 		Monitor:           oldCfg.Monitors[0],
-		FailureThreshold:  oldCfg.Defaults.FailureThreshold,
+		FailureThreshold:  oldCfg.Monitors[0].FailureThreshold,
 		ProbeRetries:      oldCfg.Defaults.ProbeRetries,
 		ProbeRetryBackoff: oldCfg.Defaults.ProbeRetryBackoff.Duration,
 	}
@@ -557,6 +557,7 @@ func TestApplyConfigRestartsWorkerWhenRelevantDefaultChanges(t *testing.T) {
 	}
 	nextCfg := testRunnerConfig("home", "https://example.com/")
 	nextCfg.Defaults.FailureThreshold = oldCfg.Defaults.FailureThreshold + 1
+	nextCfg.Monitors[0].FailureThreshold = nextCfg.Defaults.FailureThreshold
 
 	runner.applyConfig(parent, nextCfg)
 
@@ -565,6 +566,68 @@ func TestApplyConfigRestartsWorkerWhenRelevantDefaultChanges(t *testing.T) {
 	}
 	if runner.workers["home"].config.FailureThreshold != nextCfg.Defaults.FailureThreshold {
 		t.Fatalf("worker threshold = %d, want %d", runner.workers["home"].config.FailureThreshold, nextCfg.Defaults.FailureThreshold)
+	}
+	cancelParent()
+}
+
+func TestApplyConfigUsesMonitorFailureThresholdOverride(t *testing.T) {
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testRunnerConfig("home", "https://example.com/")
+	cfg.Monitors[0].FailureThreshold = 5
+
+	runner.applyConfig(context.Background(), cfg)
+
+	worker := runner.workers["home"]
+	if worker.config.FailureThreshold != 5 {
+		t.Fatalf("worker threshold = %d, want monitor override 5", worker.config.FailureThreshold)
+	}
+}
+
+func TestApplyConfigRestartsWorkerWhenMonitorFailureThresholdChanges(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	defer cancelParent()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	runner, err := NewRunner("config.yaml", config.Config{}, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	oldCfg := testRunnerConfig("home", "https://example.com/")
+	oldWorkerConfig := monitorWorkerConfig{
+		Monitor:           oldCfg.Monitors[0],
+		FailureThreshold:  oldCfg.Monitors[0].FailureThreshold,
+		ProbeRetries:      oldCfg.Defaults.ProbeRetries,
+		ProbeRetryBackoff: oldCfg.Defaults.ProbeRetryBackoff.Duration,
+	}
+	var cancelled int32
+	runner.workers["home"] = monitorWorker{
+		cancel: func() { atomic.AddInt32(&cancelled, 1) },
+		config: oldWorkerConfig,
+	}
+	nextCfg := testRunnerConfig("home", "https://example.com/")
+	nextCfg.Monitors[0].FailureThreshold = oldCfg.Monitors[0].FailureThreshold + 2
+
+	runner.applyConfig(parent, nextCfg)
+
+	if got := atomic.LoadInt32(&cancelled); got != 1 {
+		t.Fatalf("cancelled worker after monitor threshold change %d times, want 1", got)
+	}
+	if runner.workers["home"].config.FailureThreshold != nextCfg.Monitors[0].FailureThreshold {
+		t.Fatalf("worker threshold = %d, want %d", runner.workers["home"].config.FailureThreshold, nextCfg.Monitors[0].FailureThreshold)
 	}
 	cancelParent()
 }
@@ -683,6 +746,7 @@ func testRunnerConfig(id string, url string) config.Config {
 				ExpectedStatusCode: http.StatusOK,
 				Timeout:            config.Duration{Duration: time.Second},
 				Interval:           config.Duration{Duration: time.Minute},
+				FailureThreshold:   3,
 			},
 		},
 	}

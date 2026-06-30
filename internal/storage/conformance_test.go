@@ -414,7 +414,7 @@ func TestStorageConformanceUptimeStatsMaintenanceSuppressionAndRollups(t *testin
 				t.Fatal(err)
 			}
 
-			stats, err := store.ListUptimeStats(ctx, now, 3)
+			stats, err := store.ListUptimeStats(ctx, now, SingleFailureThreshold(3))
 			if err != nil {
 				t.Fatal(err)
 			}

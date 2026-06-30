@@ -18,7 +18,7 @@ const alertFailureLimit = 50
 
 type Store interface {
 	ListStates(ctx context.Context) ([]storage.MonitorState, error)
-	ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]storage.UptimeStats, error)
+	ListUptimeStats(ctx context.Context, now time.Time, thresholds storage.FailureThresholds) (map[string]storage.UptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
 	ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error)
 	GetObserverState(ctx context.Context) (storage.ObserverState, bool, error)
@@ -26,11 +26,11 @@ type Store interface {
 }
 
 type Metadata struct {
-	Version          string
-	StartedAt        time.Time
-	ConfigPath       string
-	MonitorCount     int
-	FailureThreshold int
+	Version           string
+	StartedAt         time.Time
+	ConfigPath        string
+	MonitorCount      int
+	FailureThresholds storage.FailureThresholds
 }
 
 type MetadataProvider func() Metadata
@@ -107,7 +107,7 @@ func NewHandler(store Store, tenantID string, metadata MetadataProvider) http.Ha
 		}
 		now := time.Now().UTC()
 		meta := metadata()
-		uptimeStats, err := store.ListUptimeStats(ctx, now, meta.FailureThreshold)
+		uptimeStats, err := store.ListUptimeStats(ctx, now, meta.FailureThresholds)
 		if err != nil {
 			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
 			return

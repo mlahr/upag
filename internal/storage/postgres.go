@@ -742,8 +742,8 @@ func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIn
 	return intervals, rows.Err()
 }
 
-func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
-	if err := s.EnsureStatusIntervalsBackfilled(ctx, failureThreshold); err != nil {
+func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, thresholds FailureThresholds) (map[string]UptimeStats, error) {
+	if err := s.EnsureStatusIntervalsBackfilled(ctx, thresholds); err != nil {
 		return nil, err
 	}
 	stats := map[string]UptimeStats{}
@@ -776,7 +776,7 @@ func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, fail
 			stats[monitorID] = monitorStats
 		}
 	}
-	if err := s.addStrictAvailability(ctx, now.UTC(), failureThreshold, stats); err != nil {
+	if err := s.addStrictAvailability(ctx, now.UTC(), stats); err != nil {
 		return nil, err
 	}
 	return stats, nil
@@ -852,7 +852,7 @@ func (s *PostgresStore) listUptimeWindowStats(ctx context.Context, cutoff time.T
 	return stats, rows.Err()
 }
 
-func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time, failureThreshold int, stats map[string]UptimeStats) error {
+func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time, stats map[string]UptimeStats) error {
 	outagesByMonitor, err := s.listDowntimeIntervals(ctx, now)
 	if err != nil {
 		return err
@@ -911,10 +911,7 @@ func (s *PostgresStore) listDowntimeIntervals(ctx context.Context, now time.Time
 	return outages, rows.Err()
 }
 
-func (s *PostgresStore) EnsureStatusIntervalsBackfilled(ctx context.Context, failureThreshold int) error {
-	if failureThreshold <= 0 {
-		failureThreshold = 1
-	}
+func (s *PostgresStore) EnsureStatusIntervalsBackfilled(ctx context.Context, thresholds FailureThresholds) error {
 	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -938,12 +935,12 @@ func (s *PostgresStore) EnsureStatusIntervalsBackfilled(ctx context.Context, fai
 	if err != nil {
 		return err
 	}
-	if err := postgresBackfillStatusIntervalsFromRuns(ctx, tx, tenantID, runs, failureThreshold); err != nil {
+	if err := postgresBackfillStatusIntervalsFromRuns(ctx, tx, tenantID, runs, thresholds); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO monitor_status_interval_backfills
 		(tenant_id, backfilled_at, failure_threshold)
-		VALUES ($1, $2, $3)`, tenantID, time.Now().UTC(), failureThreshold); err != nil {
+		VALUES ($1, $2, $3)`, tenantID, time.Now().UTC(), thresholds.ForMonitor("")); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -985,8 +982,9 @@ func postgresListReportableUptimeRunsTx(ctx context.Context, tx pgx.Tx, tenantID
 	return runs, rows.Err()
 }
 
-func postgresBackfillStatusIntervalsFromRuns(ctx context.Context, tx pgx.Tx, tenantID string, runs []uptimeRun, failureThreshold int) error {
+func postgresBackfillStatusIntervalsFromRuns(ctx context.Context, tx pgx.Tx, tenantID string, runs []uptimeRun, thresholds FailureThresholds) error {
 	for i, run := range runs {
+		failureThreshold := thresholds.ForMonitor(run.MonitorID)
 		statusValue := state.Up
 		if !run.OK {
 			statusValue = state.Failing

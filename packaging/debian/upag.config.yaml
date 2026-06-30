@@ -51,3 +51,4 @@ monitors:
     name: Example homepage
     url: https://example.com/
     expected_status_code: 200
+    failure_threshold: 2

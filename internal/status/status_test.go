@@ -27,11 +27,11 @@ func (s fakeStore) ListStates(context.Context) ([]storage.MonitorState, error) {
 	return s.states, nil
 }
 
-func (s fakeStore) ListUptimeStats(context.Context, time.Time, int) (map[string]storage.UptimeStats, error) {
+func (s fakeStore) ListUptimeStats(context.Context, time.Time, storage.FailureThresholds) (map[string]storage.UptimeStats, error) {
 	return s.uptime, nil
 }
 
-func (s fakeStore) EnsureStatusIntervalsBackfilled(context.Context, int) error {
+func (s fakeStore) EnsureStatusIntervalsBackfilled(context.Context, storage.FailureThresholds) error {
 	return nil
 }
 
@@ -76,14 +76,14 @@ func (s *tenantAwareStore) ListStates(ctx context.Context) ([]storage.MonitorSta
 	return s.fakeStore.ListStates(ctx)
 }
 
-func (s *tenantAwareStore) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]storage.UptimeStats, error) {
+func (s *tenantAwareStore) ListUptimeStats(ctx context.Context, now time.Time, thresholds storage.FailureThresholds) (map[string]storage.UptimeStats, error) {
 	s.recordTenant(ctx)
-	return s.fakeStore.ListUptimeStats(ctx, now, failureThreshold)
+	return s.fakeStore.ListUptimeStats(ctx, now, thresholds)
 }
 
-func (s *tenantAwareStore) EnsureStatusIntervalsBackfilled(ctx context.Context, failureThreshold int) error {
+func (s *tenantAwareStore) EnsureStatusIntervalsBackfilled(ctx context.Context, thresholds storage.FailureThresholds) error {
 	s.recordTenant(ctx)
-	return s.fakeStore.EnsureStatusIntervalsBackfilled(ctx, failureThreshold)
+	return s.fakeStore.EnsureStatusIntervalsBackfilled(ctx, thresholds)
 }
 
 func (s *tenantAwareStore) ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error) {

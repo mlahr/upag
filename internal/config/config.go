@@ -134,6 +134,7 @@ type MonitorConfig struct {
 	MaxResponseTime    Duration               `yaml:"max_response_time"`
 	Interval           Duration               `yaml:"interval"`
 	Timeout            Duration               `yaml:"timeout"`
+	FailureThreshold   int                    `yaml:"failure_threshold"`
 	InsecureSkipVerify bool                   `yaml:"insecure_skip_verify"`
 }
 
@@ -529,6 +530,7 @@ func validateMonitorsSchema(node *yaml.Node, path string) error {
 			"max_response_time":    nil,
 			"interval":             nil,
 			"timeout":              nil,
+			"failure_threshold":    nil,
 			"insecure_skip_verify": nil,
 		}); err != nil {
 			return err
@@ -647,6 +649,9 @@ func (c *Config) ApplyDefaults() {
 		}
 		if c.Monitors[i].Timeout.Duration == 0 {
 			c.Monitors[i].Timeout = c.Defaults.Timeout
+		}
+		if c.Monitors[i].FailureThreshold == 0 {
+			c.Monitors[i].FailureThreshold = c.Defaults.FailureThreshold
 		}
 		if len(c.Monitors[i].ResponseBody.Command) != 0 && c.Monitors[i].ResponseBody.CommandTimeout.Duration == 0 {
 			c.Monitors[i].ResponseBody.CommandTimeout.Duration = 10 * time.Second
@@ -943,6 +948,9 @@ func (c Config) Validate() error {
 		}
 		if monitor.Timeout.Duration <= 0 {
 			errs = append(errs, fmt.Errorf("%s.timeout must be positive", prefix))
+		}
+		if monitor.FailureThreshold <= 0 {
+			errs = append(errs, fmt.Errorf("%s.failure_threshold must be positive", prefix))
 		}
 	}
 

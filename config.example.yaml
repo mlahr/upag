@@ -78,6 +78,7 @@ monitors:
     name: Example homepage
     url: https://example.com/
     expected_status_code: 200
+    failure_threshold: 2
     max_response_time: 500ms
     response_body:
       must_contain:

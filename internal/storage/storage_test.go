@@ -404,7 +404,7 @@ func TestListUptimeStatsAggregatesProbeResultsByWindow(t *testing.T) {
 		}
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestListUptimeStatsUsesZeroValueForEmptyWindows(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestListUptimeStatsUsesStrictAccountingForConfirmedOutages(t *testing.T) {
 		}
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -615,11 +615,11 @@ func TestEnsureStatusIntervalsBackfilledIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), 3); err != nil {
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), SingleFailureThreshold(3)); err != nil {
 		t.Fatal(err)
 	}
 	firstCount := tableCount(t, store, "monitor_status_intervals")
-	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), 3); err != nil {
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), SingleFailureThreshold(3)); err != nil {
 		t.Fatal(err)
 	}
 	secondCount := tableCount(t, store, "monitor_status_intervals")
@@ -632,6 +632,54 @@ func TestEnsureStatusIntervalsBackfilledIsIdempotent(t *testing.T) {
 	}
 	if intervals[1].status != state.Down || !intervals[1].downtime {
 		t.Fatalf("backfilled outage = %+v, want downtime DOWN", intervals[1])
+	}
+}
+
+func TestEnsureStatusIntervalsBackfilledUsesPerMonitorFailureThreshold(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, monitorID := range []string{"default-threshold", "override-threshold"} {
+		for i, ok := range []bool{true, false, false, true} {
+			err := store.SaveProbeResult(context.Background(), ProbeResult{
+				MonitorID: monitorID,
+				CheckedAt: now.Add(time.Duration(i) * time.Minute),
+				OK:        ok,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	thresholds := FailureThresholds{
+		Default: 3,
+		Monitors: map[string]int{
+			"override-threshold": 2,
+		},
+	}
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), thresholds); err != nil {
+		t.Fatal(err)
+	}
+
+	defaultIntervals := readStatusIntervals(t, store, "default-threshold")
+	if len(defaultIntervals) != 3 {
+		t.Fatalf("default threshold intervals = %+v, want up/failing/up", defaultIntervals)
+	}
+	if defaultIntervals[1].status != state.Failing || defaultIntervals[1].downtime {
+		t.Fatalf("default threshold outage = %+v, want non-downtime FAILING", defaultIntervals[1])
+	}
+
+	overrideIntervals := readStatusIntervals(t, store, "override-threshold")
+	if len(overrideIntervals) != 3 {
+		t.Fatalf("override threshold intervals = %+v, want up/down/up", overrideIntervals)
+	}
+	if overrideIntervals[1].status != state.Down || !overrideIntervals[1].downtime {
+		t.Fatalf("override threshold outage = %+v, want downtime DOWN", overrideIntervals[1])
 	}
 }
 
@@ -750,7 +798,7 @@ func TestRollupAndPruneProbeResultsCompactsRawProbes(t *testing.T) {
 		t.Fatalf("probe_outcome_runs count = %d, want failure and success runs", got)
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +856,7 @@ func TestRollupAndPruneProbeResultsCompactsRollupLevels(t *testing.T) {
 	if got := tableCount(t, store, "probe_hourly_rollups"); got != 1 {
 		t.Fatalf("probe_hourly_rollups count = %d, want one hourly rollup", got)
 	}
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +913,7 @@ func TestRollupAndPruneProbeResultsMergesIncrementalBucketCompaction(t *testing.
 	if got := tableCount(t, store, "probe_minute_rollups"); got != 1 {
 		t.Fatalf("probe_minute_rollups count = %d, want one merged minute bucket", got)
 	}
-	stats, err := store.ListUptimeStats(context.Background(), base.Add(2*time.Hour), 3)
+	stats, err := store.ListUptimeStats(context.Background(), base.Add(2*time.Hour), SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1019,7 +1067,7 @@ func TestMaintenanceProbeResultsAreExcludedFromUptimeAndSyntheticIncidents(t *te
 		}
 	}
 
-	stats, err := store.ListUptimeStats(context.Background(), now, 3)
+	stats, err := store.ListUptimeStats(context.Background(), now, SingleFailureThreshold(3))
 	if err != nil {
 		t.Fatal(err)
 	}

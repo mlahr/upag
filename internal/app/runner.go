@@ -152,7 +152,7 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tenantID = cfg.TenantID
-	if err := r.store.EnsureStatusIntervalsBackfilled(storage.WithTenant(parent, cfg.TenantID), cfg.Defaults.FailureThreshold); err != nil {
+	if err := r.store.EnsureStatusIntervalsBackfilled(storage.WithTenant(parent, cfg.TenantID), failureThresholds(cfg)); err != nil {
 		r.logError("status_interval_backfill_failed", "tenant=%q error=%q", cfg.TenantID, err)
 	}
 
@@ -174,7 +174,7 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	for _, mon := range cfg.Monitors {
 		workerConfig := monitorWorkerConfig{
 			Monitor:           mon,
-			FailureThreshold:  cfg.Defaults.FailureThreshold,
+			FailureThreshold:  mon.FailureThreshold,
 			ProbeRetries:      cfg.Defaults.ProbeRetries,
 			ProbeRetryBackoff: cfg.Defaults.ProbeRetryBackoff.Duration,
 		}
@@ -275,12 +275,25 @@ func (r *Runner) statusMetadata() httpstatus.Metadata {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return httpstatus.Metadata{
-		Version:          r.version,
-		StartedAt:        r.startedAt,
-		ConfigPath:       r.configPath,
-		MonitorCount:     len(r.cfg.Monitors),
-		FailureThreshold: r.cfg.Defaults.FailureThreshold,
+		Version:           r.version,
+		StartedAt:         r.startedAt,
+		ConfigPath:        r.configPath,
+		MonitorCount:      len(r.cfg.Monitors),
+		FailureThresholds: failureThresholds(r.cfg),
 	}
+}
+
+func failureThresholds(cfg config.Config) storage.FailureThresholds {
+	thresholds := storage.FailureThresholds{
+		Default:  cfg.Defaults.FailureThreshold,
+		Monitors: map[string]int{},
+	}
+	for _, mon := range cfg.Monitors {
+		if mon.FailureThreshold > 0 {
+			thresholds.Monitors[mon.ID] = mon.FailureThreshold
+		}
+	}
+	return thresholds
 }
 
 func (r *Runner) stopAll() {

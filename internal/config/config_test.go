@@ -39,6 +39,9 @@ monitors:
 	if cfg.Monitors[0].Timeout.Duration != 10*time.Second {
 		t.Fatalf("monitor timeout = %s, want 10s", cfg.Monitors[0].Timeout.Duration)
 	}
+	if cfg.Monitors[0].FailureThreshold != 3 {
+		t.Fatalf("monitor failure threshold = %d, want default 3", cfg.Monitors[0].FailureThreshold)
+	}
 	if cfg.Alerts.NotificationRetries.MaxAttempts != 3 {
 		t.Fatalf("retry max attempts = %d, want 3", cfg.Alerts.NotificationRetries.MaxAttempts)
 	}
@@ -113,6 +116,50 @@ monitors:
 	}
 	if cfg.TenantID != "team-blue" {
 		t.Fatalf("tenant_id = %q, want team-blue", cfg.TenantID)
+	}
+}
+
+func TestParseAcceptsMonitorFailureThresholdOverride(t *testing.T) {
+	cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  failure_threshold: 3
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    failure_threshold: 5
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Monitors[0].FailureThreshold != 5 {
+		t.Fatalf("monitor failure threshold = %d, want override 5", cfg.Monitors[0].FailureThreshold)
+	}
+}
+
+func TestParseRejectsNegativeMonitorFailureThreshold(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    failure_threshold: -1
+`))
+	if err == nil {
+		t.Fatal("Parse succeeded, want error")
+	}
+	if !strings.Contains(err.Error(), "monitors[0].failure_threshold must be positive") {
+		t.Fatalf("error = %q, want monitor failure_threshold validation", err)
 	}
 }
 
@@ -752,21 +799,6 @@ monitors:
     expected_status_code: 200
 `,
 			want: "unknown config field defaults.failure_treshold",
-		},
-		"monitor-failure-threshold": {
-			yaml: `
-smtp:
-  host: smtp.example.com
-  from: alerts@example.com
-  to: [ops@example.com]
-monitors:
-  - id: home
-    name: Home
-    url: https://example.com/
-    expected_status_code: 200
-    failure_threshold: 5
-`,
-			want: "unknown config field monitors[0].failure_threshold",
 		},
 		"response-body": {
 			yaml: `

@@ -23,9 +23,9 @@ type Backend interface {
 	SaveObserverCheck(context.Context, ObserverState, []ObserverSentinelResult, *Incident) (int64, error)
 	SaveAlertNotifications(context.Context, []AlertNotification) error
 	ListStates(context.Context) ([]MonitorState, error)
-	EnsureStatusIntervalsBackfilled(context.Context, int) error
+	EnsureStatusIntervalsBackfilled(context.Context, FailureThresholds) error
 	ListStatusIntervals(context.Context, StatusIntervalFilter) ([]StatusInterval, error)
-	ListUptimeStats(context.Context, time.Time, int) (map[string]UptimeStats, error)
+	ListUptimeStats(context.Context, time.Time, FailureThresholds) (map[string]UptimeStats, error)
 	ListIncidents(context.Context, int) ([]Incident, error)
 	ListFailedProbeResults(context.Context, int) ([]ProbeResult, error)
 	ListObserverSentinelEvents(context.Context, int) ([]ObserverSentinelResult, error)
@@ -155,6 +155,25 @@ type StatusInterval struct {
 type StatusIntervalFilter struct {
 	MonitorID string
 	Limit     int
+}
+
+type FailureThresholds struct {
+	Default  int
+	Monitors map[string]int
+}
+
+func SingleFailureThreshold(threshold int) FailureThresholds {
+	return FailureThresholds{Default: threshold}
+}
+
+func (t FailureThresholds) ForMonitor(monitorID string) int {
+	if threshold := t.Monitors[monitorID]; threshold > 0 {
+		return threshold
+	}
+	if t.Default > 0 {
+		return t.Default
+	}
+	return 1
 }
 
 type RollupRetention struct {
@@ -898,8 +917,8 @@ func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFi
 	return intervals, rows.Err()
 }
 
-func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
-	if err := s.EnsureStatusIntervalsBackfilled(ctx, failureThreshold); err != nil {
+func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, thresholds FailureThresholds) (map[string]UptimeStats, error) {
+	if err := s.EnsureStatusIntervalsBackfilled(ctx, thresholds); err != nil {
 		return nil, err
 	}
 	stats := map[string]UptimeStats{}
@@ -932,7 +951,7 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThres
 			stats[monitorID] = monitorStats
 		}
 	}
-	if err := s.addStrictAvailability(ctx, now.UTC(), failureThreshold, stats); err != nil {
+	if err := s.addStrictAvailability(ctx, now.UTC(), stats); err != nil {
 		return nil, err
 	}
 	return stats, nil
@@ -1031,7 +1050,7 @@ type timeInterval struct {
 	End   time.Time
 }
 
-func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failureThreshold int, stats map[string]UptimeStats) error {
+func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, stats map[string]UptimeStats) error {
 	outagesByMonitor, err := s.listDowntimeIntervals(ctx, now)
 	if err != nil {
 		return err
@@ -1095,10 +1114,7 @@ func (s *Store) listDowntimeIntervals(ctx context.Context, now time.Time) (map[s
 	return outages, rows.Err()
 }
 
-func (s *Store) EnsureStatusIntervalsBackfilled(ctx context.Context, failureThreshold int) error {
-	if failureThreshold <= 0 {
-		failureThreshold = 1
-	}
+func (s *Store) EnsureStatusIntervalsBackfilled(ctx context.Context, thresholds FailureThresholds) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -1121,12 +1137,12 @@ func (s *Store) EnsureStatusIntervalsBackfilled(ctx context.Context, failureThre
 	if err != nil {
 		return err
 	}
-	if err := backfillStatusIntervalsFromRuns(ctx, tx, runs, failureThreshold); err != nil {
+	if err := backfillStatusIntervalsFromRuns(ctx, tx, runs, thresholds); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_status_interval_backfills
 		(id, backfilled_at, failure_threshold)
-		VALUES (1, ?, ?)`, formatTime(time.Now().UTC()), failureThreshold); err != nil {
+		VALUES (1, ?, ?)`, formatTime(time.Now().UTC()), thresholds.ForMonitor("")); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -1171,8 +1187,9 @@ func listReportableUptimeRunsTx(ctx context.Context, tx *sql.Tx) ([]uptimeRun, e
 	return runs, rows.Err()
 }
 
-func backfillStatusIntervalsFromRuns(ctx context.Context, tx *sql.Tx, runs []uptimeRun, failureThreshold int) error {
+func backfillStatusIntervalsFromRuns(ctx context.Context, tx *sql.Tx, runs []uptimeRun, thresholds FailureThresholds) error {
 	for i, run := range runs {
+		failureThreshold := thresholds.ForMonitor(run.MonitorID)
 		statusValue := state.Up
 		if !run.OK {
 			statusValue = state.Failing
