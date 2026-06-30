@@ -100,6 +100,12 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN
 	if err := copyProbeOutcomeRuns(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
+	if err := copyMonitorStatusIntervals(ctx, source.db, tx, tenantID); err != nil {
+		return err
+	}
+	if err := copyMonitorStatusIntervalBackfill(ctx, source.db, tx, tenantID); err != nil {
+		return err
+	}
 	options.logger("sqlite row copy complete for tenant=%q", tenantID)
 	if err := resetPostgresSequences(ctx, tx); err != nil {
 		return err
@@ -142,6 +148,8 @@ func ensurePostgresTargetEmpty(ctx context.Context, target *PostgresStore) error
 		"probe_hourly_rollups",
 		"probe_daily_rollups",
 		"probe_outcome_runs",
+		"monitor_status_intervals",
+		"monitor_status_interval_backfills",
 	} {
 		var count int
 		if err := target.pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
@@ -368,8 +376,54 @@ func copyProbeOutcomeRuns(ctx context.Context, db *sql.DB, tx postgresTx, tenant
 	return rows.Err()
 }
 
+func copyMonitorStatusIntervals(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
+	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, status, started_at, ended_at, downtime FROM monitor_status_intervals ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var monitorID, status, startedAt string
+		var endedAt sql.NullString
+		var downtime int
+		if err := rows.Scan(&id, &monitorID, &status, &startedAt, &endedAt, &downtime); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO monitor_status_intervals
+			(tenant_id, id, monitor_id, status, started_at, ended_at, downtime)
+			VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+			tenantID, id, monitorID, status, parseTime(startedAt), postgresNullableTime(parseNullTime(endedAt)), intBool(downtime)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func copyMonitorStatusIntervalBackfill(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
+	rows, err := db.QueryContext(ctx, `SELECT backfilled_at, failure_threshold FROM monitor_status_interval_backfills WHERE id = 1`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var backfilledAt string
+		var failureThreshold int
+		if err := rows.Scan(&backfilledAt, &failureThreshold); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO monitor_status_interval_backfills
+			(tenant_id, backfilled_at, failure_threshold)
+			VALUES ($1,$2,$3)`,
+			tenantID, parseTime(backfilledAt), failureThreshold); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func resetPostgresSequences(ctx context.Context, tx postgresTx) error {
-	for _, table := range []string{"probe_results", "incidents", "alert_notifications", "maintenance_windows", "probe_outcome_runs"} {
+	for _, table := range []string{"probe_results", "incidents", "alert_notifications", "maintenance_windows", "probe_outcome_runs", "monitor_status_intervals"} {
 		if _, err := tx.Exec(ctx, `SELECT setval(pg_get_serial_sequence($1, 'id'), COALESCE((SELECT MAX(id) FROM `+table+`), 1), (SELECT COUNT(*) > 0 FROM `+table+`))`, table); err != nil {
 			return err
 		}

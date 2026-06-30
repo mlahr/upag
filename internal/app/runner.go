@@ -152,6 +152,9 @@ func (r *Runner) applyConfig(parent context.Context, cfg config.Config) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.tenantID = cfg.TenantID
+	if err := r.store.EnsureStatusIntervalsBackfilled(storage.WithTenant(parent, cfg.TenantID), cfg.Defaults.FailureThreshold); err != nil {
+		r.logError("status_interval_backfill_failed", "tenant=%q error=%q", cfg.TenantID, err)
+	}
 
 	desired := map[string]config.MonitorConfig{}
 	desiredIDs := make([]string, 0, len(cfg.Monitors))

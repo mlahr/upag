@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"upag/internal/config"
+	"upag/internal/state"
 
 	_ "github.com/mattn/go-sqlite3"
 )
@@ -22,6 +23,7 @@ type Backend interface {
 	SaveObserverCheck(context.Context, ObserverState, []ObserverSentinelResult, *Incident) (int64, error)
 	SaveAlertNotifications(context.Context, []AlertNotification) error
 	ListStates(context.Context) ([]MonitorState, error)
+	EnsureStatusIntervalsBackfilled(context.Context, int) error
 	ListUptimeStats(context.Context, time.Time, int) (map[string]UptimeStats, error)
 	ListIncidents(context.Context, int) ([]Incident, error)
 	ListFailedProbeResults(context.Context, int) ([]ProbeResult, error)
@@ -262,6 +264,7 @@ func migrations() []migration {
 		{ID: "0007_observer_health", Fn: migrateObserverHealth},
 		{ID: "0008_probe_rollups", Fn: migrateProbeRollups},
 		{ID: "0009_observer_sentinel_events", Fn: migrateObserverSentinelEvents},
+		{ID: "0010_monitor_status_intervals", Fn: migrateMonitorStatusIntervals},
 	}
 }
 
@@ -493,6 +496,29 @@ func migrateObserverSentinelEvents(ctx context.Context, tx *sql.Tx) error {
 	})
 }
 
+func migrateMonitorStatusIntervals(ctx context.Context, tx *sql.Tx) error {
+	return execMigrationStatements(ctx, tx, []string{
+		`CREATE TABLE IF NOT EXISTS monitor_status_intervals (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			monitor_id TEXT NOT NULL,
+			status TEXT NOT NULL,
+			started_at TEXT NOT NULL,
+			ended_at TEXT,
+			downtime INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_monitor_status_intervals_monitor_started
+			ON monitor_status_intervals (monitor_id, started_at)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_monitor_status_intervals_open
+			ON monitor_status_intervals (monitor_id)
+			WHERE ended_at IS NULL`,
+		`CREATE TABLE IF NOT EXISTS monitor_status_interval_backfills (
+			id INTEGER PRIMARY KEY CHECK (id = 1),
+			backfilled_at TEXT NOT NULL,
+			failure_threshold INTEGER NOT NULL
+		)`,
+	})
+}
+
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -604,6 +630,9 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		next.LastObservedStatusCode, formatTime(next.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
 	}
+	if err := saveStatusInterval(ctx, tx, next.MonitorID, next.Status, next.UpdatedAt); err != nil {
+		return 0, fmt.Errorf("save monitor status interval: %w", err)
+	}
 
 	var incidentID int64
 	if incident != nil {
@@ -622,6 +651,43 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 	}
 
 	return incidentID, tx.Commit()
+}
+
+func saveStatusInterval(ctx context.Context, tx *sql.Tx, monitorID string, status string, observedAt time.Time) error {
+	observedAt = observedAt.UTC()
+	var id int64
+	var previousStatus string
+	err := tx.QueryRowContext(ctx, `SELECT id, status
+		FROM monitor_status_intervals
+		WHERE monitor_id = ? AND ended_at IS NULL
+		ORDER BY started_at DESC, id DESC LIMIT 1`, monitorID).Scan(&id, &previousStatus)
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
+	if err == nil && previousStatus == status {
+		return nil
+	}
+	downtime := statusCountsAsDowntime(status)
+	if err == sql.ErrNoRows {
+		_, err = tx.ExecContext(ctx, `INSERT INTO monitor_status_intervals
+			(monitor_id, status, started_at, ended_at, downtime)
+			VALUES (?, ?, ?, NULL, ?)`, monitorID, status, formatTime(observedAt), boolInt(downtime))
+		return err
+	}
+	previousDowntime := statusCountsAsDowntime(previousStatus) || (previousStatus == state.Failing && status == state.Down)
+	if _, err := tx.ExecContext(ctx, `UPDATE monitor_status_intervals
+		SET ended_at = ?, downtime = ?
+		WHERE id = ?`, formatTime(observedAt), boolInt(previousDowntime), id); err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO monitor_status_intervals
+		(monitor_id, status, started_at, ended_at, downtime)
+		VALUES (?, ?, ?, NULL, ?)`, monitorID, status, formatTime(observedAt), boolInt(downtime))
+	return err
+}
+
+func statusCountsAsDowntime(status string) bool {
+	return status == state.Down
 }
 
 func (s *Store) SaveProbeResult(ctx context.Context, result ProbeResult) error {
@@ -788,6 +854,9 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 }
 
 func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, failureThreshold int) (map[string]UptimeStats, error) {
+	if err := s.EnsureStatusIntervalsBackfilled(ctx, failureThreshold); err != nil {
+		return nil, err
+	}
 	stats := map[string]UptimeStats{}
 	windows := []struct {
 		name   string
@@ -918,10 +987,7 @@ type timeInterval struct {
 }
 
 func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failureThreshold int, stats map[string]UptimeStats) error {
-	if failureThreshold <= 0 {
-		failureThreshold = 1
-	}
-	runs, err := s.listReportableUptimeRuns(ctx)
+	outagesByMonitor, err := s.listDowntimeIntervals(ctx, now)
 	if err != nil {
 		return err
 	}
@@ -930,17 +996,6 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 		return err
 	}
 
-	runsByMonitor := map[string][]uptimeRun{}
-	firstProbeByMonitor := map[string]time.Time{}
-	for _, run := range runs {
-		runsByMonitor[run.MonitorID] = append(runsByMonitor[run.MonitorID], run)
-		if firstProbeByMonitor[run.MonitorID].IsZero() {
-			firstProbeByMonitor[run.MonitorID] = run.StartedAt
-		}
-		if _, ok := stats[run.MonitorID]; !ok {
-			stats[run.MonitorID] = UptimeStats{}
-		}
-	}
 	maintenanceByMonitor := map[string][]timeInterval{}
 	for _, window := range maintenance {
 		maintenanceByMonitor[window.MonitorID] = append(maintenanceByMonitor[window.MonitorID], timeInterval{
@@ -950,11 +1005,11 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 	}
 
 	for monitorID, monitorStats := range stats {
-		firstProbe := firstProbeByMonitor[monitorID]
+		firstProbe := monitorStats.Retained.WindowStartedAt
 		if firstProbe.IsZero() {
 			continue
 		}
-		outages := strictOutageIntervals(runsByMonitor[monitorID], failureThreshold, now)
+		outages := outagesByMonitor[monitorID]
 		maintenanceWindows := maintenanceByMonitor[monitorID]
 		monitorStats.TwentyFourHour = applyAvailabilityWindow(monitorStats.TwentyFourHour, firstProbe, now.Add(-24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.SevenDay = applyAvailabilityWindow(monitorStats.SevenDay, firstProbe, now.Add(-7*24*time.Hour), now, outages, maintenanceWindows)
@@ -965,8 +1020,75 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, failur
 	return nil
 }
 
-func (s *Store) listReportableUptimeRuns(ctx context.Context) ([]uptimeRun, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, started_at, ended_at, ok, probe_count
+func (s *Store) listDowntimeIntervals(ctx context.Context, now time.Time) (map[string][]timeInterval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, started_at, ended_at
+		FROM monitor_status_intervals
+		WHERE downtime = 1
+		ORDER BY monitor_id, started_at`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	outages := map[string][]timeInterval{}
+	for rows.Next() {
+		var monitorID string
+		var startedAt string
+		var endedAt sql.NullString
+		if err := rows.Scan(&monitorID, &startedAt, &endedAt); err != nil {
+			return nil, err
+		}
+		end := parseNullTime(endedAt)
+		if end.IsZero() {
+			end = now
+		}
+		outages[monitorID] = append(outages[monitorID], timeInterval{
+			Start: parseTime(startedAt),
+			End:   end,
+		})
+	}
+	return outages, rows.Err()
+}
+
+func (s *Store) EnsureStatusIntervalsBackfilled(ctx context.Context, failureThreshold int) error {
+	if failureThreshold <= 0 {
+		failureThreshold = 1
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var marker int
+	err = tx.QueryRowContext(ctx, `SELECT id FROM monitor_status_interval_backfills WHERE id = 1`).Scan(&marker)
+	if err == nil {
+		return tx.Commit()
+	}
+	if err != sql.ErrNoRows {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM monitor_status_intervals`); err != nil {
+		return err
+	}
+	runs, err := listReportableUptimeRunsTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if err := backfillStatusIntervalsFromRuns(ctx, tx, runs, failureThreshold); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_status_interval_backfills
+		(id, backfilled_at, failure_threshold)
+		VALUES (1, ?, ?)`, formatTime(time.Now().UTC()), failureThreshold); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func listReportableUptimeRunsTx(ctx context.Context, tx *sql.Tx) ([]uptimeRun, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT monitor_id, started_at, ended_at, ok, probe_count
 		FROM probe_outcome_runs
 		UNION ALL
 		SELECT monitor_id, checked_at AS started_at, checked_at AS ended_at, ok, 1 AS probe_count
@@ -1004,6 +1126,29 @@ func (s *Store) listReportableUptimeRuns(ctx context.Context) ([]uptimeRun, erro
 	return runs, rows.Err()
 }
 
+func backfillStatusIntervalsFromRuns(ctx context.Context, tx *sql.Tx, runs []uptimeRun, failureThreshold int) error {
+	for i, run := range runs {
+		statusValue := state.Up
+		if !run.OK {
+			statusValue = state.Failing
+			if run.ProbeCount >= failureThreshold {
+				statusValue = state.Down
+			}
+		}
+		var endedAt any
+		if i+1 < len(runs) && runs[i+1].MonitorID == run.MonitorID {
+			endedAt = formatTime(runs[i+1].StartedAt)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_status_intervals
+			(monitor_id, status, started_at, ended_at, downtime)
+			VALUES (?, ?, ?, ?, ?)`,
+			run.MonitorID, statusValue, formatTime(run.StartedAt), endedAt, boolInt(statusCountsAsDowntime(statusValue))); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (s *Store) listUncancelledMaintenanceWindows(ctx context.Context) ([]MaintenanceWindow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT
 		id, monitor_id, starts_at, ends_at, reason, created_by, created_at,
@@ -1024,27 +1169,6 @@ func (s *Store) listUncancelledMaintenanceWindows(ctx context.Context) ([]Mainte
 		windows = append(windows, window)
 	}
 	return windows, rows.Err()
-}
-
-func strictOutageIntervals(runs []uptimeRun, threshold int, now time.Time) []timeInterval {
-	var intervals []timeInterval
-	var outageStartedAt time.Time
-	for _, run := range runs {
-		if run.OK {
-			if !outageStartedAt.IsZero() {
-				intervals = append(intervals, timeInterval{Start: outageStartedAt, End: run.StartedAt})
-				outageStartedAt = time.Time{}
-			}
-			continue
-		}
-		if outageStartedAt.IsZero() && run.ProbeCount >= threshold {
-			outageStartedAt = run.StartedAt
-		}
-	}
-	if !outageStartedAt.IsZero() && now.After(outageStartedAt) {
-		intervals = append(intervals, timeInterval{Start: outageStartedAt, End: now})
-	}
-	return intervals
 }
 
 func applyAvailabilityWindow(stats UptimeWindowStats, firstProbe time.Time, cutoff time.Time, now time.Time, outages []timeInterval, maintenance []timeInterval) UptimeWindowStats {

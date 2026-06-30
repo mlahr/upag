@@ -826,6 +826,8 @@ func resetPostgresTestData(t *testing.T, store *PostgresStore) {
 		probe_hourly_rollups,
 		probe_daily_rollups,
 		probe_outcome_runs,
+		monitor_status_intervals,
+		monitor_status_interval_backfills,
 		maintenance_windows,
 		monitor_states,
 		observer_state,

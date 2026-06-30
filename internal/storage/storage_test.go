@@ -538,6 +538,103 @@ func TestListUptimeStatsUsesStrictAccountingForConfirmedOutages(t *testing.T) {
 	}
 }
 
+func TestSaveProbeAndStateMaintainsStatusIntervals(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	base := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for _, step := range []struct {
+		at     time.Time
+		status string
+		ok     bool
+	}{
+		{at: base, status: state.Up, ok: true},
+		{at: base.Add(time.Minute), status: state.Up, ok: true},
+		{at: base.Add(2 * time.Minute), status: state.Failing, ok: false},
+		{at: base.Add(3 * time.Minute), status: state.Up, ok: true},
+		{at: base.Add(4 * time.Minute), status: state.Failing, ok: false},
+		{at: base.Add(5 * time.Minute), status: state.Down, ok: false},
+		{at: base.Add(6 * time.Minute), status: state.Up, ok: true},
+	} {
+		_, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+			MonitorID: "home",
+			CheckedAt: step.at,
+			OK:        step.ok,
+		}, MonitorState{
+			MonitorID:     "home",
+			Name:          "Home",
+			URL:           "https://example.com/",
+			Status:        step.status,
+			LastCheckedAt: step.at,
+			UpdatedAt:     step.at,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	intervals := readStatusIntervals(t, store, "home")
+	if len(intervals) != 6 {
+		t.Fatalf("interval count = %d, want 6: %+v", len(intervals), intervals)
+	}
+	if intervals[0].status != state.Up || !intervals[0].startedAt.Equal(base) || !intervals[0].endedAt.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("first interval = %+v, want coalesced UP from base to +2m", intervals[0])
+	}
+	if intervals[1].status != state.Failing || intervals[1].downtime {
+		t.Fatalf("recovered failing interval = %+v, want non-downtime FAILING", intervals[1])
+	}
+	if intervals[3].status != state.Failing || !intervals[3].downtime {
+		t.Fatalf("confirmed failing interval = %+v, want downtime FAILING", intervals[3])
+	}
+	if intervals[4].status != state.Down || !intervals[4].downtime {
+		t.Fatalf("down interval = %+v, want downtime DOWN", intervals[4])
+	}
+	if intervals[5].status != state.Up || !intervals[5].endedAt.IsZero() {
+		t.Fatalf("open interval = %+v, want open UP", intervals[5])
+	}
+}
+
+func TestEnsureStatusIntervalsBackfilledIsIdempotent(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	for i, ok := range []bool{true, false, false, false, true} {
+		err := store.SaveProbeResult(context.Background(), ProbeResult{
+			MonitorID: "home",
+			CheckedAt: now.Add(time.Duration(i) * time.Minute),
+			OK:        ok,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	firstCount := tableCount(t, store, "monitor_status_intervals")
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), 3); err != nil {
+		t.Fatal(err)
+	}
+	secondCount := tableCount(t, store, "monitor_status_intervals")
+	if firstCount != secondCount {
+		t.Fatalf("interval count after second backfill = %d, want %d", secondCount, firstCount)
+	}
+	intervals := readStatusIntervals(t, store, "home")
+	if len(intervals) != 3 {
+		t.Fatalf("intervals = %+v, want up/down/up", intervals)
+	}
+	if intervals[1].status != state.Down || !intervals[1].downtime {
+		t.Fatalf("backfilled outage = %+v, want downtime DOWN", intervals[1])
+	}
+}
+
 func TestRollupAndPruneProbeResultsCompactsRawProbes(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
@@ -1245,6 +1342,43 @@ func saveTestState(t *testing.T, store *Store, monitorID string, now time.Time) 
 	if err != nil {
 		t.Fatal(err)
 	}
+}
+
+type testStatusInterval struct {
+	status    string
+	startedAt time.Time
+	endedAt   time.Time
+	downtime  bool
+}
+
+func readStatusIntervals(t *testing.T, store *Store, monitorID string) []testStatusInterval {
+	t.Helper()
+	rows, err := store.db.QueryContext(context.Background(), `SELECT status, started_at, ended_at, downtime
+		FROM monitor_status_intervals
+		WHERE monitor_id = ?
+		ORDER BY started_at, id`, monitorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var intervals []testStatusInterval
+	for rows.Next() {
+		var interval testStatusInterval
+		var startedAt string
+		var endedAt sql.NullString
+		var downtime int
+		if err := rows.Scan(&interval.status, &startedAt, &endedAt, &downtime); err != nil {
+			t.Fatal(err)
+		}
+		interval.startedAt = parseTime(startedAt)
+		interval.endedAt = parseNullTime(endedAt)
+		interval.downtime = intBool(downtime)
+		intervals = append(intervals, interval)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return intervals
 }
 
 func storeWithIncident(t *testing.T) (*Store, int64, time.Time) {
