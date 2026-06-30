@@ -299,8 +299,16 @@ func LoadFile(path string) (Config, error) {
 }
 
 func Parse(data []byte) (Config, error) {
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+	if err := validateConfigSchema(&root); err != nil {
+		return Config{}, fmt.Errorf("parse config: %w", err)
+	}
+
 	var cfg Config
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
+	if err := root.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config: %w", err)
 	}
 	cfg.ApplyDefaults()
@@ -308,6 +316,234 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+type schemaValidator func(*yaml.Node, string) error
+
+func validateConfigSchema(root *yaml.Node) error {
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return nil
+		}
+		root = root.Content[0]
+	}
+	return validateMapping(root, "", map[string]schemaValidator{
+		"http":      validateHTTPConfigSchema,
+		"alerts":    validateAlertsConfigSchema,
+		"smtp":      validateSMTPConfigSchema,
+		"mailtrap":  validateMailtrapConfigSchema,
+		"observer":  validateObserverConfigSchema,
+		"storage":   validateStorageConfigSchema,
+		"tenant_id": nil,
+		"defaults":  validateDefaultsSchema,
+		"monitors":  validateMonitorsSchema,
+	})
+}
+
+func validateMapping(node *yaml.Node, path string, fields map[string]schemaValidator) error {
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	seen := map[string]struct{}{}
+	for i := 0; i < len(node.Content); i += 2 {
+		key := node.Content[i]
+		value := node.Content[i+1]
+		if key.Kind != yaml.ScalarNode {
+			return fmt.Errorf("config field %s must be a string key", formatPath(path))
+		}
+		fieldPath := joinPath(path, key.Value)
+		validator, ok := fields[key.Value]
+		if !ok {
+			return fmt.Errorf("unknown config field %s", fieldPath)
+		}
+		if _, ok := seen[key.Value]; ok {
+			return fmt.Errorf("duplicate config field %s", fieldPath)
+		}
+		seen[key.Value] = struct{}{}
+		if validator != nil {
+			if err := validator(value, fieldPath); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func formatPath(path string) string {
+	if path == "" {
+		return "<root>"
+	}
+	return path
+}
+
+func joinPath(path, field string) string {
+	if path == "" {
+		return field
+	}
+	return path + "." + field
+}
+
+func validateHTTPConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"address": nil,
+		"port":    nil,
+	})
+}
+
+func validateAlertsConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"notification_retries": validateNotificationRetriesSchema,
+		"providers":            validateAlertProvidersSchema,
+	})
+}
+
+func validateNotificationRetriesSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"max_attempts": nil,
+		"backoff":      nil,
+	})
+}
+
+func validateAlertProvidersSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"smtp":     validateSMTPConfigSchema,
+		"mailtrap": validateMailtrapConfigSchema,
+		"telegram": validateTelegramConfigSchema,
+	})
+}
+
+func validateSMTPConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"host":       nil,
+		"port":       nil,
+		"tls":        nil,
+		"username":   nil,
+		"password":   nil,
+		"from":       nil,
+		"to":         nil,
+		"local_name": nil,
+	})
+}
+
+func validateMailtrapConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"token":     nil,
+		"endpoint":  nil,
+		"from":      nil,
+		"from_name": nil,
+		"to":        nil,
+	})
+}
+
+func validateTelegramConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"token":    nil,
+		"chat_ids": nil,
+		"endpoint": nil,
+	})
+}
+
+func validateObserverConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"enabled":            nil,
+		"interval":           nil,
+		"timeout":            nil,
+		"failure_threshold":  nil,
+		"recovery_threshold": nil,
+		"required_successes": nil,
+		"sentinels":          validateSentinelsSchema,
+	})
+}
+
+func validateSentinelsSchema(node *yaml.Node, path string) error {
+	if node.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for i, item := range node.Content {
+		itemPath := fmt.Sprintf("%s[%d]", path, i)
+		if err := validateMapping(item, itemPath, map[string]schemaValidator{
+			"id":                   nil,
+			"name":                 nil,
+			"url":                  nil,
+			"expected_status_code": nil,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateStorageConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"backend":              nil,
+		"sqlite":               validateSQLiteConfigSchema,
+		"postgres":             validatePostgresConfigSchema,
+		"probe_results":        validateRetentionConfigSchema,
+		"probe_minute_rollups": validateRetentionConfigSchema,
+		"probe_hourly_rollups": validateRetentionConfigSchema,
+		"probe_daily_rollups":  validateRetentionConfigSchema,
+	})
+}
+
+func validateSQLiteConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"path": nil,
+	})
+}
+
+func validatePostgresConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"dsn": nil,
+	})
+}
+
+func validateRetentionConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"retention": nil,
+	})
+}
+
+func validateDefaultsSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"interval":            nil,
+		"timeout":             nil,
+		"probe_retries":       nil,
+		"probe_retry_backoff": nil,
+		"failure_threshold":   nil,
+		"history_retention":   nil,
+	})
+}
+
+func validateMonitorsSchema(node *yaml.Node, path string) error {
+	if node.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for i, item := range node.Content {
+		itemPath := fmt.Sprintf("%s[%d]", path, i)
+		if err := validateMapping(item, itemPath, map[string]schemaValidator{
+			"id":                   nil,
+			"name":                 nil,
+			"url":                  nil,
+			"expected_status_code": nil,
+			"response_body":        validateResponseBodySchema,
+			"max_response_time":    nil,
+			"interval":             nil,
+			"timeout":              nil,
+			"insecure_skip_verify": nil,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateResponseBodySchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"must_contain":     nil,
+		"must_not_contain": nil,
+		"command":          nil,
+		"command_timeout":  nil,
+	})
 }
 
 func (c *Config) ApplyDefaults() {

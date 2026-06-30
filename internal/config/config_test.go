@@ -717,6 +717,198 @@ monitors:
 	}
 }
 
+func TestParseRejectsUnknownConfigFields(t *testing.T) {
+	tests := map[string]struct {
+		yaml string
+		want string
+	}{
+		"top-level": {
+			yaml: `
+unknown: true
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field unknown",
+		},
+		"defaults": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  failure_treshold: 3
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field defaults.failure_treshold",
+		},
+		"monitor-failure-threshold": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    failure_threshold: 5
+`,
+			want: "unknown config field monitors[0].failure_threshold",
+		},
+		"response-body": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+    response_body:
+      exact_match: Welcome
+`,
+			want: "unknown config field monitors[0].response_body.exact_match",
+		},
+		"observer": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+observer:
+  quorum: 1
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field observer.quorum",
+		},
+		"observer-sentinel": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+observer:
+  sentinels:
+    - id: one
+      name: One
+      url: https://example.com/
+      expected_status_code: 200
+      method: GET
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field observer.sentinels[0].method",
+		},
+		"storage-sqlite": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  sqlite:
+    filename: upag.sqlite
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field storage.sqlite.filename",
+		},
+		"storage-retention": {
+			yaml: `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  probe_results:
+    keep_for: 24h
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field storage.probe_results.keep_for",
+		},
+		"telegram-provider": {
+			yaml: `
+alerts:
+  providers:
+    telegram:
+      token: token-123
+      chat_ids: ["123456789"]
+      parse_mode: HTML
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`,
+			want: "unknown config field alerts.providers.telegram.parse_mode",
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse([]byte(tc.yaml))
+			if err == nil {
+				t.Fatal("expected parse error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("parse error %q does not contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseRejectsDuplicateConfigFields(t *testing.T) {
+	_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  interval: 30s
+  interval: 60s
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`))
+	if err == nil {
+		t.Fatal("expected parse error")
+	}
+	if !strings.Contains(err.Error(), "duplicate config field defaults.interval") {
+		t.Fatalf("parse error %q does not contain duplicate defaults.interval", err)
+	}
+}
+
 func TestParseRejectsMissingAlertProvider(t *testing.T) {
 	_, err := Parse([]byte(`
 monitors:
