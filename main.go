@@ -298,7 +298,12 @@ func runIncidents(args []string) error {
 	fs := flag.NewFlagSet("incidents", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of incidents to print")
+	sinceRaw := fs.String("since", "", "only print incidents since an RFC3339 timestamp or positive duration")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
+	if err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
@@ -318,7 +323,10 @@ func runIncidents(args []string) error {
 	}
 	defer store.Close()
 
-	rows, err := store.ListIncidents(ctx, *limit)
+	rows, err := store.ListIncidents(ctx, storage.IncidentFilter{
+		Limit: *limit,
+		Since: since,
+	})
 	if err != nil {
 		return err
 	}
@@ -330,11 +338,16 @@ func runIntervals(args []string) error {
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	limit := fs.Int("limit", 50, "maximum number of intervals to print")
+	sinceRaw := fs.String("since", "", "only print intervals since an RFC3339 timestamp or positive duration")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *limit <= 0 {
 		return fmt.Errorf("intervals --limit must be positive")
+	}
+	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
+	if err != nil {
+		return err
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -356,6 +369,7 @@ func runIntervals(args []string) error {
 	intervals, err := store.ListStatusIntervals(ctx, storage.StatusIntervalFilter{
 		MonitorID: *monitorID,
 		Limit:     *limit,
+		Since:     since,
 	})
 	if err != nil {
 		return err
@@ -367,7 +381,12 @@ func runFailures(args []string) error {
 	fs := flag.NewFlagSet("failures", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of failures per section")
+	sinceRaw := fs.String("since", "", "only print failures since an RFC3339 timestamp or positive duration")
 	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
+	if err != nil {
 		return err
 	}
 	if err := defaults.ApplyPaths(fs,
@@ -387,7 +406,10 @@ func runFailures(args []string) error {
 	}
 	defer store.Close()
 
-	failedProbes, err := store.ListFailedProbeResults(ctx, *limit)
+	failedProbes, err := store.ListFailedProbeResults(ctx, storage.ProbeResultFilter{
+		Limit: *limit,
+		Since: since,
+	})
 	if err != nil {
 		return err
 	}
@@ -395,7 +417,10 @@ func runFailures(args []string) error {
 	if err != nil {
 		return err
 	}
-	sentinelEvents, err := store.ListObserverSentinelEvents(ctx, *limit)
+	sentinelEvents, err := store.ListObserverSentinelEvents(ctx, storage.ObserverSentinelEventFilter{
+		Limit: *limit,
+		Since: since,
+	})
 	if err != nil {
 		return err
 	}
@@ -771,6 +796,23 @@ func parseCLITime(raw string, flagName string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp: %w", flagName, err)
 	}
 	return parsed.UTC(), nil
+}
+
+func parseCLISince(raw string, flagName string, now time.Time) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, nil
+	}
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC(), nil
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp or positive duration: %w", flagName, err)
+	}
+	if duration <= 0 {
+		return time.Time{}, fmt.Errorf("%s duration must be positive", flagName)
+	}
+	return now.UTC().Add(-duration), nil
 }
 
 func auditActor(explicit string) (string, error) {

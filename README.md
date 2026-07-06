@@ -166,6 +166,7 @@ Inspect monitor state and recent incidents from another shell:
 ```sh
 upag monitors --config ./config.yaml
 upag incidents --config ./config.yaml --limit 50
+upag incidents --config ./config.yaml --limit 50 --since 2026-06-23T00:00:00Z
 ```
 
 Schedule one-off maintenance when failures are expected:
@@ -702,7 +703,16 @@ Inspect stored state:
 ```sh
 upag monitors
 upag incidents --limit 50
+upag failures --limit 20 --since 24h
+upag intervals --monitor homepage --limit 20 --since 24h
 ```
+
+`--since` on `incidents`, `failures`, and `intervals` accepts either an
+RFC3339 timestamp or a positive Go duration. Duration values use Go
+`time.ParseDuration` syntax: a sequence of decimal numbers with units `ns`,
+`us` or `µs`, `ms`, `s`, `m`, and `h`, such as `30m`, `1.5h`, or `24h`.
+Calendar units such as `d`, `w`, `mo`, and `y` are not supported; use hour
+equivalents such as `168h` for seven days.
 
 Manage one-off maintenance windows:
 

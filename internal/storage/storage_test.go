@@ -81,7 +81,7 @@ func TestSaveProbeAndStatePersistsIncident(t *testing.T) {
 	if loaded.Status != state.Down || loaded.ConsecutiveFailures != 3 {
 		t.Fatalf("loaded state = %+v", loaded)
 	}
-	incidents, err := store.ListIncidents(context.Background(), 10)
+	incidents, err := store.ListIncidents(context.Background(), IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestListIncidentsIncludesFailedProbeBeforeTransition(t *testing.T) {
 		t.Fatalf("incident id = %d, want 0", incidentID)
 	}
 
-	incidents, err := store.ListIncidents(context.Background(), 10)
+	incidents, err := store.ListIncidents(context.Background(), IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1078,7 @@ func TestMaintenanceProbeResultsAreExcludedFromUptimeAndSyntheticIncidents(t *te
 	if retained.MaintenanceChecks != 1 || retained.MaintenanceFailedChecks != 1 {
 		t.Fatalf("maintenance stats = %+v, want one failed maintenance check", retained)
 	}
-	incidents, err := store.ListIncidents(context.Background(), 10)
+	incidents, err := store.ListIncidents(context.Background(), IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

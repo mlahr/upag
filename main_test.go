@@ -42,8 +42,54 @@ func TestRunRecognizesIntervalsCommand(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
 	configPath := writeSQLiteConfig(t, dbPath)
 	seedMonitorState(t, dbPath, "home")
-	if err := run([]string{"intervals", "--config", configPath, "--monitor", "home", "--limit", "10"}); err != nil {
+	if err := run([]string{"intervals", "--config", configPath, "--monitor", "home", "--limit", "10", "--since", "24h"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunRecognizesSinceOnLimitedCommands(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	seedMonitorState(t, dbPath, "home")
+
+	for _, args := range [][]string{
+		{"incidents", "--config", configPath, "--limit", "10", "--since", "2026-06-23T00:00:00Z"},
+		{"failures", "--config", configPath, "--limit", "10", "--since", "24h"},
+	} {
+		if err := run(args); err != nil {
+			t.Fatalf("run(%v): %v", args, err)
+		}
+	}
+}
+
+func TestParseCLISince(t *testing.T) {
+	now := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Time
+	}{
+		{name: "empty", raw: "", want: time.Time{}},
+		{name: "timestamp", raw: "2026-06-23T01:02:03Z", want: time.Date(2026, 6, 23, 1, 2, 3, 0, time.UTC)},
+		{name: "duration", raw: "24h", want: now.Add(-24 * time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCLISince(tc.raw, "--since", now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("parseCLISince(%q) = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
+	}
+
+	for _, raw := range []string{"nope", "0s", "-1h"} {
+		if _, err := parseCLISince(raw, "--since", now); err == nil {
+			t.Fatalf("parseCLISince(%q) returned nil error, want validation error", raw)
+		}
 	}
 }
 

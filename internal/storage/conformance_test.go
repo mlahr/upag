@@ -117,7 +117,7 @@ func TestStorageConformanceProbeStateIncidentAndSyntheticFailures(t *testing.T) 
 				t.Fatal(err)
 			}
 
-			incidents, err := store.ListIncidents(ctx, 10)
+			incidents, err := store.ListIncidents(ctx, IncidentFilter{Limit: 10})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -129,6 +129,13 @@ func TestStorageConformanceProbeStateIncidentAndSyntheticFailures(t *testing.T) 
 			}
 			if incidents[1].Transition != state.Down || incidents[1].Name != "Home" || incidents[1].StatusCode != 503 {
 				t.Fatalf("older incident = %+v, want Home DOWN incident", incidents[1])
+			}
+			recentIncidents, err := store.ListIncidents(ctx, IncidentFilter{Limit: 10, Since: failAt})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recentIncidents) != 1 || recentIncidents[0].MonitorID != "api" {
+				t.Fatalf("recent incidents = %+v, want only API synthetic failure", recentIncidents)
 			}
 		})
 	}
@@ -184,6 +191,20 @@ func TestStorageConformanceStatusIntervals(t *testing.T) {
 			}
 			if intervals[2].Status != state.Failing || !intervals[2].Downtime {
 				t.Fatalf("failing interval = %+v, want retroactive downtime FAILING", intervals[2])
+			}
+			recentIntervals, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{
+				MonitorID: "home",
+				Limit:     10,
+				Since:     base.Add(90 * time.Second),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recentIntervals) != 3 {
+				t.Fatalf("recent interval count = %d, want 3 overlapping intervals: %+v", len(recentIntervals), recentIntervals)
+			}
+			if recentIntervals[2].Status != state.Failing {
+				t.Fatalf("oldest recent interval = %+v, want overlapping FAILING interval", recentIntervals[2])
 			}
 		})
 	}
@@ -429,7 +450,7 @@ func TestStorageConformanceUptimeStatsMaintenanceSuppressionAndRollups(t *testin
 				t.Fatalf("downtime_seconds = %d, want 240", retained.DowntimeSeconds)
 			}
 
-			incidents, err := store.ListIncidents(ctx, 10)
+			incidents, err := store.ListIncidents(ctx, IncidentFilter{Limit: 10})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -512,7 +533,7 @@ func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			failedProbes, err := store.ListFailedProbeResults(ctx, 10)
+			failedProbes, err := store.ListFailedProbeResults(ctx, ProbeResultFilter{Limit: 10})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -527,6 +548,39 @@ func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
 			}
 			if failedProbes[1].ObserverSuppressed || failedProbes[1].MonitorID != "web" || failedProbes[1].Error != "timeout" {
 				t.Fatalf("second failed probe = %+v, want non-suppressed web probe with timeout", failedProbes[1])
+			}
+
+			recentFailedProbes, err := store.ListFailedProbeResults(ctx, ProbeResultFilter{Limit: 10, Since: now.Add(-2 * time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recentFailedProbes) != 1 || !recentFailedProbes[0].ObserverSuppressed {
+				t.Fatalf("recent failed probes = %+v, want only suppressed probe at cutoff", recentFailedProbes)
+			}
+
+			_, err = store.SaveObserverCheck(ctx, ObserverState{
+				Status:               state.ObserverDown,
+				ConsecutiveFailures:  1,
+				ConsecutiveSuccesses: 0,
+				LastCheckedAt:        now.Add(-3 * time.Minute),
+				LastFailureAt:        now.Add(-3 * time.Minute),
+				LastError:            "old sentinel failed",
+				UpdatedAt:            now.Add(-3 * time.Minute),
+			}, []ObserverSentinelResult{
+				{
+					SentinelID:         "old",
+					Name:               "Old",
+					URL:                "https://old.example.com",
+					ExpectedStatusCode: 204,
+					OK:                 false,
+					ObservedStatusCode: 0,
+					LatencyMS:          500,
+					Error:              "old connection refused",
+					CheckedAt:          now.Add(-3 * time.Minute),
+				},
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
 			}
 
 			incidentID, err := store.SaveObserverCheck(ctx, ObserverState{
@@ -565,15 +619,22 @@ func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
 			}
 			_ = incidentID
 
-			sentinelEvents, err := store.ListObserverSentinelEvents(ctx, 10)
+			sentinelEvents, err := store.ListObserverSentinelEvents(ctx, ObserverSentinelEventFilter{Limit: 10})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(sentinelEvents) != 1 {
-				t.Fatalf("ListObserverSentinelEvents = %d, want 1 (only failed sentinel)", len(sentinelEvents))
+			if len(sentinelEvents) != 2 {
+				t.Fatalf("ListObserverSentinelEvents = %d, want 2 failed sentinels", len(sentinelEvents))
 			}
 			if sentinelEvents[0].SentinelID != "gstatic" || sentinelEvents[0].OK {
 				t.Fatalf("sentinel event = %+v, want failed gstatic", sentinelEvents[0])
+			}
+			recentSentinelEvents, err := store.ListObserverSentinelEvents(ctx, ObserverSentinelEventFilter{Limit: 10, Since: now.Add(-time.Minute)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recentSentinelEvents) != 1 || recentSentinelEvents[0].SentinelID != "gstatic" {
+				t.Fatalf("recent sentinel events = %+v, want only gstatic", recentSentinelEvents)
 			}
 		})
 	}

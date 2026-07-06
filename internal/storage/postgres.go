@@ -709,19 +709,21 @@ func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIn
 	}
 	tenantID := TenantFromContext(ctx)
 	monitorID := strings.TrimSpace(filter.MonitorID)
-	var rows pgx.Rows
-	var err error
-	if monitorID == "" {
-		rows, err = s.pool.Query(ctx, `SELECT id, monitor_id, status, started_at, ended_at, downtime
-			FROM monitor_status_intervals
-			WHERE tenant_id = $1
-			ORDER BY started_at DESC, id DESC LIMIT $2`, tenantID, limit)
-	} else {
-		rows, err = s.pool.Query(ctx, `SELECT id, monitor_id, status, started_at, ended_at, downtime
-			FROM monitor_status_intervals
-			WHERE tenant_id = $1 AND monitor_id = $2
-			ORDER BY started_at DESC, id DESC LIMIT $3`, tenantID, monitorID, limit)
+	query := `SELECT id, monitor_id, status, started_at, ended_at, downtime
+		FROM monitor_status_intervals
+		WHERE tenant_id = $1`
+	args := []any{tenantID}
+	if monitorID != "" {
+		args = append(args, monitorID)
+		query += fmt.Sprintf(` AND monitor_id = $%d`, len(args))
 	}
+	if !filter.Since.IsZero() {
+		args = append(args, filter.Since.UTC())
+		query += fmt.Sprintf(` AND (started_at >= $%d OR ended_at IS NULL OR ended_at >= $%d)`, len(args), len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY started_at DESC, id DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1030,12 +1032,13 @@ func (s *PostgresStore) listUncancelledMaintenanceWindows(ctx context.Context) (
 	return windows, rows.Err()
 }
 
-func (s *PostgresStore) ListIncidents(ctx context.Context, limit int) ([]Incident, error) {
+func (s *PostgresStore) ListIncidents(ctx context.Context, filter IncidentFilter) ([]Incident, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	tenantID := TenantFromContext(ctx)
-	rows, err := s.pool.Query(ctx, `SELECT
+	query := `SELECT
 		id, monitor_id, name, transition, observed_at, error, status_code
 		FROM (
 			SELECT id, monitor_id, name, transition, observed_at, error, status_code
@@ -1058,8 +1061,15 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, limit int) ([]Inciden
 						AND incidents.monitor_id = probe_results.monitor_id
 						AND incidents.observed_at = probe_results.checked_at
 				)
-		) all_incidents
-		ORDER BY observed_at DESC, id DESC LIMIT $2`, tenantID, limit)
+		) all_incidents`
+	args := []any{tenantID}
+	if !filter.Since.IsZero() {
+		args = append(args, filter.Since.UTC())
+		query += fmt.Sprintf(` WHERE observed_at >= $%d`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY observed_at DESC, id DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1076,16 +1086,24 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, limit int) ([]Inciden
 	return incidents, rows.Err()
 }
 
-func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, limit int) ([]ProbeResult, error) {
+func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	tenantID := TenantFromContext(ctx)
-	rows, err := s.pool.Query(ctx, `SELECT
+	query := `SELECT
 		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
 		attempt_count, error, maintenance_window_id, observer_suppressed
-		FROM probe_results WHERE tenant_id = $1 AND ok = FALSE
-		ORDER BY checked_at DESC LIMIT $2`, tenantID, limit)
+		FROM probe_results WHERE tenant_id = $1 AND ok = FALSE`
+	args := []any{tenantID}
+	if !filter.Since.IsZero() {
+		args = append(args, filter.Since.UTC())
+		query += fmt.Sprintf(` AND checked_at >= $%d`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY checked_at DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1101,16 +1119,24 @@ func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, limit int) (
 	return results, rows.Err()
 }
 
-func (s *PostgresStore) ListObserverSentinelEvents(ctx context.Context, limit int) ([]ObserverSentinelResult, error) {
+func (s *PostgresStore) ListObserverSentinelEvents(ctx context.Context, filter ObserverSentinelEventFilter) ([]ObserverSentinelResult, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
 	tenantID := TenantFromContext(ctx)
-	rows, err := s.pool.Query(ctx, `SELECT
+	query := `SELECT
 		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
 		latency_ms, error, checked_at
-		FROM observer_sentinel_events WHERE tenant_id = $1
-		ORDER BY checked_at DESC LIMIT $2`, tenantID, limit)
+		FROM observer_sentinel_events WHERE tenant_id = $1`
+	args := []any{tenantID}
+	if !filter.Since.IsZero() {
+		args = append(args, filter.Since.UTC())
+		query += fmt.Sprintf(` AND checked_at >= $%d`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY checked_at DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

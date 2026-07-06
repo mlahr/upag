@@ -124,7 +124,7 @@ func TestPostgresStoreCoreBehavior(t *testing.T) {
 		t.Fatalf("state = %+v ok=%t, want DOWN with status code 503", state, ok)
 	}
 
-	incidents, err := store.ListIncidents(ctx, 10)
+	incidents, err := store.ListIncidents(ctx, IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,14 +596,14 @@ func TestPostgresStoreTenantIsolation(t *testing.T) {
 		t.Fatalf("tenant B windows = %+v, want one window %d", windowB, bWindowID)
 	}
 
-	incidentsA, err := store.ListIncidents(WithTenant(ctx, tenantA), 10)
+	incidentsA, err := store.ListIncidents(WithTenant(ctx, tenantA), IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(incidentsA) != 1 || incidentsA[0].MonitorID != "shared" || incidentsA[0].Transition != "DOWN" {
 		t.Fatalf("tenant A incidents = %+v, want one down incident for shared", incidentsA)
 	}
-	incidentsB, err := store.ListIncidents(WithTenant(ctx, tenantB), 10)
+	incidentsB, err := store.ListIncidents(WithTenant(ctx, tenantB), IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}

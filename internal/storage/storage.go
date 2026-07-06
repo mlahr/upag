@@ -26,9 +26,9 @@ type Backend interface {
 	EnsureStatusIntervalsBackfilled(context.Context, FailureThresholds) error
 	ListStatusIntervals(context.Context, StatusIntervalFilter) ([]StatusInterval, error)
 	ListUptimeStats(context.Context, time.Time, FailureThresholds) (map[string]UptimeStats, error)
-	ListIncidents(context.Context, int) ([]Incident, error)
-	ListFailedProbeResults(context.Context, int) ([]ProbeResult, error)
-	ListObserverSentinelEvents(context.Context, int) ([]ObserverSentinelResult, error)
+	ListIncidents(context.Context, IncidentFilter) ([]Incident, error)
+	ListFailedProbeResults(context.Context, ProbeResultFilter) ([]ProbeResult, error)
+	ListObserverSentinelEvents(context.Context, ObserverSentinelEventFilter) ([]ObserverSentinelResult, error)
 	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
 	ListActionableAlertDeliveryFailures(context.Context, int) ([]AlertNotification, error)
 	ListDueAlertNotificationRetries(context.Context, time.Time, int) ([]AlertNotificationRetry, error)
@@ -155,6 +155,22 @@ type StatusInterval struct {
 type StatusIntervalFilter struct {
 	MonitorID string
 	Limit     int
+	Since     time.Time
+}
+
+type IncidentFilter struct {
+	Limit int
+	Since time.Time
+}
+
+type ProbeResultFilter struct {
+	Limit int
+	Since time.Time
+}
+
+type ObserverSentinelEventFilter struct {
+	Limit int
+	Since time.Time
 }
 
 type FailureThresholds struct {
@@ -895,9 +911,17 @@ func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFi
 	query := `SELECT id, monitor_id, status, started_at, ended_at, downtime
 		FROM monitor_status_intervals`
 	args := []any{}
+	var where []string
 	if strings.TrimSpace(filter.MonitorID) != "" {
-		query += ` WHERE monitor_id = ?`
+		where = append(where, `monitor_id = ?`)
 		args = append(args, strings.TrimSpace(filter.MonitorID))
+	}
+	if !filter.Since.IsZero() {
+		where = append(where, `(started_at >= ? OR ended_at IS NULL OR ended_at >= ?)`)
+		args = append(args, formatTime(filter.Since), formatTime(filter.Since))
+	}
+	if len(where) > 0 {
+		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
 	query += ` ORDER BY started_at DESC, id DESC LIMIT ?`
 	args = append(args, limit)
@@ -1300,11 +1324,12 @@ func maxTime(a time.Time, b time.Time) time.Time {
 	return b
 }
 
-func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error) {
+func (s *Store) ListIncidents(ctx context.Context, filter IncidentFilter) ([]Incident, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT
+	query := `SELECT
 		id, monitor_id, name, transition, observed_at, error, status_code
 		FROM (
 			SELECT id, monitor_id, name, transition, observed_at, error, status_code
@@ -1323,8 +1348,15 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 					WHERE incidents.monitor_id = probe_results.monitor_id
 						AND incidents.observed_at = probe_results.checked_at
 				)
-		)
-		ORDER BY observed_at DESC, id DESC LIMIT ?`, limit)
+		)`
+	args := []any{}
+	if !filter.Since.IsZero() {
+		query += ` WHERE observed_at >= ?`
+		args = append(args, formatTime(filter.Since))
+	}
+	query += ` ORDER BY observed_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1343,15 +1375,23 @@ func (s *Store) ListIncidents(ctx context.Context, limit int) ([]Incident, error
 	return incidents, rows.Err()
 }
 
-func (s *Store) ListFailedProbeResults(ctx context.Context, limit int) ([]ProbeResult, error) {
+func (s *Store) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT
+	query := `SELECT
 		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
 		attempt_count, error, maintenance_window_id, observer_suppressed
-		FROM probe_results WHERE ok = 0
-		ORDER BY checked_at DESC LIMIT ?`, limit)
+		FROM probe_results WHERE ok = 0`
+	args := []any{}
+	if !filter.Since.IsZero() {
+		query += ` AND checked_at >= ?`
+		args = append(args, formatTime(filter.Since))
+	}
+	query += ` ORDER BY checked_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1367,15 +1407,23 @@ func (s *Store) ListFailedProbeResults(ctx context.Context, limit int) ([]ProbeR
 	return results, rows.Err()
 }
 
-func (s *Store) ListObserverSentinelEvents(ctx context.Context, limit int) ([]ObserverSentinelResult, error) {
+func (s *Store) ListObserverSentinelEvents(ctx context.Context, filter ObserverSentinelEventFilter) ([]ObserverSentinelResult, error) {
+	limit := filter.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT
+	query := `SELECT
 		sentinel_id, name, url, expected_status_code, ok, observed_status_code,
 		latency_ms, error, checked_at
-		FROM observer_sentinel_events
-		ORDER BY checked_at DESC LIMIT ?`, limit)
+		FROM observer_sentinel_events`
+	args := []any{}
+	if !filter.Since.IsZero() {
+		query += ` WHERE checked_at >= ?`
+		args = append(args, formatTime(filter.Since))
+	}
+	query += ` ORDER BY checked_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

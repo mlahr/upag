@@ -87,7 +87,7 @@ func TestProbeSuppressesAlertAndUptimeDuringMaintenance(t *testing.T) {
 	if retained.MaintenanceFailedChecks != 1 {
 		t.Fatalf("retained stats = %+v, want one failed maintenance check", retained)
 	}
-	incidents, err := store.ListIncidents(ctx, 10)
+	incidents, err := store.ListIncidents(ctx, storage.IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestProbeAlertsOnFirstFailureAfterMaintenanceEnds(t *testing.T) {
 	if got := sender.count(); got != 1 {
 		t.Fatalf("sent alerts = %d, want 1", got)
 	}
-	incidents, err := store.ListIncidents(ctx, 10)
+	incidents, err := store.ListIncidents(ctx, storage.IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestProbeSuppressesMonitorTransitionWhenObserverDown(t *testing.T) {
 	if ok != 0 || suppressed != 1 {
 		t.Fatalf("stored probe ok=%d observer_suppressed=%d, want 0 and 1", ok, suppressed)
 	}
-	incidents, err := store.ListIncidents(ctx, 10)
+	incidents, err := store.ListIncidents(ctx, storage.IncidentFilter{Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
