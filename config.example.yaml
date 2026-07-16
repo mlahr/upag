@@ -80,6 +80,13 @@ monitors:
     expected_status_code: 200
     failure_threshold: 2
     max_response_time: 500ms
+    # Redirects are not followed unless enabled. max_redirects defaults to 10.
+    # follow_redirects: true
+    # max_redirects: 5
+    # redirect_target:
+    #   exact: https://example.com/final
+    #   # Configure regex instead of exact for a full-final-URL match.
+    #   # regex: https://example\.com/users/[0-9]+
     response_body:
       must_contain:
         - Example Domain

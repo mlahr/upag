@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -46,6 +47,150 @@ func TestCheckDoesNotFollowRedirects(t *testing.T) {
 	})
 	if !result.OK {
 		t.Fatalf("expected redirect response to satisfy exact 302 check, got error %q", result.Error)
+	}
+}
+
+func TestCheckFollowsRedirectsAndAssertsFinalTargetAndBody(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			http.Redirect(w, r, "/intermediate", http.StatusFound)
+		case "/intermediate":
+			http.Redirect(w, r, "/final?source=redirect", http.StatusMovedPermanently)
+		case "/final":
+			_, _ = w.Write([]byte("final response body"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		FollowRedirects:    true,
+		MaxRedirects:       2,
+		RedirectTarget: config.RedirectTargetAssertions{
+			Exact: server.URL + "/final?source=redirect",
+		},
+		ResponseBody: config.ResponseBodyAssertions{
+			MustContain: []string{"final response"},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected final redirect target and body assertions to pass, got error %q", result.Error)
+	}
+	if result.FinalURL != server.URL+"/final?source=redirect" {
+		t.Fatalf("final URL = %q, want %q", result.FinalURL, server.URL+"/final?source=redirect")
+	}
+	if result.RedirectsFollowed != 2 {
+		t.Fatalf("redirects followed = %d, want 2", result.RedirectsFollowed)
+	}
+}
+
+func TestCheckRedirectTargetRegexMustMatchEntireFinalURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/users/42", http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	monitor := config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		FollowRedirects:    true,
+		MaxRedirects:       1,
+		RedirectTarget: config.RedirectTargetAssertions{
+			Regex: `/users/[0-9]+`,
+		},
+	}
+	result := Check(context.Background(), monitor)
+	if result.OK {
+		t.Fatal("expected substring-only redirect target regex to fail")
+	}
+	if !strings.Contains(result.Error, "did not fully match") {
+		t.Fatalf("error = %q, want full-match failure", result.Error)
+	}
+
+	monitor.RedirectTarget.Regex = regexp.QuoteMeta(server.URL) + `/users/[0-9]+`
+	result = Check(context.Background(), monitor)
+	if !result.OK {
+		t.Fatalf("expected full redirect target regex to pass, got error %q", result.Error)
+	}
+}
+
+func TestCheckRedirectTargetRequiresFollowedRedirect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		FollowRedirects:    true,
+		MaxRedirects:       1,
+		RedirectTarget: config.RedirectTargetAssertions{
+			Exact: server.URL,
+		},
+	})
+	if result.OK {
+		t.Fatal("expected redirect target assertion to fail when no redirect was followed")
+	}
+	if result.Error != "redirect target assertion requires at least one followed redirect" {
+		t.Fatalf("error = %q, want missing redirect failure", result.Error)
+	}
+}
+
+func TestCheckEnforcesExactRedirectLimit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			http.Redirect(w, r, "/one", http.StatusFound)
+		case "/one":
+			http.Redirect(w, r, "/two", http.StatusTemporaryRedirect)
+		case "/two":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	monitor := config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		FollowRedirects:    true,
+		MaxRedirects:       2,
+	}
+	result := Check(context.Background(), monitor)
+	if !result.OK {
+		t.Fatalf("expected two-hop chain to satisfy limit 2, got error %q", result.Error)
+	}
+
+	monitor.MaxRedirects = 1
+	result = Check(context.Background(), monitor)
+	if result.OK {
+		t.Fatal("expected two-hop chain to exceed limit 1")
+	}
+	if result.ObservedStatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("observed status = %d, want 307 from last received redirect", result.ObservedStatusCode)
+	}
+	if result.FinalURL != server.URL+"/one" {
+		t.Fatalf("final URL = %q, want last requested URL %q", result.FinalURL, server.URL+"/one")
+	}
+	if result.RedirectsFollowed != 1 {
+		t.Fatalf("redirects followed = %d, want 1", result.RedirectsFollowed)
+	}
+	if !strings.Contains(result.Error, "stopped after following 1 redirects") {
+		t.Fatalf("error = %q, want redirect-limit failure", result.Error)
 	}
 }
 

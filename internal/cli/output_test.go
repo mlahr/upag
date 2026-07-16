@@ -2,11 +2,76 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"upag/internal/storage"
 )
+
+func TestPrintDiagnosticText(t *testing.T) {
+	result := DiagnosticResult{
+		MonitorID:          "home",
+		Name:               "Homepage",
+		ConfiguredURL:      "https://example.com/start",
+		FinalURL:           "https://example.com/final",
+		OK:                 false,
+		ExpectedStatusCode: 200,
+		ObservedStatusCode: 503,
+		RedirectsFollowed:  1,
+		LatencyMS:          12,
+		ResponseTimeMS:     18,
+		CheckedAt:          time.Date(2026, 7, 16, 1, 2, 3, 456, time.UTC),
+		Error:              "expected HTTP status 200, observed HTTP status 503",
+	}
+
+	var buf bytes.Buffer
+	if err := PrintDiagnosticText(&buf, result); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	for _, want := range []string{
+		"MONITOR ID", "home", "NAME", "Homepage", "CONFIGURED URL", result.ConfiguredURL,
+		"FINAL URL", result.FinalURL, "OK", "false", "EXPECTED STATUS", "200",
+		"OBSERVED STATUS", "503", "REDIRECTS FOLLOWED", "1", "LATENCY MS", "12",
+		"RESPONSE TIME MS", "18", "2026-07-16T01:02:03.000000456Z", result.Error,
+	} {
+		if !contains(output, want) {
+			t.Fatalf("text output %q does not contain %q", output, want)
+		}
+	}
+}
+
+func TestPrintDiagnosticJSON(t *testing.T) {
+	want := DiagnosticResult{
+		MonitorID:          "home",
+		Name:               "Homepage",
+		ConfiguredURL:      "https://example.com/start?a=1&b=2",
+		FinalURL:           "https://example.com/final",
+		OK:                 true,
+		ExpectedStatusCode: 200,
+		ObservedStatusCode: 200,
+		RedirectsFollowed:  1,
+		LatencyMS:          4,
+		ResponseTimeMS:     9,
+		CheckedAt:          time.Date(2026, 7, 16, 1, 2, 3, 0, time.UTC),
+	}
+
+	var buf bytes.Buffer
+	if err := PrintDiagnosticJSON(&buf, want); err != nil {
+		t.Fatal(err)
+	}
+	var got DiagnosticResult
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("decode JSON output %q: %v", buf.String(), err)
+	}
+	if got != want {
+		t.Fatalf("decoded result = %+v, want %+v", got, want)
+	}
+	if contains(buf.String(), `\u0026`) {
+		t.Fatalf("JSON output unnecessarily HTML-escaped URL: %q", buf.String())
+	}
+}
 
 func TestPrintFailures(t *testing.T) {
 	now := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os/exec"
+	"regexp"
 	"strings"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 type Result struct {
 	OK                 bool
 	ObservedStatusCode int
+	FinalURL           string
+	RedirectsFollowed  int
 	Latency            time.Duration
 	ResponseTime       time.Duration
 	Error              string
@@ -39,11 +42,23 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 		return result
 	}
 	req.Header.Set("User-Agent", "upag/0.1")
+	redirectsFollowed := 0
+	maxRedirects := monitor.MaxRedirects
+	if maxRedirects == 0 {
+		maxRedirects = config.DefaultMaxRedirects
+	}
 
 	client := &http.Client{
 		Timeout: monitor.Timeout.Duration,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
+			if !monitor.FollowRedirects {
+				return http.ErrUseLastResponse
+			}
+			if len(via) > maxRedirects {
+				return fmt.Errorf("stopped after following %d redirects", maxRedirects)
+			}
+			redirectsFollowed++
+			return nil
 		},
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: monitor.InsecureSkipVerify},
@@ -53,6 +68,8 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 
 	resp, err := client.Do(req)
 	result.Latency = time.Since(start)
+	result.RedirectsFollowed = redirectsFollowed
+	recordFinalResponse(&result, resp)
 	if err != nil {
 		result.Error = err.Error()
 		return result
@@ -80,6 +97,10 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 
 	if resp.StatusCode != monitor.ExpectedStatusCode {
 		result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
+		return result
+	}
+	if err := assertRedirectTarget(monitor.RedirectTarget, redirectsFollowed, resp); err != nil {
+		result.Error = err.Error()
 		return result
 	}
 
@@ -113,6 +134,43 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 
 	result.OK = true
 	return result
+}
+
+func recordFinalResponse(result *Result, resp *http.Response) {
+	if resp == nil {
+		return
+	}
+	result.ObservedStatusCode = resp.StatusCode
+	if resp.Request != nil && resp.Request.URL != nil {
+		result.FinalURL = resp.Request.URL.String()
+	}
+}
+
+func assertRedirectTarget(assertion config.RedirectTargetAssertions, redirectsFollowed int, resp *http.Response) error {
+	if !assertion.Configured() {
+		return nil
+	}
+	if redirectsFollowed == 0 {
+		return errors.New("redirect target assertion requires at least one followed redirect")
+	}
+	if resp.Request == nil || resp.Request.URL == nil {
+		return errors.New("final redirect target URL is unavailable")
+	}
+
+	actual := resp.Request.URL.String()
+	if assertion.Exact != "" && actual != assertion.Exact {
+		return fmt.Errorf("final redirect target URL %q did not exactly match %q", actual, assertion.Exact)
+	}
+	if assertion.Regex != "" {
+		pattern, err := regexp.Compile(`\A(?:` + assertion.Regex + `)\z`)
+		if err != nil {
+			return fmt.Errorf("invalid redirect target regular expression %q: %v", assertion.Regex, err)
+		}
+		if !pattern.MatchString(actual) {
+			return fmt.Errorf("final redirect target URL %q did not fully match regular expression %q", actual, assertion.Regex)
+		}
+	}
+	return nil
 }
 
 func readLimitedResponseBody(r io.Reader, limit int64) ([]byte, error) {

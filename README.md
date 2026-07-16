@@ -23,6 +23,8 @@ DOWN or UP.
 - Foreground and background daemon commands.
 - Configuration reload by signal without restarting the daemon process.
 - CLI inspection commands for current monitor state and recent incidents.
+- Standalone text or JSON diagnostics for one configured monitor without state
+  changes, alerting, or daemon coordination.
 - Optional local HTTP endpoints for daemon health, monitor state, and alert
   delivery failures.
 
@@ -168,6 +170,20 @@ upag monitors --config ./config.yaml
 upag incidents --config ./config.yaml --limit 50
 upag incidents --config ./config.yaml --limit 50 --since 2026-06-23T00:00:00Z
 ```
+
+Run one immediate diagnostic attempt for a configured monitor:
+
+```sh
+upag check --config ./config.yaml --monitor homepage
+upag check --config ./config.yaml --monitor homepage --format json
+```
+
+The diagnostic exits successfully only when every configured assertion passes.
+It performs one HTTP attempt without configured probe retries, does not contact
+the daemon, does not open storage, and does not update state, incidents, failure
+counters, maintenance data, or alerts. It does execute a configured
+`response_body.command`; that external program may have its own side effects.
+Diagnostic output never includes the response body or response headers.
 
 Schedule one-off maintenance when failures are expected:
 
@@ -589,6 +605,14 @@ Optional monitor fields:
   before this monitor transitions DOWN. Defaults to `defaults.failure_threshold`.
 - `max_response_time`: maximum full response duration.
 - `insecure_skip_verify`: disables HTTPS certificate verification when `true`.
+- `follow_redirects`: follows HTTP redirects when `true`. Defaults to `false`.
+- `max_redirects`: maximum number of redirect responses to follow. Defaults to
+  `10` when `follow_redirects` is `true` and is invalid otherwise.
+- `redirect_target.exact`: exact absolute final URL required after following at
+  least one redirect.
+- `redirect_target.regex`: Go regular expression that must match the entire
+  absolute final URL after following at least one redirect. Configure either
+  `exact` or `regex`, not both.
 - `response_body.must_contain`: list of case-sensitive strings that must all
   appear in the response body.
 - `response_body.must_not_contain`: list of case-sensitive strings that must
@@ -598,10 +622,29 @@ Optional monitor fields:
 - `response_body.command_timeout`: maximum external command runtime. Defaults
   to `10s` when `response_body.command` is configured.
 
-Redirects are not followed. For example, a monitor expecting `302` succeeds when
-the first response is `302`.
+Redirects are not followed by default. For example, a monitor expecting `302`
+succeeds when the first response is `302`. Redirect following and an optional
+final-target assertion can be enabled per monitor:
 
-Body assertions are evaluated only after the observed status code matches
+```yaml
+follow_redirects: true
+max_redirects: 5
+redirect_target:
+  exact: https://example.com/final
+  # Or use a full-URL regular expression instead:
+  # regex: https://example\.com/users/[0-9]+
+```
+
+A redirect hop is one followed redirect response. A `max_redirects` value of
+`2` permits two hops and rejects a third. Relative `Location` values are
+resolved before the final URL is asserted. Exact matching uses the serialized
+absolute final request URL without additional canonicalization or query sorting.
+A configured `redirect_target` fails when the response does not follow at least
+one redirect, even if the original request URL would otherwise match.
+
+When redirects are followed, `expected_status_code`, `redirect_target`, body
+assertions, and response-time assertions apply to the final response. Target and
+body assertions are evaluated only after the observed status code matches
 `expected_status_code`.
 
 When `response_body.command` is configured, `upag` runs the command directly
@@ -616,11 +659,12 @@ response_body:
   command: ["sh", "-c", "jq -e '.status == \"ok\"' | grep true"]
 ```
 
-`latency_ms` in logs and stored probe history is time to response headers. When
+`latency_ms` in logs and stored probe history is time to response headers,
+including the complete redirect chain when redirects are followed. When
 `max_response_time` or `response_body` is configured, `response_time_ms` is the
-full response duration, ending after the response body has been read. Otherwise,
-`response_time_ms` is `0`. External response body command runtime is not
-included in `response_time_ms`.
+full response duration, ending after the final response body has been read.
+Otherwise, `response_time_ms` is `0`. External response body command runtime is
+not included in `response_time_ms`.
 
 ## Operations
 

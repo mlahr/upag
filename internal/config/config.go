@@ -126,16 +126,28 @@ type Defaults struct {
 }
 
 type MonitorConfig struct {
-	ID                 string                 `yaml:"id"`
-	Name               string                 `yaml:"name"`
-	URL                string                 `yaml:"url"`
-	ExpectedStatusCode int                    `yaml:"expected_status_code"`
-	ResponseBody       ResponseBodyAssertions `yaml:"response_body"`
-	MaxResponseTime    Duration               `yaml:"max_response_time"`
-	Interval           Duration               `yaml:"interval"`
-	Timeout            Duration               `yaml:"timeout"`
-	FailureThreshold   int                    `yaml:"failure_threshold"`
-	InsecureSkipVerify bool                   `yaml:"insecure_skip_verify"`
+	ID                 string                   `yaml:"id"`
+	Name               string                   `yaml:"name"`
+	URL                string                   `yaml:"url"`
+	ExpectedStatusCode int                      `yaml:"expected_status_code"`
+	FollowRedirects    bool                     `yaml:"follow_redirects"`
+	MaxRedirects       int                      `yaml:"max_redirects"`
+	RedirectTarget     RedirectTargetAssertions `yaml:"redirect_target"`
+	ResponseBody       ResponseBodyAssertions   `yaml:"response_body"`
+	MaxResponseTime    Duration                 `yaml:"max_response_time"`
+	Interval           Duration                 `yaml:"interval"`
+	Timeout            Duration                 `yaml:"timeout"`
+	FailureThreshold   int                      `yaml:"failure_threshold"`
+	InsecureSkipVerify bool                     `yaml:"insecure_skip_verify"`
+}
+
+type RedirectTargetAssertions struct {
+	Exact string `yaml:"exact"`
+	Regex string `yaml:"regex"`
+}
+
+func (a RedirectTargetAssertions) Configured() bool {
+	return a.Exact != "" || a.Regex != ""
 }
 
 type ResponseBodyAssertions struct {
@@ -144,6 +156,8 @@ type ResponseBodyAssertions struct {
 	Command        []string `yaml:"command"`
 	CommandTimeout Duration `yaml:"command_timeout"`
 }
+
+const DefaultMaxRedirects = 10
 
 func (a ResponseBodyAssertions) Configured() bool {
 	return len(a.MustContain) > 0 || len(a.MustNotContain) > 0 || len(a.Command) != 0
@@ -474,6 +488,41 @@ func validateSentinelsSchema(node *yaml.Node, path string) error {
 	return nil
 }
 
+func validatePositiveInteger(node *yaml.Node, path string) error {
+	var value int
+	if err := node.Decode(&value); err != nil {
+		return nil
+	}
+	if value <= 0 {
+		return fmt.Errorf("config field %s must be positive", path)
+	}
+	return nil
+}
+
+func validateRedirectTargetSchema(node *yaml.Node, path string) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("config field %s must be a mapping", path)
+	}
+	if len(node.Content) == 0 {
+		return fmt.Errorf("config field %s must configure exactly one of exact or regex", path)
+	}
+	return validateMapping(node, path, map[string]schemaValidator{
+		"exact": validateNonEmptyString,
+		"regex": validateNonEmptyString,
+	})
+}
+
+func validateNonEmptyString(node *yaml.Node, path string) error {
+	var value string
+	if err := node.Decode(&value); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(value) == "" {
+		return fmt.Errorf("config field %s must not be empty", path)
+	}
+	return nil
+}
+
 func validateStorageConfigSchema(node *yaml.Node, path string) error {
 	return validateMapping(node, path, map[string]schemaValidator{
 		"backend":              nil,
@@ -526,6 +575,9 @@ func validateMonitorsSchema(node *yaml.Node, path string) error {
 			"name":                 nil,
 			"url":                  nil,
 			"expected_status_code": nil,
+			"follow_redirects":     nil,
+			"max_redirects":        validatePositiveInteger,
+			"redirect_target":      validateRedirectTargetSchema,
 			"response_body":        validateResponseBodySchema,
 			"max_response_time":    nil,
 			"interval":             nil,
@@ -644,6 +696,9 @@ func (c *Config) ApplyDefaults() {
 		c.Observer.Sentinels = BuiltInObserverSentinels()
 	}
 	for i := range c.Monitors {
+		if c.Monitors[i].FollowRedirects && c.Monitors[i].MaxRedirects == 0 {
+			c.Monitors[i].MaxRedirects = DefaultMaxRedirects
+		}
 		if c.Monitors[i].Interval.Duration == 0 {
 			c.Monitors[i].Interval = c.Defaults.Interval
 		}
@@ -928,6 +983,28 @@ func (c Config) Validate() error {
 		if monitor.MaxResponseTime.Duration < 0 {
 			errs = append(errs, fmt.Errorf("%s.max_response_time must be positive", prefix))
 		}
+		if monitor.MaxRedirects < 0 {
+			errs = append(errs, fmt.Errorf("%s.max_redirects must be positive", prefix))
+		}
+		if !monitor.FollowRedirects && monitor.MaxRedirects > 0 {
+			errs = append(errs, fmt.Errorf("%s.max_redirects requires follow_redirects", prefix))
+		}
+		if !monitor.FollowRedirects && monitor.RedirectTarget.Configured() {
+			errs = append(errs, fmt.Errorf("%s.redirect_target requires follow_redirects", prefix))
+		}
+		if monitor.RedirectTarget.Exact != "" && monitor.RedirectTarget.Regex != "" {
+			errs = append(errs, fmt.Errorf("%s.redirect_target must configure exactly one of exact or regex", prefix))
+		}
+		if monitor.RedirectTarget.Exact != "" {
+			if err := validateHTTPURL(monitor.RedirectTarget.Exact); err != nil {
+				errs = append(errs, fmt.Errorf("%s.redirect_target.exact: %w", prefix, err))
+			}
+		}
+		if monitor.RedirectTarget.Regex != "" {
+			if _, err := regexp.Compile(fullURLRegexPattern(monitor.RedirectTarget.Regex)); err != nil {
+				errs = append(errs, fmt.Errorf("%s.redirect_target.regex: invalid regular expression: %w", prefix, err))
+			}
+		}
 		if monitor.ResponseBody.Command != nil && len(monitor.ResponseBody.Command) == 0 {
 			errs = append(errs, fmt.Errorf("%s.response_body.command must contain at least one item", prefix))
 		}
@@ -955,6 +1032,10 @@ func (c Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func fullURLRegexPattern(pattern string) string {
+	return `\A(?:` + pattern + `)\z`
 }
 
 func validateHTTPURL(raw string) error {

@@ -2,17 +2,172 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"upag/internal/cli"
 	"upag/internal/defaults"
 	"upag/internal/state"
 	"upag/internal/storage"
 )
+
+func TestRunCheckPrintsRedirectDiagnosticWithoutOpeningStorage(t *testing.T) {
+	const responseBody = "ready secret diagnostic body"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/" {
+			http.Redirect(w, r, "/final", http.StatusFound)
+			return
+		}
+		_, _ = w.Write([]byte(responseBody))
+	}))
+	defer server.Close()
+
+	storagePath := filepath.Join(t.TempDir(), "missing", "diagnostic.sqlite")
+	configPath := writeDiagnosticConfig(t, `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+storage:
+  backend: sqlite
+  sqlite:
+    path: `+storagePath+`
+monitors:
+  - id: home
+    name: Homepage
+    url: `+server.URL+`
+    expected_status_code: 200
+    follow_redirects: true
+    max_redirects: 1
+    redirect_target:
+      exact: `+server.URL+`/final
+    response_body:
+      must_contain: [ready]
+`)
+	withPackageDefaultsPath(t, writeDefaultsFile(t, "UPAG_CONFIG="+configPath+"\n"))
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{"check", "--monitor", "home", "--format", "json"})
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	var result cli.DiagnosticResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode check output %q: %v", stdout, err)
+	}
+	if !result.OK || result.MonitorID != "home" || result.ObservedStatusCode != http.StatusOK {
+		t.Fatalf("diagnostic result = %+v, want successful home check", result)
+	}
+	if result.FinalURL != server.URL+"/final" || result.RedirectsFollowed != 1 {
+		t.Fatalf("diagnostic redirect metadata = URL %q, hops %d", result.FinalURL, result.RedirectsFollowed)
+	}
+	if strings.Contains(stdout, responseBody) {
+		t.Fatalf("diagnostic output exposed response body: %q", stdout)
+	}
+	stdout = captureStdout(t, func() {
+		runErr = run([]string{"check", "--monitor", "home"})
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	for _, want := range []string{"MONITOR ID", "home", "FINAL URL", server.URL + "/final", "OK", "true"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("default text output %q does not contain %q", stdout, want)
+		}
+	}
+	if strings.Contains(stdout, responseBody) {
+		t.Fatalf("text diagnostic output exposed response body: %q", stdout)
+	}
+	if _, err := os.Stat(storagePath); !os.IsNotExist(err) {
+		t.Fatalf("diagnostic check created or accessed storage path %q: %v", storagePath, err)
+	}
+}
+
+func TestRunCheckExecutesCommandOnceWithoutConfiguredRetries(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"ready":true}`))
+	}))
+	defer server.Close()
+
+	configPath := writeDiagnosticConfig(t, `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  probe_retries: 5
+  probe_retry_backoff: 1ms
+monitors:
+  - id: api
+    name: API
+    url: `+server.URL+`
+    expected_status_code: 200
+    response_body:
+      command: ["sh", "-c", "exit 7"]
+`)
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{"check", "--config", configPath, "--monitor", "api", "--format", "json"})
+	})
+	if runErr == nil || runErr.Error() != "diagnostic check failed" {
+		t.Fatalf("run error = %v, want diagnostic check failed", runErr)
+	}
+	if requests.Load() != 1 {
+		t.Fatalf("HTTP requests = %d, want exactly one diagnostic attempt", requests.Load())
+	}
+	var result cli.DiagnosticResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode failed check output %q: %v", stdout, err)
+	}
+	if result.OK || !strings.Contains(result.Error, `response body command "sh" failed with exit status 7`) {
+		t.Fatalf("diagnostic result = %+v, want command assertion failure", result)
+	}
+}
+
+func TestRunCheckValidatesArgumentsAndMonitor(t *testing.T) {
+	configPath := writeDiagnosticConfig(t, `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Homepage
+    url: https://example.com/
+    expected_status_code: 200
+`)
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing monitor", args: []string{"check", "--config", configPath}, want: "check requires --monitor"},
+		{name: "unknown monitor", args: []string{"check", "--config", configPath, "--monitor", "missing"}, want: `monitor "missing" is not configured`},
+		{name: "invalid format", args: []string{"check", "--config", configPath, "--monitor", "home", "--format", "yaml"}, want: "check --format must be one of: text, json"},
+		{name: "positional argument", args: []string{"check", "home"}, want: "check does not accept positional arguments"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := run(tc.args)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("run(%v) error = %v, want text %q", tc.args, err, tc.want)
+			}
+		})
+	}
+}
 
 func TestRunRecognizesDaemonStatusCommand(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
@@ -336,7 +491,7 @@ func TestUsageMentionsDaemonAndMonitorCommands(t *testing.T) {
 		t.Fatal("usage returned nil error")
 	}
 	got := err.Error()
-	for _, want := range []string{"start", "stop", "status", "restart", "config", "monitors", "incidents", "maintenance", "storage"} {
+	for _, want := range []string{"start", "stop", "status", "restart", "config", "check", "monitors", "incidents", "maintenance", "storage"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("usage = %q, missing %q", got, want)
 		}
@@ -361,6 +516,15 @@ monitors:
     url: https://example.com/
     expected_status_code: 200
 `), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return configPath
+}
+
+func writeDiagnosticConfig(t *testing.T, contents string) string {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "diagnostic.yaml")
+	if err := os.WriteFile(configPath, []byte(contents), 0644); err != nil {
 		t.Fatal(err)
 	}
 	return configPath

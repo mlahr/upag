@@ -764,6 +764,106 @@ monitors:
 	}
 }
 
+func TestParseAcceptsRedirectConfiguration(t *testing.T) {
+	tests := []struct {
+		name             string
+		redirectConfig   string
+		wantMaxRedirects int
+		wantExact        string
+		wantRegex        string
+	}{
+		{
+			name: "exact target with default limit",
+			redirectConfig: `    follow_redirects: true
+    redirect_target:
+      exact: https://example.com/final
+`,
+			wantMaxRedirects: DefaultMaxRedirects,
+			wantExact:        "https://example.com/final",
+		},
+		{
+			name: "regex target with explicit limit",
+			redirectConfig: `    follow_redirects: true
+    max_redirects: 3
+    redirect_target:
+      regex: https://example\.com/users/[0-9]+
+`,
+			wantMaxRedirects: 3,
+			wantRegex:        `https://example\.com/users/[0-9]+`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+` + tc.redirectConfig))
+			if err != nil {
+				t.Fatal(err)
+			}
+			monitor := cfg.Monitors[0]
+			if !monitor.FollowRedirects {
+				t.Fatal("follow_redirects = false, want true")
+			}
+			if monitor.MaxRedirects != tc.wantMaxRedirects {
+				t.Fatalf("max_redirects = %d, want %d", monitor.MaxRedirects, tc.wantMaxRedirects)
+			}
+			if monitor.RedirectTarget.Exact != tc.wantExact || monitor.RedirectTarget.Regex != tc.wantRegex {
+				t.Fatalf("redirect_target = %+v, want exact %q and regex %q", monitor.RedirectTarget, tc.wantExact, tc.wantRegex)
+			}
+		})
+	}
+}
+
+func TestParseRejectsInvalidRedirectConfiguration(t *testing.T) {
+	tests := []struct {
+		name           string
+		redirectConfig string
+		want           string
+	}{
+		{name: "zero limit", redirectConfig: "    follow_redirects: true\n    max_redirects: 0\n", want: "monitors[0].max_redirects must be positive"},
+		{name: "negative limit", redirectConfig: "    follow_redirects: true\n    max_redirects: -1\n", want: "monitors[0].max_redirects must be positive"},
+		{name: "limit without following", redirectConfig: "    max_redirects: 2\n", want: "monitors[0].max_redirects requires follow_redirects"},
+		{name: "target without following", redirectConfig: "    redirect_target:\n      exact: https://example.com/final\n", want: "monitors[0].redirect_target requires follow_redirects"},
+		{name: "empty target", redirectConfig: "    follow_redirects: true\n    redirect_target: {}\n", want: "monitors[0].redirect_target must configure exactly one of exact or regex"},
+		{name: "empty exact target", redirectConfig: "    follow_redirects: true\n    redirect_target:\n      exact: \"\"\n", want: "monitors[0].redirect_target.exact must not be empty"},
+		{name: "both target assertions", redirectConfig: "    follow_redirects: true\n    redirect_target:\n      exact: https://example.com/final\n      regex: https://example\\.com/.*\n", want: "monitors[0].redirect_target must configure exactly one of exact or regex"},
+		{name: "invalid exact URL", redirectConfig: "    follow_redirects: true\n    redirect_target:\n      exact: /final\n", want: "monitors[0].redirect_target.exact: scheme must be http or https"},
+		{name: "invalid regex", redirectConfig: "    follow_redirects: true\n    redirect_target:\n      regex: (\n", want: "monitors[0].redirect_target.regex: invalid regular expression"},
+		{name: "unknown target field", redirectConfig: "    follow_redirects: true\n    redirect_target:\n      contains: example.com\n", want: "unknown config field monitors[0].redirect_target.contains"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse([]byte(`
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+` + tc.redirectConfig))
+			if err == nil {
+				t.Fatal("Parse returned nil error, want redirect configuration error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %q, want text %q", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestParseRejectsUnknownConfigFields(t *testing.T) {
 	tests := map[string]struct {
 		yaml string

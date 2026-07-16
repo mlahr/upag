@@ -19,6 +19,7 @@ import (
 	"golang.org/x/term"
 
 	"upag/internal/app"
+	"upag/internal/checker"
 	"upag/internal/cli"
 	"upag/internal/config"
 	"upag/internal/daemon"
@@ -60,6 +61,8 @@ func run(args []string) error {
 		return runRestart(args[1:])
 	case "config":
 		return runConfig(args[1:])
+	case "check":
+		return runCheck(args[1:])
 	case "monitors":
 		return runMonitors(args[1:])
 	case "incidents":
@@ -75,6 +78,77 @@ func run(args []string) error {
 	default:
 		return usage()
 	}
+}
+
+func runCheck(args []string) error {
+	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	monitorID := fs.String("monitor", "", "monitor ID")
+	format := fs.String("format", "text", "output format: text or json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("check does not accept positional arguments")
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
+	}
+	if *monitorID == "" {
+		return fmt.Errorf("check requires --monitor")
+	}
+	if *format != "text" && *format != "json" {
+		return fmt.Errorf("check --format must be one of: text, json")
+	}
+
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	var monitor config.MonitorConfig
+	found := false
+	for _, candidate := range cfg.Monitors {
+		if candidate.ID == *monitorID {
+			monitor = candidate
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("monitor %q is not configured", *monitorID)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	result := checker.Check(ctx, monitor)
+	diagnostic := cli.DiagnosticResult{
+		MonitorID:          monitor.ID,
+		Name:               monitor.Name,
+		ConfiguredURL:      monitor.URL,
+		FinalURL:           result.FinalURL,
+		OK:                 result.OK,
+		ExpectedStatusCode: monitor.ExpectedStatusCode,
+		ObservedStatusCode: result.ObservedStatusCode,
+		RedirectsFollowed:  result.RedirectsFollowed,
+		LatencyMS:          result.Latency.Milliseconds(),
+		ResponseTimeMS:     result.ResponseTime.Milliseconds(),
+		CheckedAt:          result.CheckedAt.UTC(),
+		Error:              result.Error,
+	}
+	if *format == "json" {
+		err = cli.PrintDiagnosticJSON(os.Stdout, diagnostic)
+	} else {
+		err = cli.PrintDiagnosticText(os.Stdout, diagnostic)
+	}
+	if err != nil {
+		return err
+	}
+	if !result.OK {
+		return fmt.Errorf("diagnostic check failed")
+	}
+	return nil
 }
 
 func runDaemon(args []string) error {
@@ -838,5 +912,5 @@ func storageUsage() error {
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|monitors|incidents|intervals|failures|maintenance|storage> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]")
 }
