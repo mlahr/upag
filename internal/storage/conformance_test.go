@@ -463,6 +463,57 @@ func TestStorageConformanceUptimeStatsMaintenanceSuppressionAndRollups(t *testin
 	}
 }
 
+func TestStorageConformanceDailyUptimeSplitsConfirmedOutageAcrossUTCDays(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := context.Background()
+			now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+			steps := []struct {
+				at     time.Time
+				status string
+				ok     bool
+			}{
+				{at: time.Date(2026, 7, 14, 6, 0, 0, 0, time.UTC), status: state.Up, ok: true},
+				{at: time.Date(2026, 7, 14, 23, 0, 0, 0, time.UTC), status: state.Failing, ok: false},
+				{at: time.Date(2026, 7, 15, 0, 0, 0, 0, time.UTC), status: state.Down, ok: false},
+				{at: time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC), status: state.Up, ok: true},
+			}
+			for _, step := range steps {
+				_, err := store.SaveProbeAndState(ctx, ProbeResult{
+					MonitorID: "home",
+					CheckedAt: step.at,
+					OK:        step.ok,
+				}, MonitorState{
+					MonitorID:     "home",
+					Name:          "Home",
+					URL:           "https://example.com/",
+					Status:        step.status,
+					LastCheckedAt: step.at,
+					UpdatedAt:     step.at,
+				}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			daily, err := store.ListDailyUptimeStats(ctx, now, 3, SingleFailureThreshold(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			home := daily["home"]
+			if len(home) != 3 {
+				t.Fatalf("daily entries = %d, want 3", len(home))
+			}
+			assertDailyUptime(t, home[0], "2026-07-14", 18*60*60, 60*60)
+			assertDailyUptime(t, home[1], "2026-07-15", 24*60*60, 60*60)
+			assertDailyUptime(t, home[2], "2026-07-16", 12*60*60, 0)
+		})
+	}
+}
+
 func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {

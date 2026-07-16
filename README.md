@@ -504,6 +504,21 @@ subtracting maintenance. `uptime_percent` is
 to two decimal places. For a window with no reportable seconds,
 `uptime_percent` is `null`.
 
+`GET /status/history` returns the daily strict-accounting availability used by
+calendar and uptime-tick consumers. The response contains every monitor in the
+current status feed and exactly 90 UTC calendar dates, ordered oldest to newest
+and including the current date. Each daily entry contains `date`,
+`reportable_seconds`, `downtime_seconds`, and `uptime_percent`. Dates before a
+monitor's first reportable probe, and dates whose covered duration is entirely
+excluded by maintenance, have zero reportable and downtime seconds and a null
+percentage. Confirmed outages that cross a UTC midnight are split by their
+actual overlap with each date; an open outage accrues through `generated_at`.
+
+The history endpoint is intentionally derived from confirmed status intervals,
+not raw failed probes. It therefore uses the same failure-threshold,
+maintenance, and observer-suppression semantics as the aggregate uptime windows
+returned by `GET /status`.
+
 ### Defaults
 
 `defaults` apply to monitors that do not override the value:
