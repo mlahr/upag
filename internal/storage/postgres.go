@@ -784,6 +784,29 @@ func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, thre
 	return stats, nil
 }
 
+func (s *PostgresStore) ListDailyUptimeStats(ctx context.Context, now time.Time, days int, thresholds FailureThresholds) (map[string][]DailyUptimeStats, error) {
+	if err := s.EnsureStatusIntervalsBackfilled(ctx, thresholds); err != nil {
+		return nil, err
+	}
+	retained, err := s.listUptimeWindowStats(ctx, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	outages, err := s.listDowntimeIntervals(ctx, now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	maintenance, err := s.listUncancelledMaintenanceWindows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	states, err := s.ListStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return dailyUptimeStats(now, days, states, retained, outages, maintenance), nil
+}
+
 func (s *PostgresStore) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
 	tenantID := TenantFromContext(ctx)
 	rawWhere := ""

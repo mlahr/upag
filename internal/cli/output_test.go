@@ -73,6 +73,20 @@ func TestPrintDiagnosticJSON(t *testing.T) {
 	}
 }
 
+func TestPrintDiagnosticTextOmitsEmptyError(t *testing.T) {
+	var buf bytes.Buffer
+	if err := PrintDiagnosticText(&buf, DiagnosticResult{
+		MonitorID: "home",
+		OK:        true,
+		CheckedAt: time.Date(2026, 7, 16, 1, 2, 3, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if contains(buf.String(), "ERROR") {
+		t.Fatalf("successful diagnostic output contains ERROR row: %q", buf.String())
+	}
+}
+
 func TestPrintFailures(t *testing.T) {
 	now := time.Date(2026, 6, 28, 10, 0, 0, 0, time.UTC)
 	probes := []storage.ProbeResult{

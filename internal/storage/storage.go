@@ -26,6 +26,7 @@ type Backend interface {
 	EnsureStatusIntervalsBackfilled(context.Context, FailureThresholds) error
 	ListStatusIntervals(context.Context, StatusIntervalFilter) ([]StatusInterval, error)
 	ListUptimeStats(context.Context, time.Time, FailureThresholds) (map[string]UptimeStats, error)
+	ListDailyUptimeStats(context.Context, time.Time, int, FailureThresholds) (map[string][]DailyUptimeStats, error)
 	ListIncidents(context.Context, IncidentFilter) ([]Incident, error)
 	ListFailedProbeResults(context.Context, ProbeResultFilter) ([]ProbeResult, error)
 	ListObserverSentinelEvents(context.Context, ObserverSentinelEventFilter) ([]ObserverSentinelResult, error)
@@ -141,6 +142,12 @@ type UptimeWindowStats struct {
 	ReportableSeconds       int64
 	WindowStartedAt         time.Time
 	WindowEndedAt           time.Time
+}
+
+type DailyUptimeStats struct {
+	Date              time.Time
+	DowntimeSeconds   int64
+	ReportableSeconds int64
 }
 
 type StatusInterval struct {
@@ -981,6 +988,29 @@ func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, thresholds F
 	return stats, nil
 }
 
+func (s *Store) ListDailyUptimeStats(ctx context.Context, now time.Time, days int, thresholds FailureThresholds) (map[string][]DailyUptimeStats, error) {
+	if err := s.EnsureStatusIntervalsBackfilled(ctx, thresholds); err != nil {
+		return nil, err
+	}
+	retained, err := s.listUptimeWindowStats(ctx, time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	outages, err := s.listDowntimeIntervals(ctx, now.UTC())
+	if err != nil {
+		return nil, err
+	}
+	maintenance, err := s.listUncancelledMaintenanceWindows(ctx)
+	if err != nil {
+		return nil, err
+	}
+	states, err := s.ListStates(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return dailyUptimeStats(now, days, states, retained, outages, maintenance), nil
+}
+
 func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
 	query, args := uptimeWindowQuery(cutoff)
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -1072,6 +1102,57 @@ type uptimeRun struct {
 type timeInterval struct {
 	Start time.Time
 	End   time.Time
+}
+
+func dailyUptimeStats(now time.Time, days int, states []MonitorState, retained map[string]UptimeWindowStats, outagesByMonitor map[string][]timeInterval, maintenance []MaintenanceWindow) map[string][]DailyUptimeStats {
+	result := make(map[string][]DailyUptimeStats, len(states))
+	if days <= 0 {
+		return result
+	}
+	now = now.UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	firstDay := today.AddDate(0, 0, -(days - 1))
+	maintenanceByMonitor := map[string][]timeInterval{}
+	for _, window := range maintenance {
+		maintenanceByMonitor[window.MonitorID] = append(maintenanceByMonitor[window.MonitorID], timeInterval{Start: window.StartsAt.UTC(), End: window.EndsAt.UTC()})
+	}
+	for _, state := range states {
+		entries := make([]DailyUptimeStats, 0, days)
+		firstProbe := retained[state.MonitorID].WindowStartedAt.UTC()
+		for offset := 0; offset < days; offset++ {
+			dayStart := firstDay.AddDate(0, 0, offset)
+			dayEnd := dayStart.AddDate(0, 0, 1)
+			coverageStart := maxTime(dayStart, firstProbe)
+			coverageEnd := minTime(dayEnd, now)
+			entry := DailyUptimeStats{Date: dayStart}
+			if !firstProbe.IsZero() && coverageEnd.After(coverageStart) {
+				maintenanceIntervals := maintenanceByMonitor[state.MonitorID]
+				reportable := coverageEnd.Sub(coverageStart) - overlapDuration(coverageStart, coverageEnd, maintenanceIntervals)
+				if reportable < 0 {
+					reportable = 0
+				}
+				var downtime time.Duration
+				for _, outage := range outagesByMonitor[state.MonitorID] {
+					overlapStart, overlapEnd, ok := clippedInterval(coverageStart, coverageEnd, outage)
+					if !ok {
+						continue
+					}
+					outageDuration := overlapEnd.Sub(overlapStart) - overlapDuration(overlapStart, overlapEnd, maintenanceIntervals)
+					if outageDuration > 0 {
+						downtime += outageDuration
+					}
+				}
+				if downtime > reportable {
+					downtime = reportable
+				}
+				entry.ReportableSeconds = int64(reportable / time.Second)
+				entry.DowntimeSeconds = int64(downtime / time.Second)
+			}
+			entries = append(entries, entry)
+		}
+		result[state.MonitorID] = entries
+	}
+	return result
 }
 
 func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, stats map[string]UptimeStats) error {

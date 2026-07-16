@@ -14,11 +14,15 @@ import (
 	"upag/internal/storage"
 )
 
-const alertFailureLimit = 50
+const (
+	alertFailureLimit = 50
+	dailyHistoryDays  = 90
+)
 
 type Store interface {
 	ListStates(ctx context.Context) ([]storage.MonitorState, error)
 	ListUptimeStats(ctx context.Context, now time.Time, thresholds storage.FailureThresholds) (map[string]storage.UptimeStats, error)
+	ListDailyUptimeStats(ctx context.Context, now time.Time, days int, thresholds storage.FailureThresholds) (map[string][]storage.DailyUptimeStats, error)
 	ListActionableAlertDeliveryFailures(ctx context.Context, limit int) ([]storage.AlertNotification, error)
 	ListMaintenanceWindows(ctx context.Context, filter storage.MaintenanceWindowFilter) ([]storage.MaintenanceWindow, error)
 	GetObserverState(ctx context.Context) (storage.ObserverState, bool, error)
@@ -143,6 +147,24 @@ func NewHandler(store Store, tenantID string, metadata MetadataProvider) http.Ha
 			AlertDeliveryFailures: alertFailureResponses(failures),
 		})
 	})
+	mux.HandleFunc("/status/history", func(w http.ResponseWriter, r *http.Request) {
+		if !allowGet(w, r) {
+			return
+		}
+		ctx := storage.WithTenant(r.Context(), tenantID)
+		states, err := store.ListStates(ctx)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
+		now := time.Now().UTC()
+		stats, err := store.ListDailyUptimeStats(ctx, now, dailyHistoryDays, metadata().FailureThresholds)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, errorResponse{Error: err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, dailyHistoryResponseFromStats(states, stats, now))
+	})
 	return mux
 }
 
@@ -222,6 +244,33 @@ type uptimeWindowResponse struct {
 	UptimePercent           *float64   `json:"uptime_percent"`
 	WindowStartedAt         *time.Time `json:"window_started_at"`
 	WindowEndedAt           *time.Time `json:"window_ended_at"`
+}
+
+type dailyHistoryResponse struct {
+	Status      string                        `json:"status"`
+	GeneratedAt *time.Time                    `json:"generated_at"`
+	Timezone    string                        `json:"timezone"`
+	Range       dailyHistoryRangeResponse     `json:"range"`
+	Monitors    []monitorDailyHistoryResponse `json:"monitors"`
+}
+
+type dailyHistoryRangeResponse struct {
+	Days      int    `json:"days"`
+	StartedOn string `json:"started_on"`
+	EndedOn   string `json:"ended_on"`
+}
+
+type monitorDailyHistoryResponse struct {
+	ID   string                `json:"id"`
+	Name string                `json:"name"`
+	Days []dailyUptimeResponse `json:"days"`
+}
+
+type dailyUptimeResponse struct {
+	Date              string   `json:"date"`
+	ReportableSeconds int64    `json:"reportable_seconds"`
+	DowntimeSeconds   int64    `json:"downtime_seconds"`
+	UptimePercent     *float64 `json:"uptime_percent"`
 }
 
 type maintenanceResponse struct {
@@ -345,6 +394,36 @@ func uptimeWindowResponseFromStats(stats storage.UptimeWindowStats) uptimeWindow
 		UptimePercent:           uptimePercent(stats.DowntimeSeconds, stats.ReportableSeconds),
 		WindowStartedAt:         timePtr(stats.WindowStartedAt),
 		WindowEndedAt:           timePtr(stats.WindowEndedAt),
+	}
+}
+
+func dailyHistoryResponseFromStats(states []storage.MonitorState, stats map[string][]storage.DailyUptimeStats, now time.Time) dailyHistoryResponse {
+	now = now.UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	monitors := make([]monitorDailyHistoryResponse, 0, len(states))
+	for _, state := range states {
+		days := stats[state.MonitorID]
+		responses := make([]dailyUptimeResponse, 0, len(days))
+		for _, day := range days {
+			responses = append(responses, dailyUptimeResponse{
+				Date:              day.Date.UTC().Format("2006-01-02"),
+				ReportableSeconds: day.ReportableSeconds,
+				DowntimeSeconds:   day.DowntimeSeconds,
+				UptimePercent:     uptimePercent(day.DowntimeSeconds, day.ReportableSeconds),
+			})
+		}
+		monitors = append(monitors, monitorDailyHistoryResponse{ID: state.MonitorID, Name: state.Name, Days: responses})
+	}
+	return dailyHistoryResponse{
+		Status:      "ok",
+		GeneratedAt: timePtr(now),
+		Timezone:    "UTC",
+		Range: dailyHistoryRangeResponse{
+			Days:      dailyHistoryDays,
+			StartedOn: today.AddDate(0, 0, -(dailyHistoryDays - 1)).Format("2006-01-02"),
+			EndedOn:   today.Format("2006-01-02"),
+		},
+		Monitors: monitors,
 	}
 }
 

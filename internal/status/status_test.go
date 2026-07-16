@@ -16,6 +16,7 @@ import (
 type fakeStore struct {
 	states      []storage.MonitorState
 	uptime      map[string]storage.UptimeStats
+	daily       map[string][]storage.DailyUptimeStats
 	failures    []storage.AlertNotification
 	maintenance []storage.MaintenanceWindow
 	observer    storage.ObserverState
@@ -29,6 +30,10 @@ func (s fakeStore) ListStates(context.Context) ([]storage.MonitorState, error) {
 
 func (s fakeStore) ListUptimeStats(context.Context, time.Time, storage.FailureThresholds) (map[string]storage.UptimeStats, error) {
 	return s.uptime, nil
+}
+
+func (s fakeStore) ListDailyUptimeStats(context.Context, time.Time, int, storage.FailureThresholds) (map[string][]storage.DailyUptimeStats, error) {
+	return s.daily, nil
 }
 
 func (s fakeStore) EnsureStatusIntervalsBackfilled(context.Context, storage.FailureThresholds) error {
@@ -81,6 +86,11 @@ func (s *tenantAwareStore) ListUptimeStats(ctx context.Context, now time.Time, t
 	return s.fakeStore.ListUptimeStats(ctx, now, thresholds)
 }
 
+func (s *tenantAwareStore) ListDailyUptimeStats(ctx context.Context, now time.Time, days int, thresholds storage.FailureThresholds) (map[string][]storage.DailyUptimeStats, error) {
+	s.recordTenant(ctx)
+	return s.fakeStore.ListDailyUptimeStats(ctx, now, days, thresholds)
+}
+
 func (s *tenantAwareStore) EnsureStatusIntervalsBackfilled(ctx context.Context, thresholds storage.FailureThresholds) error {
 	s.recordTenant(ctx)
 	return s.fakeStore.EnsureStatusIntervalsBackfilled(ctx, thresholds)
@@ -127,6 +137,43 @@ func TestHealthReturnsLivenessJSON(t *testing.T) {
 	}
 	if body["started_at"] != "2026-06-22T02:15:04Z" {
 		t.Fatalf("started_at = %#v, want RFC3339 UTC timestamp", body["started_at"])
+	}
+}
+
+func TestStatusHistoryReturnsNinetyUTCDays(t *testing.T) {
+	start := time.Date(2026, 4, 18, 0, 0, 0, 0, time.UTC)
+	days := make([]storage.DailyUptimeStats, 0, dailyHistoryDays)
+	for index := 0; index < dailyHistoryDays; index++ {
+		days = append(days, storage.DailyUptimeStats{
+			Date:              start.AddDate(0, 0, index),
+			ReportableSeconds: 86400,
+		})
+	}
+	days[len(days)-1].DowntimeSeconds = 3600
+
+	handler := NewHandler(fakeStore{
+		states: []storage.MonitorState{{MonitorID: "home", Name: "Home"}},
+		daily:  map[string][]storage.DailyUptimeStats{"home": days},
+	}, "tenant-one", func() Metadata { return Metadata{FailureThresholds: storage.SingleFailureThreshold(3)} })
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/status/history", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status history code = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+
+	var body dailyHistoryResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Status != "ok" || body.Timezone != "UTC" || body.Range.Days != dailyHistoryDays {
+		t.Fatalf("status history metadata = %+v", body)
+	}
+	if len(body.Monitors) != 1 || len(body.Monitors[0].Days) != dailyHistoryDays {
+		t.Fatalf("status history monitors = %+v, want one monitor with 90 days", body.Monitors)
+	}
+	last := body.Monitors[0].Days[dailyHistoryDays-1]
+	if last.Date != "2026-07-16" || last.UptimePercent == nil || *last.UptimePercent != 95.83 {
+		t.Fatalf("last daily uptime = %+v, want 95.83 percent", last)
 	}
 }
 

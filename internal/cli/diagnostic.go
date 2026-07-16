@@ -25,10 +25,11 @@ type DiagnosticResult struct {
 
 func PrintDiagnosticText(w io.Writer, result DiagnosticResult) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fields := []struct {
+	type field struct {
 		label string
 		value any
-	}{
+	}
+	fields := []field{
 		{label: "MONITOR ID", value: result.MonitorID},
 		{label: "NAME", value: result.Name},
 		{label: "CONFIGURED URL", value: result.ConfiguredURL},
@@ -40,7 +41,9 @@ func PrintDiagnosticText(w io.Writer, result DiagnosticResult) error {
 		{label: "LATENCY MS", value: result.LatencyMS},
 		{label: "RESPONSE TIME MS", value: result.ResponseTimeMS},
 		{label: "CHECKED AT", value: result.CheckedAt.UTC().Format(time.RFC3339Nano)},
-		{label: "ERROR", value: emptyDash(result.Error)},
+	}
+	if result.Error != "" {
+		fields = append(fields, field{label: "ERROR", value: result.Error})
 	}
 	for _, field := range fields {
 		if _, err := fmt.Fprintf(tw, "%s\t%v\n", field.label, field.value); err != nil {

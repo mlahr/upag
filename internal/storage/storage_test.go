@@ -538,6 +538,56 @@ func TestListUptimeStatsUsesStrictAccountingForConfirmedOutages(t *testing.T) {
 	}
 }
 
+func TestDailyUptimeStatsSplitsConfirmedOutagesAtUTCDayBoundaries(t *testing.T) {
+	now := time.Date(2026, 7, 16, 12, 0, 0, 0, time.UTC)
+	states := []MonitorState{
+		{MonitorID: "home"},
+		{MonitorID: "new"},
+	}
+	retained := map[string]UptimeWindowStats{
+		"home": {WindowStartedAt: time.Date(2026, 7, 14, 6, 0, 0, 0, time.UTC)},
+	}
+	outages := map[string][]timeInterval{
+		"home": {
+			{Start: time.Date(2026, 7, 14, 23, 0, 0, 0, time.UTC), End: time.Date(2026, 7, 15, 1, 0, 0, 0, time.UTC)},
+			{Start: time.Date(2026, 7, 16, 0, 0, 0, 0, time.UTC), End: now},
+		},
+	}
+	maintenance := []MaintenanceWindow{
+		{
+			MonitorID: "home",
+			StartsAt:  time.Date(2026, 7, 15, 0, 30, 0, 0, time.UTC),
+			EndsAt:    time.Date(2026, 7, 15, 0, 45, 0, 0, time.UTC),
+		},
+	}
+
+	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance)
+	home := stats["home"]
+	if len(home) != 3 {
+		t.Fatalf("home daily entries = %d, want 3", len(home))
+	}
+	assertDailyUptime(t, home[0], "2026-07-14", 18*60*60, 60*60)
+	assertDailyUptime(t, home[1], "2026-07-15", (24*60*60)-(15*60), 45*60)
+	assertDailyUptime(t, home[2], "2026-07-16", 12*60*60, 12*60*60)
+
+	newMonitor := stats["new"]
+	if len(newMonitor) != 3 {
+		t.Fatalf("new daily entries = %d, want 3", len(newMonitor))
+	}
+	for _, entry := range newMonitor {
+		if entry.ReportableSeconds != 0 || entry.DowntimeSeconds != 0 {
+			t.Fatalf("new monitor entry = %+v, want no reportable data", entry)
+		}
+	}
+}
+
+func assertDailyUptime(t *testing.T, got DailyUptimeStats, date string, reportableSeconds int64, downtimeSeconds int64) {
+	t.Helper()
+	if got.Date.Format("2006-01-02") != date || got.ReportableSeconds != reportableSeconds || got.DowntimeSeconds != downtimeSeconds {
+		t.Fatalf("daily uptime = %+v, want date %s, reportable %d, downtime %d", got, date, reportableSeconds, downtimeSeconds)
+	}
+}
+
 func TestSaveProbeAndStateMaintainsStatusIntervals(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {
