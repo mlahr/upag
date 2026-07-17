@@ -43,6 +43,13 @@ func run(args []string) error {
 		return usage()
 	}
 
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		if len(args) != 1 {
+			return fmt.Errorf("%s does not accept arguments", args[0])
+		}
+		return printHelp(os.Stdout)
+	}
+
 	if args[0] == "--version" {
 		fmt.Fprintln(os.Stdout, "upag", version)
 		return nil
@@ -911,6 +918,40 @@ func storageUsage() error {
 	return fmt.Errorf("usage: upag storage <migrate|dsn> [flags]")
 }
 
+func printHelp(w io.Writer) error {
+	_, err := fmt.Fprint(w, `upag - lightweight HTTP(S) uptime monitor
+
+Usage:
+  upag <command> [flags]
+  upag help
+  upag --help
+
+Daemon commands:
+  run          Run the daemon in the foreground
+  start        Start the daemon in the background
+  stop         Stop the background daemon
+  status       Report whether the background daemon is running
+  restart      Restart the background daemon
+  config       Manage the running daemon's configuration
+
+Monitoring commands:
+  check        Run one diagnostic check without changing stored state
+  monitors     List current monitor states
+  incidents    List recorded incidents
+  intervals    List monitor status intervals
+  failures     List failed probes and observer failures
+  maintenance  Add, cancel, or list maintenance windows
+
+Storage commands:
+  storage      Configure or migrate storage
+
+Global options:
+  -h, --help   Show this help page
+  --version    Print the upag version
+`)
+	return err
+}
+
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]")
+	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
 }

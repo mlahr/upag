@@ -498,6 +498,43 @@ func TestUsageMentionsDaemonAndMonitorCommands(t *testing.T) {
 	}
 }
 
+func TestRunPrintsHelp(t *testing.T) {
+	var outputs []string
+	for _, arg := range []string{"help", "--help", "-h"} {
+		var runErr error
+		output := captureStdout(t, func() {
+			runErr = run([]string{arg})
+		})
+		if runErr != nil {
+			t.Fatalf("run(%q) error = %v, want nil", arg, runErr)
+		}
+		for _, want := range []string{
+			"upag - lightweight HTTP(S) uptime monitor",
+			"Usage:",
+			"Daemon commands:",
+			"Monitoring commands:",
+			"Storage commands:",
+			"Global options:",
+			"--version",
+		} {
+			if !strings.Contains(output, want) {
+				t.Errorf("run(%q) output is missing %q:\n%s", arg, want, output)
+			}
+		}
+		outputs = append(outputs, output)
+	}
+	if outputs[0] != outputs[1] || outputs[0] != outputs[2] {
+		t.Fatal("help, --help, and -h produced different help pages")
+	}
+}
+
+func TestRunHelpRejectsArguments(t *testing.T) {
+	err := run([]string{"help", "check"})
+	if err == nil || err.Error() != "help does not accept arguments" {
+		t.Fatalf("run help error = %v, want help argument error", err)
+	}
+}
+
 func writeSQLiteConfig(t *testing.T, dbPath string) string {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
