@@ -952,6 +952,12 @@ func (s *PostgresStore) EnsureStatusIntervalsBackfilled(ctx context.Context, thr
 		return err
 	}
 	defer tx.Rollback(ctx)
+	// Acquire this before the first DELETE takes its MVCC snapshot. Otherwise a
+	// concurrent status transition can commit a new open interval after that
+	// snapshot, leaving it behind for the rebuild to conflict with.
+	if _, err := tx.Exec(ctx, `LOCK TABLE monitor_status_intervals IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
 
 	var marker string
 	err = tx.QueryRow(ctx, `SELECT tenant_id FROM monitor_status_interval_backfills WHERE tenant_id = $1`, tenantID).Scan(&marker)

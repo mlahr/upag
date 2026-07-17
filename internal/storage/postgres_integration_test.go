@@ -816,6 +816,85 @@ func TestMigrateSQLiteToPostgresUsesExplicitTenantID(t *testing.T) {
 	}
 }
 
+func TestPostgresStatusIntervalBackfillSerializesConcurrentTransition(t *testing.T) {
+	ctx := context.Background()
+	store, err := OpenPostgres(ctx, postgresTestDSN)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	resetPostgresTestData(t, store)
+
+	base := time.Date(2026, 7, 17, 1, 0, 0, 0, time.UTC)
+	if _, err := store.SaveProbeAndState(ctx, ProbeResult{
+		MonitorID: "home",
+		CheckedAt: base,
+		OK:        true,
+	}, MonitorState{
+		MonitorID:     "home",
+		Name:          "Home",
+		URL:           "https://example.com/",
+		Status:        state.Up,
+		LastCheckedAt: base,
+		UpdatedAt:     base,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureStatusIntervalsBackfilled(ctx, SingleFailureThreshold(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.pool.Exec(ctx, `DELETE FROM monitor_status_interval_backfills WHERE tenant_id = $1`, defaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+
+	writer, err := store.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback(ctx)
+	transitionAt := base.Add(time.Minute)
+	if _, err := writer.Exec(ctx, `UPDATE monitor_status_intervals
+		SET ended_at = $1
+		WHERE tenant_id = $2 AND monitor_id = $3 AND ended_at IS NULL`, transitionAt, defaultTenantID, "home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.Exec(ctx, `INSERT INTO monitor_status_intervals
+		(tenant_id, monitor_id, status, started_at, ended_at, downtime)
+		VALUES ($1, $2, $3, $4, NULL, TRUE)`, defaultTenantID, "home", state.Down, transitionAt); err != nil {
+		t.Fatal(err)
+	}
+
+	started := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		close(started)
+		backfillCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		result <- store.EnsureStatusIntervalsBackfilled(backfillCtx, SingleFailureThreshold(1))
+	}()
+	<-started
+	select {
+	case err := <-result:
+		t.Fatalf("backfill completed before concurrent writer committed: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := writer.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("backfill after concurrent transition: %v", err)
+	}
+
+	var openCount int
+	if err := store.pool.QueryRow(ctx, `SELECT COUNT(*) FROM monitor_status_intervals
+		WHERE tenant_id = $1 AND monitor_id = $2 AND ended_at IS NULL`, defaultTenantID, "home").Scan(&openCount); err != nil {
+		t.Fatal(err)
+	}
+	if openCount != 1 {
+		t.Fatalf("open interval count = %d, want 1", openCount)
+	}
+}
+
 func resetPostgresTestData(t *testing.T, store *PostgresStore) {
 	t.Helper()
 	_, err := store.pool.Exec(context.Background(), `TRUNCATE
