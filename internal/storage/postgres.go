@@ -419,6 +419,10 @@ CREATE TABLE IF NOT EXISTS monitor_status_interval_backfills (
 );
 `,
 		},
+		{
+			ID:  "0006_maintenance_status_intervals",
+			SQL: `DELETE FROM monitor_status_interval_backfills;`,
+		},
 	}
 }
 
@@ -481,8 +485,10 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 		next.LastObservedStatusCode, next.UpdatedAt.UTC()); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
 	}
-	if err := postgresSaveStatusInterval(ctx, tx, tenantID, next.MonitorID, next.Status, next.UpdatedAt); err != nil {
-		return 0, fmt.Errorf("save monitor status interval: %w", err)
+	if next.Status != state.Maintenance {
+		if err := postgresSaveStatusInterval(ctx, tx, tenantID, next.MonitorID, next.Status, next.UpdatedAt); err != nil {
+			return 0, fmt.Errorf("save monitor status interval: %w", err)
+		}
 	}
 
 	var incidentID int64
@@ -703,10 +709,6 @@ func (s *PostgresStore) ListStates(ctx context.Context) ([]MonitorState, error) 
 }
 
 func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIntervalFilter) ([]StatusInterval, error) {
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
 	tenantID := TenantFromContext(ctx)
 	monitorID := strings.TrimSpace(filter.MonitorID)
 	query := `SELECT id, monitor_id, status, started_at, ended_at, downtime
@@ -721,8 +723,7 @@ func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIn
 		args = append(args, filter.Since.UTC())
 		query += fmt.Sprintf(` AND (started_at >= $%d OR ended_at IS NULL OR ended_at >= $%d)`, len(args), len(args))
 	}
-	args = append(args, limit)
-	query += fmt.Sprintf(` ORDER BY started_at DESC, id DESC LIMIT $%d`, len(args))
+	query += ` ORDER BY started_at ASC, id ASC`
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -741,7 +742,15 @@ func (s *PostgresStore) ListStatusIntervals(ctx context.Context, filter StatusIn
 		}
 		intervals = append(intervals, interval)
 	}
-	return intervals, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	windows, err := s.ListMaintenanceWindows(ctx, MaintenanceWindowFilter{MonitorID: monitorID})
+	if err != nil {
+		return nil, err
+	}
+	return projectStatusIntervals(intervals, windows, filter), nil
 }
 
 func (s *PostgresStore) ListUptimeStats(ctx context.Context, now time.Time, thresholds FailureThresholds) (map[string]UptimeStats, error) {

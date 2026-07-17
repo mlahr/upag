@@ -210,6 +210,119 @@ func TestStorageConformanceStatusIntervals(t *testing.T) {
 	}
 }
 
+func TestStorageConformanceMaintenanceAwareStatusIntervals(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := context.Background()
+			base := time.Date(2026, 7, 1, 9, 0, 0, 0, time.UTC)
+			saveIntervalState := func(monitorID string, status string, at time.Time, maintenanceWindowID int64) {
+				t.Helper()
+				_, err := store.SaveProbeAndState(ctx, ProbeResult{
+					MonitorID:           monitorID,
+					CheckedAt:           at,
+					OK:                  status == state.Up,
+					MaintenanceWindowID: maintenanceWindowID,
+				}, MonitorState{
+					MonitorID:               monitorID,
+					Name:                    monitorID,
+					URL:                     "https://example.com/",
+					ExpectedStatusCode:      200,
+					Status:                  status,
+					StatusBeforeMaintenance: state.Down,
+					LastCheckedAt:           at,
+					UpdatedAt:               at,
+				}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			saveIntervalState("home", state.Down, base, 0)
+			windowID, err := store.AddMaintenanceWindow(ctx, MaintenanceWindow{
+				MonitorID: "home",
+				StartsAt:  base.Add(time.Hour),
+				EndsAt:    base.Add(2 * time.Hour),
+				Reason:    "deploy",
+				CreatedBy: "tester",
+				CreatedAt: base,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saveIntervalState("home", state.Maintenance, base.Add(65*time.Minute), windowID)
+			saveIntervalState("home", state.Down, base.Add(125*time.Minute), 0)
+
+			intervals, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{
+				MonitorID: "home",
+				Limit:     10,
+				Now:       base.Add(3 * time.Hour),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(intervals) != 3 {
+				t.Fatalf("intervals = %+v, want DOWN/MAINTENANCE/DOWN", intervals)
+			}
+			if intervals[0].Status != state.Down || !intervals[0].Downtime || !intervals[0].StartedAt.Equal(base.Add(2*time.Hour)) || !intervals[0].EndedAt.IsZero() {
+				t.Fatalf("latest interval = %+v, want open DOWN from maintenance end", intervals[0])
+			}
+			if intervals[1].Status != state.Maintenance || intervals[1].Downtime || !intervals[1].StartedAt.Equal(base.Add(time.Hour)) || !intervals[1].EndedAt.Equal(base.Add(2*time.Hour)) {
+				t.Fatalf("maintenance interval = %+v, want exact non-downtime window", intervals[1])
+			}
+			if intervals[2].Status != state.Down || !intervals[2].Downtime || !intervals[2].StartedAt.Equal(base) || !intervals[2].EndedAt.Equal(base.Add(time.Hour)) {
+				t.Fatalf("oldest interval = %+v, want DOWN ending at maintenance start", intervals[2])
+			}
+
+			limited, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{MonitorID: "home", Limit: 2, Now: base.Add(3 * time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(limited) != 2 || limited[0].Status != state.Down || limited[1].Status != state.Maintenance {
+				t.Fatalf("limited intervals = %+v, want limit applied after projection", limited)
+			}
+			recent, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{
+				MonitorID: "home",
+				Limit:     10,
+				Since:     base.Add(90 * time.Minute),
+				Now:       base.Add(3 * time.Hour),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(recent) != 2 || recent[0].Status != state.Down || recent[1].Status != state.Maintenance {
+				t.Fatalf("recent intervals = %+v, want intervals overlapping --since", recent)
+			}
+
+			saveIntervalState("cancelled", state.Up, base, 0)
+			cancelledID, err := store.AddMaintenanceWindow(ctx, MaintenanceWindow{
+				MonitorID: "cancelled",
+				StartsAt:  base.Add(time.Hour),
+				EndsAt:    base.Add(2 * time.Hour),
+				Reason:    "cancelled deploy",
+				CreatedBy: "tester",
+				CreatedAt: base,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			saveIntervalState("cancelled", state.Maintenance, base.Add(65*time.Minute), cancelledID)
+			if err := store.CancelMaintenanceWindow(ctx, cancelledID, base.Add(70*time.Minute), "tester", "aborted"); err != nil {
+				t.Fatal(err)
+			}
+			cancelled, err := store.ListStatusIntervals(ctx, StatusIntervalFilter{MonitorID: "cancelled", Limit: 10, Now: base.Add(3 * time.Hour)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(cancelled) != 1 || cancelled[0].Status != state.Up || !cancelled[0].EndedAt.IsZero() {
+				t.Fatalf("cancelled-window intervals = %+v, want one open UP interval", cancelled)
+			}
+		})
+	}
+}
+
 func TestStorageConformanceMaintenanceAndStateCleanup(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {

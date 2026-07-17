@@ -773,6 +773,11 @@ RFC3339 timestamp or a positive Go duration. Duration values use Go
 Calendar units such as `d`, `w`, `mo`, and `y` are not supported; use hour
 equivalents such as `168h` for seven days.
 
+`intervals` applies uncancelled maintenance windows to the reportable status
+timeline at their exact configured boundaries. Covered portions are printed as
+`MAINTENANCE` with `DOWNTIME` set to `no`; when a window ends, the status from
+before maintenance resumes until a later probe establishes a transition.
+
 Manage one-off maintenance windows:
 
 ```sh

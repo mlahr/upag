@@ -202,6 +202,100 @@ func TestRunRecognizesIntervalsCommand(t *testing.T) {
 	}
 }
 
+func TestRunIntervalsPrintsExactMaintenanceWindow(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeDiagnosticConfig(t, `
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+defaults:
+  failure_threshold: 1
+storage:
+  backend: sqlite
+  sqlite:
+    path: `+dbPath+`
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com/
+    expected_status_code: 200
+`)
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Truncate(time.Second).Add(-3 * time.Hour)
+	windowStart := base.Add(time.Hour)
+	windowEnd := base.Add(2 * time.Hour)
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{
+		MonitorID: "home",
+		CheckedAt: base,
+		OK:        false,
+	}, storage.MonitorState{
+		MonitorID:     "home",
+		Name:          "Home",
+		URL:           "https://example.com/",
+		Status:        state.Down,
+		LastCheckedAt: base,
+		UpdatedAt:     base,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	windowID, err := store.AddMaintenanceWindow(context.Background(), storage.MaintenanceWindow{
+		MonitorID: "home",
+		StartsAt:  windowStart,
+		EndsAt:    windowEnd,
+		Reason:    "deploy",
+		CreatedBy: "tester",
+		CreatedAt: base,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{
+		MonitorID:           "home",
+		CheckedAt:           windowStart.Add(5 * time.Minute),
+		OK:                  false,
+		MaintenanceWindowID: windowID,
+	}, storage.MonitorState{
+		MonitorID:               "home",
+		Name:                    "Home",
+		URL:                     "https://example.com/",
+		Status:                  state.Maintenance,
+		StatusBeforeMaintenance: state.Down,
+		LastCheckedAt:           windowStart.Add(5 * time.Minute),
+		UpdatedAt:               windowStart.Add(5 * time.Minute),
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{"intervals", "--config", configPath, "--monitor", "home", "--limit", "10"})
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	for _, want := range []string{
+		"MAINTENANCE",
+		windowStart.Local().Format(time.RFC3339),
+		windowEnd.Local().Format(time.RFC3339),
+		"no",
+		"DOWN",
+		"yes",
+	} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("interval output %q does not contain %q", stdout, want)
+		}
+	}
+}
+
 func TestRunRecognizesSinceOnLimitedCommands(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 

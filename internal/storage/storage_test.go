@@ -786,6 +786,107 @@ func TestListStatusIntervalsFiltersAndLimits(t *testing.T) {
 	}
 }
 
+func TestProjectStatusIntervalsUsesCurrentTimeForActiveMaintenance(t *testing.T) {
+	base := time.Date(2026, 7, 2, 9, 0, 0, 0, time.UTC)
+	now := base.Add(90 * time.Minute)
+	intervals := []StatusInterval{{
+		ID:        1,
+		MonitorID: "home",
+		Status:    state.Down,
+		StartedAt: base,
+		EndedAt:   base.Add(75 * time.Minute),
+		Downtime:  true,
+	}, {
+		ID:        2,
+		MonitorID: "home",
+		Status:    state.Up,
+		StartedAt: base.Add(75 * time.Minute),
+	}}
+	windows := []MaintenanceWindow{
+		{
+			ID:        1,
+			MonitorID: "home",
+			StartsAt:  base.Add(time.Hour),
+			EndsAt:    base.Add(2 * time.Hour),
+		},
+		{
+			ID:        2,
+			MonitorID: "home",
+			StartsAt:  base.Add(3 * time.Hour),
+			EndsAt:    base.Add(4 * time.Hour),
+		},
+		{
+			ID:          3,
+			MonitorID:   "home",
+			StartsAt:    base.Add(15 * time.Minute),
+			EndsAt:      base.Add(30 * time.Minute),
+			CancelledAt: base.Add(20 * time.Minute),
+		},
+	}
+
+	got := projectStatusIntervals(intervals, windows, StatusIntervalFilter{Limit: 10, Now: now})
+	if len(got) != 2 {
+		t.Fatalf("projected intervals = %+v, want DOWN then active MAINTENANCE", got)
+	}
+	if got[0].Status != state.Maintenance || !got[0].StartedAt.Equal(base.Add(time.Hour)) || !got[0].EndedAt.IsZero() || got[0].Downtime {
+		t.Fatalf("active maintenance = %+v, want open non-downtime interval", got[0])
+	}
+	if got[1].Status != state.Down || !got[1].EndedAt.Equal(base.Add(time.Hour)) || !got[1].Downtime {
+		t.Fatalf("pre-maintenance interval = %+v, want DOWN ending at active window start", got[1])
+	}
+}
+
+func TestMaintenanceStatusIntervalMigrationRebuildsLegacyRows(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.sqlite")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 7, 3, 9, 0, 0, 0, time.UTC)
+	if _, err := store.SaveProbeAndState(context.Background(), ProbeResult{
+		MonitorID: "home",
+		CheckedAt: base,
+		OK:        true,
+	}, MonitorState{
+		MonitorID:     "home",
+		Name:          "Home",
+		URL:           "https://example.com/",
+		Status:        state.Up,
+		LastCheckedAt: base,
+		UpdatedAt:     base,
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), SingleFailureThreshold(1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE monitor_status_intervals SET ended_at = ? WHERE monitor_id = ?`, formatTime(base.Add(time.Hour)), "home"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO monitor_status_intervals (monitor_id, status, started_at, ended_at, downtime) VALUES (?, ?, ?, NULL, 0)`, "home", state.Maintenance, formatTime(base.Add(time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM schema_migrations WHERE id = '0011_maintenance_status_intervals'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), SingleFailureThreshold(1)); err != nil {
+		t.Fatal(err)
+	}
+	raw := readStatusIntervals(t, store, "home")
+	if len(raw) != 1 || raw[0].status != state.Up || !raw[0].endedAt.IsZero() {
+		t.Fatalf("rebuilt intervals = %+v, want one open UP interval without legacy MAINTENANCE", raw)
+	}
+}
+
 func TestRollupAndPruneProbeResultsCompactsRawProbes(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "test.sqlite"))
 	if err != nil {

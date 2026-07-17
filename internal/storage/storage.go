@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -163,6 +164,7 @@ type StatusIntervalFilter struct {
 	MonitorID string
 	Limit     int
 	Since     time.Time
+	Now       time.Time
 }
 
 type IncidentFilter struct {
@@ -322,6 +324,7 @@ func migrations() []migration {
 		{ID: "0008_probe_rollups", Fn: migrateProbeRollups},
 		{ID: "0009_observer_sentinel_events", Fn: migrateObserverSentinelEvents},
 		{ID: "0010_monitor_status_intervals", Fn: migrateMonitorStatusIntervals},
+		{ID: "0011_maintenance_status_intervals", Fn: migrateMaintenanceStatusIntervals},
 	}
 }
 
@@ -576,6 +579,11 @@ func migrateMonitorStatusIntervals(ctx context.Context, tx *sql.Tx) error {
 	})
 }
 
+func migrateMaintenanceStatusIntervals(ctx context.Context, tx *sql.Tx) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM monitor_status_interval_backfills`)
+	return err
+}
+
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -687,8 +695,10 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 		next.LastObservedStatusCode, formatTime(next.UpdatedAt)); err != nil {
 		return 0, fmt.Errorf("save monitor state: %w", err)
 	}
-	if err := saveStatusInterval(ctx, tx, next.MonitorID, next.Status, next.UpdatedAt); err != nil {
-		return 0, fmt.Errorf("save monitor status interval: %w", err)
+	if next.Status != state.Maintenance {
+		if err := saveStatusInterval(ctx, tx, next.MonitorID, next.Status, next.UpdatedAt); err != nil {
+			return 0, fmt.Errorf("save monitor status interval: %w", err)
+		}
 	}
 
 	var incidentID int64
@@ -911,10 +921,6 @@ func (s *Store) ListStates(ctx context.Context) ([]MonitorState, error) {
 }
 
 func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFilter) ([]StatusInterval, error) {
-	limit := filter.Limit
-	if limit <= 0 {
-		limit = 50
-	}
 	query := `SELECT id, monitor_id, status, started_at, ended_at, downtime
 		FROM monitor_status_intervals`
 	args := []any{}
@@ -930,8 +936,7 @@ func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFi
 	if len(where) > 0 {
 		query += ` WHERE ` + strings.Join(where, ` AND `)
 	}
-	query += ` ORDER BY started_at DESC, id DESC LIMIT ?`
-	args = append(args, limit)
+	query += ` ORDER BY started_at ASC, id ASC`
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
@@ -945,7 +950,152 @@ func (s *Store) ListStatusIntervals(ctx context.Context, filter StatusIntervalFi
 		}
 		intervals = append(intervals, interval)
 	}
-	return intervals, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	windows, err := s.ListMaintenanceWindows(ctx, MaintenanceWindowFilter{MonitorID: strings.TrimSpace(filter.MonitorID)})
+	if err != nil {
+		return nil, err
+	}
+	return projectStatusIntervals(intervals, windows, filter), nil
+}
+
+type projectedStatusInterval struct {
+	StatusInterval
+	effectiveEnd time.Time
+	open         bool
+}
+
+func projectStatusIntervals(intervals []StatusInterval, windows []MaintenanceWindow, filter StatusIntervalFilter) []StatusInterval {
+	now := filter.Now.UTC()
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+
+	windowsByMonitor := map[string][]MaintenanceWindow{}
+	for _, window := range windows {
+		if !window.CancelledAt.IsZero() || !window.EndsAt.After(window.StartsAt) || !window.StartsAt.Before(now) {
+			continue
+		}
+		windowsByMonitor[window.MonitorID] = append(windowsByMonitor[window.MonitorID], window)
+	}
+	for monitorID := range windowsByMonitor {
+		sort.SliceStable(windowsByMonitor[monitorID], func(i, j int) bool {
+			return windowsByMonitor[monitorID][i].StartsAt.Before(windowsByMonitor[monitorID][j].StartsAt)
+		})
+	}
+
+	projected := make([]projectedStatusInterval, 0, len(intervals)+len(windows))
+	appendSegment := func(source StatusInterval, status string, downtime bool, start time.Time, end time.Time, open bool) {
+		if !end.After(start) {
+			return
+		}
+		projected = append(projected, projectedStatusInterval{
+			StatusInterval: StatusInterval{
+				ID:        source.ID,
+				MonitorID: source.MonitorID,
+				Status:    status,
+				StartedAt: start.UTC(),
+				Downtime:  downtime,
+			},
+			effectiveEnd: end.UTC(),
+			open:         open,
+		})
+	}
+
+	for _, interval := range intervals {
+		start := interval.StartedAt.UTC()
+		if !start.Before(now) {
+			continue
+		}
+		end := interval.EndedAt.UTC()
+		open := end.IsZero()
+		if open || end.After(now) {
+			end = now
+		}
+		if !end.After(start) {
+			continue
+		}
+
+		cursor := start
+		for _, window := range windowsByMonitor[interval.MonitorID] {
+			overlapStart := maxTime(cursor, window.StartsAt.UTC())
+			overlapEnd := minTime(end, window.EndsAt.UTC())
+			if !overlapEnd.After(overlapStart) {
+				continue
+			}
+			if overlapStart.After(cursor) {
+				appendSegment(interval, interval.Status, interval.Downtime, cursor, overlapStart, false)
+			}
+			appendSegment(interval, state.Maintenance, false, overlapStart, overlapEnd, open && overlapEnd.Equal(end))
+			cursor = overlapEnd
+			if !end.After(cursor) {
+				break
+			}
+		}
+		if end.After(cursor) {
+			appendSegment(interval, interval.Status, interval.Downtime, cursor, end, open)
+		}
+	}
+
+	sort.SliceStable(projected, func(i, j int) bool {
+		if projected[i].MonitorID != projected[j].MonitorID {
+			return projected[i].MonitorID < projected[j].MonitorID
+		}
+		if !projected[i].StartedAt.Equal(projected[j].StartedAt) {
+			return projected[i].StartedAt.Before(projected[j].StartedAt)
+		}
+		return projected[i].ID < projected[j].ID
+	})
+	merged := projected[:0]
+	for _, interval := range projected {
+		if len(merged) > 0 {
+			previous := &merged[len(merged)-1]
+			if previous.MonitorID == interval.MonitorID &&
+				previous.Status == interval.Status &&
+				previous.Downtime == interval.Downtime &&
+				previous.effectiveEnd.Equal(interval.StartedAt) {
+				previous.effectiveEnd = interval.effectiveEnd
+				previous.open = interval.open
+				continue
+			}
+		}
+		merged = append(merged, interval)
+	}
+
+	filtered := merged[:0]
+	for _, interval := range merged {
+		if !filter.Since.IsZero() && interval.StartedAt.Before(filter.Since) && interval.effectiveEnd.Before(filter.Since) {
+			continue
+		}
+		filtered = append(filtered, interval)
+	}
+	sort.SliceStable(filtered, func(i, j int) bool {
+		if !filtered[i].StartedAt.Equal(filtered[j].StartedAt) {
+			return filtered[i].StartedAt.After(filtered[j].StartedAt)
+		}
+		return filtered[i].ID > filtered[j].ID
+	})
+	if len(filtered) > limit {
+		filtered = filtered[:limit]
+	}
+
+	result := make([]StatusInterval, 0, len(filtered))
+	for _, interval := range filtered {
+		row := interval.StatusInterval
+		if !interval.open {
+			row.EndedAt = interval.effectiveEnd
+		}
+		result = append(result, row)
+	}
+	return result
 }
 
 func (s *Store) ListUptimeStats(ctx context.Context, now time.Time, thresholds FailureThresholds) (map[string]UptimeStats, error) {

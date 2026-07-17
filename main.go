@@ -426,7 +426,8 @@ func runIntervals(args []string) error {
 	if *limit <= 0 {
 		return fmt.Errorf("intervals --limit must be positive")
 	}
-	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
+	now := time.Now().UTC()
+	since, err := parseCLISince(*sinceRaw, "--since", now)
 	if err != nil {
 		return err
 	}
@@ -446,16 +447,33 @@ func runIntervals(args []string) error {
 		return err
 	}
 	defer store.Close()
+	if err := store.EnsureStatusIntervalsBackfilled(ctx, configuredFailureThresholds(cfg)); err != nil {
+		return err
+	}
 
 	intervals, err := store.ListStatusIntervals(ctx, storage.StatusIntervalFilter{
 		MonitorID: *monitorID,
 		Limit:     *limit,
 		Since:     since,
+		Now:       now,
 	})
 	if err != nil {
 		return err
 	}
 	return cli.PrintStatusIntervals(os.Stdout, intervals)
+}
+
+func configuredFailureThresholds(cfg config.Config) storage.FailureThresholds {
+	thresholds := storage.FailureThresholds{
+		Default:  cfg.Defaults.FailureThreshold,
+		Monitors: map[string]int{},
+	}
+	for _, monitor := range cfg.Monitors {
+		if monitor.FailureThreshold > 0 {
+			thresholds.Monitors[monitor.ID] = monitor.FailureThreshold
+		}
+	}
+	return thresholds
 }
 
 func runFailures(args []string) error {
