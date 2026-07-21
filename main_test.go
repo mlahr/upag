@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,6 +20,15 @@ import (
 	"upag/internal/state"
 	"upag/internal/storage"
 )
+
+func TestMain(m *testing.M) {
+	// CLI tests must not inherit a developer or CI runner's remote target.
+	// Individual environment-precedence tests set the variables explicitly.
+	for _, key := range []string{"UPAG_REMOTE", "UPAG_TOKEN", "UPAG_REMOTE_TIMEOUT"} {
+		_ = os.Unsetenv(key)
+	}
+	os.Exit(m.Run())
+}
 
 func TestRunCheckPrintsRedirectDiagnosticWithoutOpeningStorage(t *testing.T) {
 	const responseBody = "ready secret diagnostic body"
@@ -57,7 +67,7 @@ monitors:
 
 	var runErr error
 	stdout := captureStdout(t, func() {
-		runErr = run([]string{"check", "--monitor", "home", "--format", "json"})
+		runErr = run([]string{"--json", "check", "--monitor", "home"})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -121,7 +131,7 @@ monitors:
 
 	var runErr error
 	stdout := captureStdout(t, func() {
-		runErr = run([]string{"check", "--config", configPath, "--monitor", "api", "--format", "json"})
+		runErr = run([]string{"--json", "check", "--config", configPath, "--monitor", "api"})
 	})
 	if runErr == nil || runErr.Error() != "diagnostic check failed" {
 		t.Fatalf("run error = %v, want diagnostic check failed", runErr)
@@ -157,7 +167,7 @@ monitors:
 	}{
 		{name: "missing monitor", args: []string{"check", "--config", configPath}, want: "check requires --monitor"},
 		{name: "unknown monitor", args: []string{"check", "--config", configPath, "--monitor", "missing"}, want: `monitor "missing" is not configured`},
-		{name: "invalid format", args: []string{"check", "--config", configPath, "--monitor", "home", "--format", "yaml"}, want: "check --format must be one of: text, json"},
+		{name: "removed format flag", args: []string{"check", "--config", configPath, "--monitor", "home", "--format", "json"}, want: "flag provided but not defined: -format"},
 		{name: "positional argument", args: []string{"check", "home"}, want: "check does not accept positional arguments"},
 	}
 	for _, tc := range tests {
@@ -182,6 +192,26 @@ func TestRunRecognizesDaemonStatusCommand(t *testing.T) {
 	}
 }
 
+func TestRunLocalStatusJSON(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+	pidFile := filepath.Join(t.TempDir(), "upag.pid")
+	if err := os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	stdout := captureStdout(t, func() {
+		if err := run([]string{"--json", "--local", "status", "--pid-file", pidFile}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result localStatusResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode local status JSON %q: %v", stdout, err)
+	}
+	if result.Status != "running" || result.PID != os.Getpid() || result.PIDFile != pidFile {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
 func TestParseGlobalOptionsUsesFlagsEnvironmentAndLocalOverride(t *testing.T) {
 	t.Setenv("UPAG_REMOTE", "https://env.example")
 	t.Setenv("UPAG_TOKEN", "env-token")
@@ -198,6 +228,80 @@ func TestParseGlobalOptionsUsesFlagsEnvironmentAndLocalOverride(t *testing.T) {
 	}
 	if options.Remote != "" || options.Token != "" || len(args) != 1 || args[0] != "monitors" {
 		t.Fatalf("local options = %+v, args = %v", options, args)
+	}
+}
+
+func TestParseGlobalOptionsRecognizesJSON(t *testing.T) {
+	options, args, err := parseGlobalOptions([]string{"--json", "monitors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !options.JSON || len(args) != 1 || args[0] != "monitors" {
+		t.Fatalf("options = %+v, args = %v", options, args)
+	}
+	if !jsonOutputRequested([]string{"--remote", "https://example.com", "--json", "status"}) {
+		t.Fatal("jsonOutputRequested did not recognize --json after a valued global option")
+	}
+	if jsonOutputRequested([]string{"monitors", "--json"}) {
+		t.Fatal("jsonOutputRequested recognized a command-local --json")
+	}
+}
+
+func TestRunJSONVersionAndUnsupportedCommands(t *testing.T) {
+	stdout := captureStdout(t, func() {
+		if err := run([]string{"--json", "--version"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result versionResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode version JSON %q: %v", stdout, err)
+	}
+	if result.Version != version {
+		t.Fatalf("version = %q, want %q", result.Version, version)
+	}
+	for _, args := range [][]string{{"--json", "run"}, {"--json", "help"}} {
+		if err := run(args); err == nil || !strings.Contains(err.Error(), "--json") {
+			t.Fatalf("run(%v) error = %v, want JSON compatibility error", args, err)
+		}
+	}
+}
+
+func TestPrintJSONCommandError(t *testing.T) {
+	var output strings.Builder
+	if err := printRunError(&output, []string{"--json", "monitors"}, io.EOF); err != nil {
+		t.Fatal(err)
+	}
+	var response cli.ErrorResponse
+	if err := json.Unmarshal([]byte(output.String()), &response); err != nil {
+		t.Fatalf("decode error JSON %q: %v", output.String(), err)
+	}
+	if response.Error.Code != "command_failed" || response.Error.Message != io.EOF.Error() {
+		t.Fatalf("error response = %+v", response)
+	}
+}
+
+func TestJSONActionResultSchemas(t *testing.T) {
+	tests := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "start", value: actionResult{Status: "started", PID: 123}, want: `{"status":"started","pid":123}` + "\n"},
+		{name: "stop", value: actionResult{Status: "stopped"}, want: `{"status":"stopped"}` + "\n"},
+		{name: "local status", value: localStatusResult{Status: "running", PID: 123, PIDFile: "/run/upag.pid"}, want: `{"status":"running","pid":123,"pid_file":"/run/upag.pid"}` + "\n"},
+		{name: "storage migration", value: storageMigrationResult{Status: "migrated", Source: "sqlite", Target: "postgres", TenantID: "default"}, want: `{"status":"migrated","source":"sqlite","target":"postgres","tenant_id":"default"}` + "\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var output strings.Builder
+			if err := cli.PrintJSON(&output, tc.value); err != nil {
+				t.Fatal(err)
+			}
+			if output.String() != tc.want {
+				t.Fatalf("output = %q, want %q", output.String(), tc.want)
+			}
+		})
 	}
 }
 
@@ -230,6 +334,26 @@ func TestRunRemoteStatusPrintsReachabilityMetadata(t *testing.T) {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("output %q does not contain %q", stdout, want)
 		}
+	}
+}
+
+func TestRunRemoteStatusJSONUsesAPIShape(t *testing.T) {
+	started := time.Date(2026, 7, 21, 3, 4, 5, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(controlapi.StatusResponse{Status: "ok", Version: "v2", StartedAt: started})
+	}))
+	defer server.Close()
+	stdout := captureStdout(t, func() {
+		if err := run([]string{"--json", "--remote", server.URL, "--token", "secret", "status"}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var response controlapi.StatusResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode remote status JSON %q: %v", stdout, err)
+	}
+	if response.Status != "ok" || response.Version != "v2" || !response.StartedAt.Equal(started) {
+		t.Fatalf("response = %+v", response)
 	}
 }
 
@@ -276,6 +400,45 @@ func TestRunRecognizesMonitorsCommand(t *testing.T) {
 	configPath := writeSQLiteConfig(t, dbPath)
 	if err := run([]string{"monitors", "--config", configPath}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunJSONQueryCommandsUseControlAPIShapes(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	seedMonitorState(t, dbPath, "home")
+
+	tests := []struct {
+		command []string
+		key     string
+	}{
+		{command: []string{"monitors", "--config", configPath}, key: "monitors"},
+		{command: []string{"incidents", "--config", configPath}, key: "incidents"},
+		{command: []string{"intervals", "--config", configPath}, key: "intervals"},
+		{command: []string{"failures", "--config", configPath}, key: "failed_probes"},
+		{command: []string{"maintenance", "list", "--config", configPath}, key: "windows"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.key, func(t *testing.T) {
+			args := append([]string{"--json"}, tc.command...)
+			stdout := captureStdout(t, func() {
+				if err := run(args); err != nil {
+					t.Fatal(err)
+				}
+			})
+			var response map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+				t.Fatalf("decode %s JSON %q: %v", tc.key, stdout, err)
+			}
+			value, ok := response[tc.key]
+			if !ok {
+				t.Fatalf("JSON output %q has no %q field", stdout, tc.key)
+			}
+			if string(value) == "null" {
+				t.Fatalf("JSON output %q encodes %q as null, want an array", stdout, tc.key)
+			}
+		})
 	}
 }
 
@@ -596,6 +759,43 @@ func TestRunStorageDSNPrintsYAMLSnippetWithoutTesting(t *testing.T) {
 	}
 }
 
+func TestRunStorageDSNPrintsJSONWithoutTesting(t *testing.T) {
+	restorePassword := storageDSNReadPassword
+	storageDSNReadPassword = func() (string, error) { return "abc@123:xyz", nil }
+	t.Cleanup(func() { storageDSNReadPassword = restorePassword })
+
+	stdout := captureStdout(t, func() {
+		if err := run([]string{
+			"--json", "storage", "dsn",
+			"--host", "db.example.supabase.co",
+			"--user", "person@example.com",
+			"--no-test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var result storageDSNResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode storage DSN JSON %q: %v", stdout, err)
+	}
+	if result.Backend != "postgres" || result.DSN != "postgres://person%40example.com:abc%40123%3Axyz@db.example.supabase.co:5432/postgres?sslmode=require" {
+		t.Fatalf("result = %+v", result)
+	}
+}
+
+func TestRunStorageDSNRejectsFormatWithJSON(t *testing.T) {
+	err := run([]string{
+		"--json", "storage", "dsn",
+		"--host", "db.example.supabase.co",
+		"--user", "person@example.com",
+		"--no-test",
+		"--format", "dsn",
+	})
+	if err == nil || !strings.Contains(err.Error(), "--format cannot be combined with --json") {
+		t.Fatalf("error = %v, want format conflict", err)
+	}
+}
+
 func TestRunStorageDSNValidatesRequiredFlags(t *testing.T) {
 	restorePassword := storageDSNReadPassword
 	storageDSNReadPassword = func() (string, error) { return "password", nil }
@@ -697,6 +897,7 @@ func TestRunPrintsHelp(t *testing.T) {
 			"Monitoring commands:",
 			"Storage commands:",
 			"Global options:",
+			"--json",
 			"--version",
 		} {
 			if !strings.Contains(output, want) {

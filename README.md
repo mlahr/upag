@@ -175,7 +175,7 @@ Run one immediate diagnostic attempt for a configured monitor:
 
 ```sh
 upag check --config ./config.yaml --monitor homepage
-upag check --config ./config.yaml --monitor homepage --format json
+upag --json check --config ./config.yaml --monitor homepage
 ```
 
 The diagnostic exits successfully only when every configured assertion passes.
@@ -852,7 +852,32 @@ Print the binary version:
 
 ```sh
 upag --version
+upag --json --version
 ```
+
+### JSON output
+
+Place the global `--json` option before a finite command to emit one JSON
+object on stdout:
+
+```sh
+upag --json monitors
+upag --json incidents --limit 50
+upag --json maintenance list --all
+```
+
+Local and remote monitoring commands use the same response shapes as the
+authenticated control API. Command failures retain a nonzero exit status and
+are emitted on stderr as an object containing `error.code` and
+`error.message`. The foreground `run` command and help output do not support
+`--json` because they are operational log and documentation streams rather
+than finite command results.
+
+The global option replaces the former `check --format json` interface;
+`check` no longer accepts a `--format` flag.
+
+For `storage dsn`, `--format yaml|dsn` continues to select textual output and
+cannot be combined with global `--json`.
 
 The daemon writes line-oriented logs to stdout and stderr. When started with
 `start`, both streams are appended to `--log-file`. On Linux, pass `--syslog`

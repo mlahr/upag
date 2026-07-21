@@ -347,7 +347,7 @@ func serveMonitors(w http.ResponseWriter, r *http.Request, store Store, runtime 
 			active = append(active, window)
 		}
 	}
-	writeJSON(w, 200, MonitorsResponse{GeneratedAt: now, Monitors: monitorsFromStorage(states), ActiveMaintenance: maintenanceFromStorage(active)})
+	writeJSON(w, 200, MonitorsResponse{GeneratedAt: now, Monitors: MonitorsFromStorage(states), ActiveMaintenance: MaintenanceFromStorage(active)})
 }
 
 func serveIncidents(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -360,7 +360,7 @@ func serveIncidents(w http.ResponseWriter, r *http.Request, store Store, runtime
 		internalError(w, err)
 		return
 	}
-	writeJSON(w, 200, IncidentsResponse{Incidents: incidentsFromStorage(rows)})
+	writeJSON(w, 200, IncidentsResponse{Incidents: IncidentsFromStorage(rows)})
 }
 
 func serveIntervals(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -379,7 +379,7 @@ func serveIntervals(w http.ResponseWriter, r *http.Request, store Store, runtime
 		internalError(w, err)
 		return
 	}
-	writeJSON(w, 200, IntervalsResponse{GeneratedAt: now, Intervals: intervalsFromStorage(rows)})
+	writeJSON(w, 200, IntervalsResponse{GeneratedAt: now, Intervals: IntervalsFromStorage(rows)})
 }
 
 func serveFailures(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -403,7 +403,7 @@ func serveFailures(w http.ResponseWriter, r *http.Request, store Store, runtime 
 		internalError(w, err)
 		return
 	}
-	writeJSON(w, 200, FailuresResponse{FailedProbes: probesFromStorage(probes), Observer: observerFromStorage(observer), ObserverKnown: known, SentinelEvents: sentinelsFromStorage(events)})
+	writeJSON(w, 200, FailuresResponse{FailedProbes: ProbeFailuresFromStorage(probes), Observer: ObserverStateFromStorage(observer), ObserverKnown: known, SentinelEvents: SentinelEventsFromStorage(events)})
 }
 
 func serveMaintenance(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -426,7 +426,7 @@ func serveMaintenance(w http.ResponseWriter, r *http.Request, store Store, runti
 		internalError(w, err)
 		return
 	}
-	writeJSON(w, 200, MaintenanceResponse{GeneratedAt: now, Windows: maintenanceFromStorage(rows)})
+	writeJSON(w, 200, MaintenanceResponse{GeneratedAt: now, Windows: MaintenanceFromStorage(rows)})
 }
 
 func addMaintenance(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -549,45 +549,45 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func monitorsFromStorage(rows []storage.MonitorState) []Monitor {
+func MonitorsFromStorage(rows []storage.MonitorState) []Monitor {
 	out := make([]Monitor, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Monitor{ID: v.MonitorID, Name: v.Name, URL: v.URL, ExpectedStatusCode: v.ExpectedStatusCode, Status: v.Status, StatusBeforeMaintenance: v.StatusBeforeMaintenance, ConsecutiveFailures: v.ConsecutiveFailures, LastCheckedAt: v.LastCheckedAt, LastSuccessAt: v.LastSuccessAt, LastFailureAt: v.LastFailureAt, LastError: v.LastError, LastObservedStatusCode: v.LastObservedStatusCode, UpdatedAt: v.UpdatedAt})
 	}
 	return out
 }
-func maintenanceFromStorage(rows []storage.MaintenanceWindow) []Maintenance {
+func MaintenanceFromStorage(rows []storage.MaintenanceWindow) []Maintenance {
 	out := make([]Maintenance, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Maintenance{ID: v.ID, MonitorID: v.MonitorID, StartsAt: v.StartsAt, EndsAt: v.EndsAt, Reason: v.Reason, CreatedBy: v.CreatedBy, CreatedAt: v.CreatedAt, CancelledAt: v.CancelledAt, CancelledBy: v.CancelledBy, CancellationReason: v.CancellationReason})
 	}
 	return out
 }
-func incidentsFromStorage(rows []storage.Incident) []Incident {
+func IncidentsFromStorage(rows []storage.Incident) []Incident {
 	out := make([]Incident, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Incident{ID: v.ID, MonitorID: v.MonitorID, Name: v.Name, Transition: v.Transition, ObservedAt: v.ObservedAt, Error: v.Error, StatusCode: v.StatusCode})
 	}
 	return out
 }
-func intervalsFromStorage(rows []storage.StatusInterval) []Interval {
+func IntervalsFromStorage(rows []storage.StatusInterval) []Interval {
 	out := make([]Interval, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, Interval{ID: v.ID, MonitorID: v.MonitorID, Status: v.Status, StartedAt: v.StartedAt, EndedAt: v.EndedAt, Downtime: v.Downtime})
 	}
 	return out
 }
-func probesFromStorage(rows []storage.ProbeResult) []ProbeFailure {
+func ProbeFailuresFromStorage(rows []storage.ProbeResult) []ProbeFailure {
 	out := make([]ProbeFailure, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, ProbeFailure{MonitorID: v.MonitorID, CheckedAt: v.CheckedAt, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, ResponseTimeMS: v.ResponseTimeMS, AttemptCount: v.AttemptCount, Error: v.Error, MaintenanceWindowID: v.MaintenanceWindowID, ObserverSuppressed: v.ObserverSuppressed})
 	}
 	return out
 }
-func observerFromStorage(v storage.ObserverState) ObserverState {
+func ObserverStateFromStorage(v storage.ObserverState) ObserverState {
 	return ObserverState{Status: v.Status, ConsecutiveFailures: v.ConsecutiveFailures, ConsecutiveSuccesses: v.ConsecutiveSuccesses, LastCheckedAt: v.LastCheckedAt, LastSuccessAt: v.LastSuccessAt, LastFailureAt: v.LastFailureAt, LastError: v.LastError, UpdatedAt: v.UpdatedAt}
 }
-func sentinelsFromStorage(rows []storage.ObserverSentinelResult) []SentinelEvent {
+func SentinelEventsFromStorage(rows []storage.ObserverSentinelResult) []SentinelEvent {
 	out := make([]SentinelEvent, 0, len(rows))
 	for _, v := range rows {
 		out = append(out, SentinelEvent{ID: v.SentinelID, Name: v.Name, URL: v.URL, ExpectedStatusCode: v.ExpectedStatusCode, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, Error: v.Error, CheckedAt: v.CheckedAt})

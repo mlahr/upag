@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"text/tabwriter"
@@ -55,7 +54,5 @@ func PrintDiagnosticText(w io.Writer, result DiagnosticResult) error {
 }
 
 func PrintDiagnosticJSON(w io.Writer, result DiagnosticResult) error {
-	encoder := json.NewEncoder(w)
-	encoder.SetEscapeHTML(false)
-	return encoder.Encode(result)
+	return PrintJSON(w, result)
 }

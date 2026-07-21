@@ -33,10 +33,21 @@ var version = "dev"
 var storageDSNReadPassword = readStorageDSNPassword
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+	args := os.Args[1:]
+	if err := run(args); err != nil {
+		if outputErr := printRunError(os.Stderr, args, err); outputErr != nil {
+			fmt.Fprintln(os.Stderr, outputErr)
+		}
 		os.Exit(1)
 	}
+}
+
+func printRunError(w io.Writer, args []string, err error) error {
+	if jsonOutputRequested(args) {
+		return cli.PrintErrorJSON(w, err)
+	}
+	_, outputErr := fmt.Fprintln(w, err)
+	return outputErr
 }
 
 func run(args []string) error {
@@ -50,8 +61,10 @@ func run(args []string) error {
 		}
 		return printHelp(os.Stdout)
 	}
-
 	if args[0] == "--version" {
+		if len(args) != 1 {
+			return fmt.Errorf("--version does not accept arguments")
+		}
 		fmt.Fprintln(os.Stdout, "upag", version)
 		return nil
 	}
@@ -63,6 +76,25 @@ func run(args []string) error {
 	if len(commandArgs) == 0 {
 		return usage()
 	}
+	if commandArgs[0] == "help" || commandArgs[0] == "--help" || commandArgs[0] == "-h" {
+		if global.JSON {
+			return fmt.Errorf("--json cannot be used with help")
+		}
+		if len(commandArgs) != 1 {
+			return fmt.Errorf("%s does not accept arguments", commandArgs[0])
+		}
+		return printHelp(os.Stdout)
+	}
+	if commandArgs[0] == "--version" {
+		if len(commandArgs) != 1 {
+			return fmt.Errorf("--version does not accept arguments")
+		}
+		if global.JSON {
+			return cli.PrintJSON(os.Stdout, versionResult{Version: version})
+		}
+		fmt.Fprintln(os.Stdout, "upag", version)
+		return nil
+	}
 	var remote *controlapi.Client
 	if global.Remote != "" {
 		remote, err = controlapi.NewClient(global.Remote, global.Token, global.Timeout)
@@ -71,6 +103,9 @@ func run(args []string) error {
 		}
 	}
 	args = commandArgs
+	if global.JSON && args[0] == "run" {
+		return fmt.Errorf("run does not support --json")
+	}
 	if remote != nil && !remoteCapableCommand(args[0]) {
 		return fmt.Errorf("%s cannot run remotely; pass --local to run it on this host", args[0])
 	}
@@ -79,29 +114,29 @@ func run(args []string) error {
 	case "run":
 		return runDaemon(args[1:])
 	case "start":
-		return runStart(args[1:])
+		return runStart(args[1:], global.JSON)
 	case "stop":
-		return runStop(args[1:])
+		return runStop(args[1:], global.JSON)
 	case "status":
-		return runDaemonStatus(args[1:], remote)
+		return runDaemonStatus(args[1:], remote, global.JSON)
 	case "restart":
-		return runRestart(args[1:])
+		return runRestart(args[1:], global.JSON)
 	case "config":
-		return runConfig(args[1:])
+		return runConfig(args[1:], global.JSON)
 	case "check":
-		return runCheck(args[1:], remote)
+		return runCheck(args[1:], remote, global.JSON)
 	case "monitors":
-		return runMonitors(args[1:], remote)
+		return runMonitors(args[1:], remote, global.JSON)
 	case "incidents":
-		return runIncidents(args[1:], remote)
+		return runIncidents(args[1:], remote, global.JSON)
 	case "intervals":
-		return runIntervals(args[1:], remote)
+		return runIntervals(args[1:], remote, global.JSON)
 	case "failures":
-		return runFailures(args[1:], remote)
+		return runFailures(args[1:], remote, global.JSON)
 	case "maintenance":
-		return runMaintenance(args[1:], remote)
+		return runMaintenance(args[1:], remote, global.JSON)
 	case "storage":
-		return runStorage(args[1:])
+		return runStorage(args[1:], global.JSON)
 	default:
 		return usage()
 	}
@@ -111,6 +146,7 @@ type globalOptions struct {
 	Remote  string
 	Token   string
 	Timeout time.Duration
+	JSON    bool
 }
 
 func parseGlobalOptions(args []string) (globalOptions, []string, error) {
@@ -130,6 +166,9 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	for index < len(args) {
 		arg := args[index]
 		if !strings.HasPrefix(arg, "--") || arg == "--" {
+			break
+		}
+		if arg == "--version" || arg == "--help" {
 			break
 		}
 		var value string
@@ -160,6 +199,8 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 			timeoutSet = true
 		case arg == "--local":
 			local = true
+		case arg == "--json":
+			options.JSON = true
 		default:
 			return globalOptions{}, nil, fmt.Errorf("unknown global option %s; global options must appear before the command", arg)
 		}
@@ -198,6 +239,62 @@ func parseGlobalOptions(args []string) (globalOptions, []string, error) {
 	return options, args[index:], nil
 }
 
+func jsonOutputRequested(args []string) bool {
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--json" {
+			return true
+		}
+		switch {
+		case arg == "--local", strings.HasPrefix(arg, "--remote="), strings.HasPrefix(arg, "--token="), strings.HasPrefix(arg, "--remote-timeout="):
+			continue
+		case arg == "--remote", arg == "--token", arg == "--remote-timeout":
+			index++
+			continue
+		}
+		if !strings.HasPrefix(arg, "--") || arg == "--" || arg == "--version" || arg == "--help" {
+			return false
+		}
+		return false
+	}
+	return false
+}
+
+func newCommandFlagSet(name string, jsonOutput bool) *flag.FlagSet {
+	fs := flag.NewFlagSet(name, flag.ContinueOnError)
+	if jsonOutput {
+		fs.SetOutput(io.Discard)
+	}
+	return fs
+}
+
+type versionResult struct {
+	Version string `json:"version"`
+}
+
+type actionResult struct {
+	Status string `json:"status"`
+	PID    int    `json:"pid,omitempty"`
+}
+
+type localStatusResult struct {
+	Status  string `json:"status"`
+	PID     int    `json:"pid"`
+	PIDFile string `json:"pid_file"`
+}
+
+type storageDSNResult struct {
+	Backend string `json:"backend"`
+	DSN     string `json:"dsn"`
+}
+
+type storageMigrationResult struct {
+	Status   string `json:"status"`
+	Source   string `json:"source"`
+	Target   string `json:"target"`
+	TenantID string `json:"tenant_id"`
+}
+
 func remoteCapableCommand(command string) bool {
 	switch command {
 	case "status", "check", "monitors", "incidents", "intervals", "failures", "maintenance":
@@ -207,11 +304,10 @@ func remoteCapableCommand(command string) bool {
 	}
 }
 
-func runCheck(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("check", flag.ContinueOnError)
+func runCheck(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("check", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
-	format := fs.String("format", "text", "output format: text or json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -220,9 +316,6 @@ func runCheck(args []string, remote *controlapi.Client) error {
 	}
 	if *monitorID == "" {
 		return fmt.Errorf("check requires --monitor")
-	}
-	if *format != "text" && *format != "json" {
-		return fmt.Errorf("check --format must be one of: text, json")
 	}
 	if remote != nil {
 		if defaults.FlagWasSet(fs, "config") {
@@ -235,7 +328,7 @@ func runCheck(args []string, remote *controlapi.Client) error {
 			return err
 		}
 		diagnostic := diagnosticFromRemote(response)
-		if *format == "json" {
+		if jsonOutput {
 			err = cli.PrintDiagnosticJSON(os.Stdout, diagnostic)
 		} else {
 			err = cli.PrintDiagnosticText(os.Stdout, diagnostic)
@@ -288,7 +381,7 @@ func runCheck(args []string, remote *controlapi.Client) error {
 		CheckedAt:          result.CheckedAt.UTC(),
 		Error:              result.Error,
 	}
-	if *format == "json" {
+	if jsonOutput {
 		err = cli.PrintDiagnosticJSON(os.Stdout, diagnostic)
 	} else {
 		err = cli.PrintDiagnosticText(os.Stdout, diagnostic)
@@ -348,8 +441,8 @@ func runDaemon(args []string) error {
 	return runner.Run(ctx)
 }
 
-func runStart(args []string) error {
-	fs := flag.NewFlagSet("start", flag.ContinueOnError)
+func runStart(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("start", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	logFile := fs.String("log-file", defaults.StandaloneLogFile, "path to daemon log file")
@@ -373,12 +466,15 @@ func runStart(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, actionResult{Status: "started", PID: pid})
+	}
 	fmt.Fprintf(os.Stdout, "upag daemon started with PID %d\n", pid)
 	return nil
 }
 
-func runStop(args []string) error {
-	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
+func runStop(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("stop", jsonOutput)
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -391,12 +487,15 @@ func runStop(args []string) error {
 	if err := daemon.Stop(*pidFile, 5*time.Second); err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, actionResult{Status: "stopped"})
+	}
 	fmt.Fprintln(os.Stdout, "upag daemon stopped")
 	return nil
 }
 
-func runDaemonStatus(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+func runDaemonStatus(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("status", jsonOutput)
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -410,6 +509,9 @@ func runDaemonStatus(args []string, remote *controlapi.Client) error {
 		response, err := remote.Status(ctx)
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		fmt.Fprintf(os.Stdout, "upag remote daemon at %s is reachable (version %s, started %s)\n", remote.BaseURL(), response.Version, response.StartedAt.UTC().Format(time.RFC3339Nano))
 		return nil
@@ -425,6 +527,9 @@ func runDaemonStatus(args []string, remote *controlapi.Client) error {
 		return err
 	}
 	if status.Running {
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, localStatusResult{Status: "running", PID: status.PID, PIDFile: status.PIDFile})
+		}
 		fmt.Fprintf(os.Stdout, "upag daemon is running with PID %d using pid file %s\n", status.PID, status.PIDFile)
 		return nil
 	}
@@ -434,8 +539,8 @@ func runDaemonStatus(args []string, remote *controlapi.Client) error {
 	return daemon.ErrNotRunning
 }
 
-func runRestart(args []string) error {
-	fs := flag.NewFlagSet("restart", flag.ContinueOnError)
+func runRestart(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("restart", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	logFile := fs.String("log-file", defaults.StandaloneLogFile, "path to daemon log file")
@@ -462,24 +567,27 @@ func runRestart(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, actionResult{Status: "restarted", PID: pid})
+	}
 	fmt.Fprintf(os.Stdout, "upag daemon restarted with PID %d\n", pid)
 	return nil
 }
 
-func runConfig(args []string) error {
+func runConfig(args []string, jsonOutput bool) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: upag config <reload> [flags]")
 	}
 	switch args[0] {
 	case "reload":
-		return runConfigReload(args[1:])
+		return runConfigReload(args[1:], jsonOutput)
 	default:
 		return fmt.Errorf("usage: upag config <reload> [flags]")
 	}
 }
 
-func runConfigReload(args []string) error {
-	fs := flag.NewFlagSet("config reload", flag.ContinueOnError)
+func runConfigReload(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("config reload", jsonOutput)
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -493,12 +601,15 @@ func runConfigReload(args []string) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, actionResult{Status: "reloaded", PID: pid})
+	}
 	fmt.Fprintf(os.Stdout, "upag daemon reloaded configuration with PID %d\n", pid)
 	return nil
 }
 
-func runMonitors(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
+func runMonitors(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("monitors", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -510,6 +621,9 @@ func runMonitors(args []string, remote *controlapi.Client) error {
 		response, err := remote.Monitors(context.Background())
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		states := make([]storage.MonitorState, 0, len(response.Monitors))
 		for _, monitor := range response.Monitors {
@@ -548,11 +662,24 @@ func runMonitors(args []string, remote *controlapi.Client) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		activeRows := make([]storage.MaintenanceWindow, 0)
+		for _, window := range windows {
+			if window.CancelledAt.IsZero() && !now.Before(window.StartsAt) && now.Before(window.EndsAt) {
+				activeRows = append(activeRows, window)
+			}
+		}
+		return cli.PrintJSON(os.Stdout, controlapi.MonitorsResponse{
+			GeneratedAt:       now,
+			Monitors:          controlapi.MonitorsFromStorage(rows),
+			ActiveMaintenance: controlapi.MaintenanceFromStorage(activeRows),
+		})
+	}
 	return cli.PrintStates(os.Stdout, rows, activeMaintenanceByMonitor(windows, now))
 }
 
-func runIncidents(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("incidents", flag.ContinueOnError)
+func runIncidents(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("incidents", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of incidents to print")
 	sinceRaw := fs.String("since", "", "only print incidents since an RFC3339 timestamp or positive duration")
@@ -570,6 +697,9 @@ func runIncidents(args []string, remote *controlapi.Client) error {
 		response, err := remote.Incidents(context.Background(), *limit, since)
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		rows := make([]storage.Incident, 0, len(response.Incidents))
 		for _, incident := range response.Incidents {
@@ -601,11 +731,14 @@ func runIncidents(args []string, remote *controlapi.Client) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.IncidentsResponse{Incidents: controlapi.IncidentsFromStorage(rows)})
+	}
 	return cli.PrintIncidents(os.Stdout, rows)
 }
 
-func runIntervals(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("intervals", flag.ContinueOnError)
+func runIntervals(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("intervals", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	limit := fs.Int("limit", 50, "maximum number of intervals to print")
@@ -628,6 +761,9 @@ func runIntervals(args []string, remote *controlapi.Client) error {
 		response, err := remote.Intervals(context.Background(), *monitorID, *limit, since)
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		rows := make([]storage.StatusInterval, 0, len(response.Intervals))
 		for _, interval := range response.Intervals {
@@ -664,6 +800,9 @@ func runIntervals(args []string, remote *controlapi.Client) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.IntervalsResponse{GeneratedAt: now, Intervals: controlapi.IntervalsFromStorage(intervals)})
+	}
 	return cli.PrintStatusIntervals(os.Stdout, intervals)
 }
 
@@ -690,8 +829,8 @@ func diagnosticFromRemote(result controlapi.Diagnostic) cli.DiagnosticResult {
 	}
 }
 
-func runFailures(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("failures", flag.ContinueOnError)
+func runFailures(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("failures", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of failures per section")
 	sinceRaw := fs.String("since", "", "only print failures since an RFC3339 timestamp or positive duration")
@@ -709,6 +848,9 @@ func runFailures(args []string, remote *controlapi.Client) error {
 		response, err := remote.Failures(context.Background(), *limit, since)
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		probes := make([]storage.ProbeResult, 0, len(response.FailedProbes))
 		for _, probe := range response.FailedProbes {
@@ -755,34 +897,42 @@ func runFailures(args []string, remote *controlapi.Client) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.FailuresResponse{
+			FailedProbes:   controlapi.ProbeFailuresFromStorage(failedProbes),
+			Observer:       controlapi.ObserverStateFromStorage(observerState),
+			ObserverKnown:  observerKnown,
+			SentinelEvents: controlapi.SentinelEventsFromStorage(sentinelEvents),
+		})
+	}
 	return cli.PrintFailures(os.Stdout, failedProbes, observerState, observerKnown, sentinelEvents)
 }
 
-func runMaintenance(args []string, remote *controlapi.Client) error {
+func runMaintenance(args []string, remote *controlapi.Client, jsonOutput bool) error {
 	if len(args) == 0 {
 		return maintenanceUsage()
 	}
 	switch args[0] {
 	case "add":
-		return runMaintenanceAdd(args[1:], remote)
+		return runMaintenanceAdd(args[1:], remote, jsonOutput)
 	case "cancel":
-		return runMaintenanceCancel(args[1:], remote)
+		return runMaintenanceCancel(args[1:], remote, jsonOutput)
 	case "list":
-		return runMaintenanceList(args[1:], remote)
+		return runMaintenanceList(args[1:], remote, jsonOutput)
 	default:
 		return maintenanceUsage()
 	}
 }
 
-func runStorage(args []string) error {
+func runStorage(args []string, jsonOutput bool) error {
 	if len(args) == 0 {
 		return storageUsage()
 	}
 	switch args[0] {
 	case "migrate":
-		return runStorageMigrate(args[1:])
+		return runStorageMigrate(args[1:], jsonOutput)
 	case "dsn":
-		return runStorageDSN(args[1:])
+		return runStorageDSN(args[1:], jsonOutput)
 	default:
 		return storageUsage()
 	}
@@ -836,8 +986,8 @@ func validatePostgresDSNOptions(opts postgresDSNOptions) error {
 	return nil
 }
 
-func runStorageDSN(args []string) error {
-	fs := flag.NewFlagSet("storage dsn", flag.ContinueOnError)
+func runStorageDSN(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("storage dsn", jsonOutput)
 	host := fs.String("host", "", "PostgreSQL host, for example db.xxxxx.supabase.co")
 	user := fs.String("user", "", "PostgreSQL username")
 	database := fs.String("database", "postgres", "PostgreSQL database name")
@@ -848,6 +998,9 @@ func runStorageDSN(args []string) error {
 	format := fs.String("format", "yaml", "output format: yaml or dsn")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if jsonOutput && defaults.FlagWasSet(fs, "format") {
+		return fmt.Errorf("storage dsn --format cannot be combined with --json")
 	}
 	if *format != "yaml" && *format != "dsn" {
 		return fmt.Errorf("storage dsn --format must be one of: yaml, dsn")
@@ -886,6 +1039,9 @@ func runStorageDSN(args []string) error {
 		fmt.Fprintln(os.Stderr, "PostgreSQL connectivity OK")
 	}
 
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, storageDSNResult{Backend: "postgres", DSN: dsn})
+	}
 	switch *format {
 	case "dsn":
 		fmt.Fprintln(os.Stdout, dsn)
@@ -928,8 +1084,8 @@ func yamlSingleQuotedValue(value string) string {
 	return strings.ReplaceAll(value, "'", "''")
 }
 
-func runStorageMigrate(args []string) error {
-	fs := flag.NewFlagSet("storage migrate", flag.ContinueOnError)
+func runStorageMigrate(args []string, jsonOutput bool) error {
+	fs := newCommandFlagSet("storage migrate", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	fromSQLite := fs.String("from-sqlite", "", "source SQLite database path")
 	tenantID := fs.String("tenant-id", "", "tenant namespace for migrated rows; defaults to config tenant_id")
@@ -970,12 +1126,15 @@ func runStorageMigrate(args []string) error {
 	); err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, storageMigrationResult{Status: "migrated", Source: "sqlite", Target: "postgres", TenantID: effectiveTenant})
+	}
 	fmt.Fprintln(os.Stdout, "SQLite data migrated to PostgreSQL storage")
 	return nil
 }
 
-func runMaintenanceAdd(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("maintenance add", flag.ContinueOnError)
+func runMaintenanceAdd(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("maintenance add", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	startRaw := fs.String("start", "", "maintenance start time in RFC3339 format")
@@ -1008,6 +1167,9 @@ func runMaintenanceAdd(args []string, remote *controlapi.Client) error {
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
+		}
 		fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", response.ID, response.MonitorID)
 		return nil
 	}
@@ -1037,12 +1199,15 @@ func runMaintenanceAdd(args []string, remote *controlapi.Client) error {
 	if err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.AddMaintenanceResponse{ID: id, MonitorID: *monitorID})
+	}
 	fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", id, *monitorID)
 	return nil
 }
 
-func runMaintenanceCancel(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("maintenance cancel", flag.ContinueOnError)
+func runMaintenanceCancel(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("maintenance cancel", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	idRaw := fs.String("id", "", "maintenance window ID")
 	reason := fs.String("reason", "", "cancellation reason")
@@ -1069,6 +1234,9 @@ func runMaintenanceCancel(args []string, remote *controlapi.Client) error {
 		if err != nil {
 			return err
 		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
+		}
 		fmt.Fprintf(os.Stdout, "maintenance window %d cancelled\n", response.ID)
 		return nil
 	}
@@ -1090,12 +1258,15 @@ func runMaintenanceCancel(args []string, remote *controlapi.Client) error {
 	if err := store.CancelMaintenanceWindow(ctx, id, time.Now().UTC(), by, *reason); err != nil {
 		return err
 	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.CancelMaintenanceResponse{ID: id})
+	}
 	fmt.Fprintf(os.Stdout, "maintenance window %d cancelled\n", id)
 	return nil
 }
 
-func runMaintenanceList(args []string, remote *controlapi.Client) error {
-	fs := flag.NewFlagSet("maintenance list", flag.ContinueOnError)
+func runMaintenanceList(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("maintenance list", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	includeAll := fs.Bool("all", false, "include cancelled and ended maintenance windows")
@@ -1109,6 +1280,9 @@ func runMaintenanceList(args []string, remote *controlapi.Client) error {
 		response, err := remote.Maintenance(context.Background(), *monitorID, *includeAll)
 		if err != nil {
 			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
 		}
 		rows := make([]storage.MaintenanceWindow, 0, len(response.Windows))
 		for _, window := range response.Windows {
@@ -1139,6 +1313,9 @@ func runMaintenanceList(args []string, remote *controlapi.Client) error {
 	windows, err := store.ListMaintenanceWindows(ctx, filter)
 	if err != nil {
 		return err
+	}
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, controlapi.MaintenanceResponse{GeneratedAt: now, Windows: controlapi.MaintenanceFromStorage(windows)})
 	}
 	return cli.PrintMaintenanceWindows(os.Stdout, windows, now)
 }
@@ -1236,6 +1413,7 @@ Global options:
   --token TOKEN            Bearer token for the remote daemon
   --remote-timeout DURATION  Remote request timeout (default 1m)
   --local                  Ignore UPAG_REMOTE and run on this host
+  --json                   Emit machine-readable JSON for finite commands
   -h, --help               Show this help page
   --version                Print the upag version
 `)
@@ -1243,5 +1421,5 @@ Global options:
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [--version] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
+	return fmt.Errorf("usage: upag [global options] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
 }
