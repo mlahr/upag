@@ -3,11 +3,36 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
 	"upag/internal/storage"
 )
+
+func TestColorTableStylesHeaderAndSemanticValues(t *testing.T) {
+	plain := "STATUS  NAME\nUP      homepage\nDOWN    api\n"
+	colored := colorTable(plain)
+	for _, want := range []string{
+		ansiBoldCyan + "STATUS  NAME" + ansiReset,
+		ansiGreen + "UP" + ansiReset,
+		ansiRed + "DOWN" + ansiReset,
+	} {
+		if !strings.Contains(colored, want) {
+			t.Fatalf("colored table %q does not contain %q", colored, want)
+		}
+	}
+	if stripped := stripTestANSI(colored); stripped != plain {
+		t.Fatalf("color changed table content or alignment: got %q, want %q", stripped, plain)
+	}
+}
+
+func stripTestANSI(value string) string {
+	for _, sequence := range []string{ansiReset, ansiBoldCyan, ansiGreen, ansiYellow, ansiRed, ansiMagenta} {
+		value = strings.ReplaceAll(value, sequence, "")
+	}
+	return value
+}
 
 func TestPrintDiagnosticText(t *testing.T) {
 	result := DiagnosticResult{

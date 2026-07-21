@@ -24,33 +24,34 @@ type DiagnosticResult struct {
 }
 
 func PrintDiagnosticText(w io.Writer, result DiagnosticResult) error {
-	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	type field struct {
-		label string
-		value any
-	}
-	fields := []field{
-		{label: "MONITOR ID", value: result.MonitorID},
-		{label: "NAME", value: result.Name},
-		{label: "CONFIGURED URL", value: result.ConfiguredURL},
-		{label: "FINAL URL", value: emptyDash(result.FinalURL)},
-		{label: "OK", value: result.OK},
-		{label: "EXPECTED STATUS", value: result.ExpectedStatusCode},
-		{label: "OBSERVED STATUS", value: result.ObservedStatusCode},
-		{label: "REDIRECTS FOLLOWED", value: result.RedirectsFollowed},
-		{label: "LATENCY MS", value: result.LatencyMS},
-		{label: "RESPONSE TIME MS", value: result.ResponseTimeMS},
-		{label: "CHECKED AT", value: result.CheckedAt.UTC().Format(time.RFC3339Nano)},
-	}
-	if result.Error != "" {
-		fields = append(fields, field{label: "ERROR", value: result.Error})
-	}
-	for _, field := range fields {
-		if _, err := fmt.Fprintf(tw, "%s\t%v\n", field.label, field.value); err != nil {
-			return err
+	return printTable(w, func(tw *tabwriter.Writer) error {
+		type field struct {
+			label string
+			value any
 		}
-	}
-	return tw.Flush()
+		fields := []field{
+			{label: "MONITOR ID", value: result.MonitorID},
+			{label: "NAME", value: result.Name},
+			{label: "CONFIGURED URL", value: result.ConfiguredURL},
+			{label: "FINAL URL", value: emptyDash(result.FinalURL)},
+			{label: "OK", value: result.OK},
+			{label: "EXPECTED STATUS", value: result.ExpectedStatusCode},
+			{label: "OBSERVED STATUS", value: result.ObservedStatusCode},
+			{label: "REDIRECTS FOLLOWED", value: result.RedirectsFollowed},
+			{label: "LATENCY MS", value: result.LatencyMS},
+			{label: "RESPONSE TIME MS", value: result.ResponseTimeMS},
+			{label: "CHECKED AT", value: result.CheckedAt.UTC().Format(time.RFC3339Nano)},
+		}
+		if result.Error != "" {
+			fields = append(fields, field{label: "ERROR", value: result.Error})
+		}
+		for _, field := range fields {
+			if _, err := fmt.Fprintf(tw, "%s\t%v\n", field.label, field.value); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func PrintDiagnosticJSON(w io.Writer, result DiagnosticResult) error {
