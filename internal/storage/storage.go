@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -259,6 +260,24 @@ type MaintenanceWindowFilter struct {
 	MonitorID  string
 	IncludeAll bool
 	Now        time.Time
+}
+
+var (
+	ErrMaintenanceInvalid  = errors.New("invalid maintenance window")
+	ErrMaintenanceNotFound = errors.New("maintenance window not found")
+	ErrMaintenanceConflict = errors.New("maintenance window conflict")
+)
+
+type maintenanceError struct {
+	kind    error
+	message string
+}
+
+func (e *maintenanceError) Error() string { return e.message }
+func (e *maintenanceError) Unwrap() error { return e.kind }
+
+func newMaintenanceError(kind error, format string, args ...any) error {
+	return &maintenanceError{kind: kind, message: fmt.Sprintf(format, args...)}
 }
 
 func Open(path string) (*Store, error) {
@@ -1813,18 +1832,18 @@ func (s *Store) ListDueAlertNotificationRetries(ctx context.Context, now time.Ti
 
 func (s *Store) AddMaintenanceWindow(ctx context.Context, window MaintenanceWindow) (int64, error) {
 	if !window.EndsAt.After(window.StartsAt) {
-		return 0, fmt.Errorf("maintenance end must be after start")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance end must be after start")
 	}
 	if strings.TrimSpace(window.Reason) == "" {
-		return 0, fmt.Errorf("maintenance reason is required")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance reason is required")
 	}
 	if strings.TrimSpace(window.CreatedBy) == "" {
-		return 0, fmt.Errorf("maintenance created_by is required")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance created_by is required")
 	}
 	var exists int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM monitor_states WHERE monitor_id = ?`, window.MonitorID).Scan(&exists); err != nil {
 		if err == sql.ErrNoRows {
-			return 0, fmt.Errorf("monitor %q does not exist in monitor_states", window.MonitorID)
+			return 0, newMaintenanceError(ErrMaintenanceNotFound, "monitor %q does not exist in monitor_states", window.MonitorID)
 		}
 		return 0, err
 	}
@@ -1840,7 +1859,7 @@ func (s *Store) AddMaintenanceWindow(ctx context.Context, window MaintenanceWind
 		return 0, err
 	}
 	if overlappingID != 0 {
-		return 0, fmt.Errorf("maintenance window overlaps existing window %d", overlappingID)
+		return 0, newMaintenanceError(ErrMaintenanceConflict, "maintenance window overlaps existing window %d", overlappingID)
 	}
 	createdAt := window.CreatedAt
 	if createdAt.IsZero() {
@@ -1863,7 +1882,7 @@ func (s *Store) AddMaintenanceWindow(ctx context.Context, window MaintenanceWind
 
 func (s *Store) CancelMaintenanceWindow(ctx context.Context, id int64, cancelledAt time.Time, cancelledBy string, reason string) error {
 	if strings.TrimSpace(cancelledBy) == "" {
-		return fmt.Errorf("maintenance cancelled_by is required")
+		return newMaintenanceError(ErrMaintenanceInvalid, "maintenance cancelled_by is required")
 	}
 	if cancelledAt.IsZero() {
 		cancelledAt = time.Now().UTC()
@@ -1882,11 +1901,11 @@ func (s *Store) CancelMaintenanceWindow(ctx context.Context, id int64, cancelled
 	if rows == 0 {
 		var existing int
 		if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM maintenance_windows WHERE id = ?`, id).Scan(&existing); err == sql.ErrNoRows {
-			return fmt.Errorf("maintenance window %d does not exist", id)
+			return newMaintenanceError(ErrMaintenanceNotFound, "maintenance window %d does not exist", id)
 		} else if err != nil {
 			return err
 		}
-		return fmt.Errorf("maintenance window %d is already cancelled", id)
+		return newMaintenanceError(ErrMaintenanceConflict, "maintenance window %d is already cancelled", id)
 	}
 	return nil
 }

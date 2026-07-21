@@ -16,6 +16,8 @@ alerts:
 http:
   address: 127.0.0.1
   port: 0
+  # auth:
+  #   bearer_token: replace-with-a-random-secret
 
 observer:
   enabled: true

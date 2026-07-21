@@ -402,6 +402,30 @@ func TestCheckSucceedsWhenResponseBodyCommandExitsZero(t *testing.T) {
 	}
 }
 
+func TestCheckScrubsRemoteClientEnvironmentFromResponseBodyCommand(t *testing.T) {
+	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
+	t.Setenv("UPAG_REMOTE", "https://remote.example")
+	t.Setenv("UPAG_TOKEN", "secret")
+	t.Setenv("UPAG_REMOTE_TIMEOUT", "5s")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ready"))
+	}))
+	defer server.Close()
+
+	result := Check(context.Background(), config.MonitorConfig{
+		URL:                server.URL,
+		ExpectedStatusCode: http.StatusOK,
+		Timeout:            config.Duration{Duration: time.Second},
+		ResponseBody: config.ResponseBodyAssertions{
+			Command:        helperCommand("remote-env-absent"),
+			CommandTimeout: config.Duration{Duration: 5 * time.Second},
+		},
+	})
+	if !result.OK {
+		t.Fatalf("expected scrubbed command environment, got error %q", result.Error)
+	}
+}
+
 func TestCheckPassesExactResponseBodyBytesToCommandStdin(t *testing.T) {
 	t.Setenv("UPAG_CHECKER_HELPER_PROCESS", "1")
 	body := []byte{0xff, 'o', 'k', 0x00}
@@ -595,6 +619,15 @@ func TestResponseBodyCommandHelperProcess(t *testing.T) {
 			os.Exit(2)
 		}
 		time.Sleep(duration)
+	case "remote-env-absent":
+		if len(args) != 2 {
+			os.Exit(2)
+		}
+		for _, key := range []string{"UPAG_REMOTE", "UPAG_TOKEN", "UPAG_REMOTE_TIMEOUT"} {
+			if _, exists := os.LookupEnv(key); exists {
+				os.Exit(1)
+			}
+		}
 	default:
 		os.Exit(2)
 	}

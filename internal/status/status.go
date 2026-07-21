@@ -46,7 +46,7 @@ type Server struct {
 	shutdownErr  error
 }
 
-func Start(ctx context.Context, address string, port int, store Store, tenantID string, metadata MetadataProvider) (*Server, error) {
+func Start(ctx context.Context, address string, port int, store Store, tenantID string, metadata MetadataProvider, controlHandlers ...http.Handler) (*Server, error) {
 	listenAddress := ListenAddress(address, port)
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
@@ -54,7 +54,10 @@ func Start(ctx context.Context, address string, port int, store Store, tenantID 
 	}
 
 	server := &http.Server{
-		Handler: NewHandler(store, tenantID, metadata),
+		Handler:           NewHandler(store, tenantID, metadata, controlHandlers...),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	serverCtx, cancel := context.WithCancel(ctx)
 	statusServer := &Server{
@@ -85,8 +88,16 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.shutdownErr
 }
 
-func NewHandler(store Store, tenantID string, metadata MetadataProvider) http.Handler {
+func (s *Server) Close() error {
+	s.cancel()
+	return s.server.Close()
+}
+
+func NewHandler(store Store, tenantID string, metadata MetadataProvider, controlHandlers ...http.Handler) http.Handler {
 	mux := http.NewServeMux()
+	if len(controlHandlers) > 0 && controlHandlers[0] != nil {
+		mux.Handle("/v1/", controlHandlers[0])
+	}
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		if !allowGet(w, r) {
 			return

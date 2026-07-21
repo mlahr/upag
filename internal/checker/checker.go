@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -189,6 +190,7 @@ func runResponseBodyCommand(ctx context.Context, assertion config.ResponseBodyAs
 	defer cancel()
 
 	cmd := exec.CommandContext(cmdCtx, assertion.Command[0], assertion.Command[1:]...)
+	cmd.Env = commandEnvironment(os.Environ())
 	cmd.Stdin = bytes.NewReader(body)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -206,6 +208,20 @@ func runResponseBodyCommand(ctx context.Context, assertion config.ResponseBodyAs
 		return fmt.Errorf("run response body command %q: %v", assertion.Command[0], err)
 	}
 	return nil
+}
+
+func commandEnvironment(environment []string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "UPAG_REMOTE", "UPAG_TOKEN", "UPAG_REMOTE_TIMEOUT":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func stderrExcerpt(stderr string) string {

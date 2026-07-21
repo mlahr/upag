@@ -22,6 +22,7 @@ import (
 	"upag/internal/checker"
 	"upag/internal/cli"
 	"upag/internal/config"
+	"upag/internal/controlapi"
 	"upag/internal/daemon"
 	"upag/internal/defaults"
 	"upag/internal/logging"
@@ -55,6 +56,25 @@ func run(args []string) error {
 		return nil
 	}
 
+	global, commandArgs, err := parseGlobalOptions(args)
+	if err != nil {
+		return err
+	}
+	if len(commandArgs) == 0 {
+		return usage()
+	}
+	var remote *controlapi.Client
+	if global.Remote != "" {
+		remote, err = controlapi.NewClient(global.Remote, global.Token, global.Timeout)
+		if err != nil {
+			return err
+		}
+	}
+	args = commandArgs
+	if remote != nil && !remoteCapableCommand(args[0]) {
+		return fmt.Errorf("%s cannot run remotely; pass --local to run it on this host", args[0])
+	}
+
 	switch args[0] {
 	case "run":
 		return runDaemon(args[1:])
@@ -63,23 +83,23 @@ func run(args []string) error {
 	case "stop":
 		return runStop(args[1:])
 	case "status":
-		return runDaemonStatus(args[1:])
+		return runDaemonStatus(args[1:], remote)
 	case "restart":
 		return runRestart(args[1:])
 	case "config":
 		return runConfig(args[1:])
 	case "check":
-		return runCheck(args[1:])
+		return runCheck(args[1:], remote)
 	case "monitors":
-		return runMonitors(args[1:])
+		return runMonitors(args[1:], remote)
 	case "incidents":
-		return runIncidents(args[1:])
+		return runIncidents(args[1:], remote)
 	case "intervals":
-		return runIntervals(args[1:])
+		return runIntervals(args[1:], remote)
 	case "failures":
-		return runFailures(args[1:])
+		return runFailures(args[1:], remote)
 	case "maintenance":
-		return runMaintenance(args[1:])
+		return runMaintenance(args[1:], remote)
 	case "storage":
 		return runStorage(args[1:])
 	default:
@@ -87,7 +107,107 @@ func run(args []string) error {
 	}
 }
 
-func runCheck(args []string) error {
+type globalOptions struct {
+	Remote  string
+	Token   string
+	Timeout time.Duration
+}
+
+func parseGlobalOptions(args []string) (globalOptions, []string, error) {
+	options := globalOptions{Timeout: time.Minute}
+	remoteSet := false
+	tokenSet := false
+	timeoutSet := false
+	local := false
+	index := 0
+	readValue := func(name string) (string, error) {
+		index++
+		if index >= len(args) {
+			return "", fmt.Errorf("%s requires a value", name)
+		}
+		return args[index], nil
+	}
+	for index < len(args) {
+		arg := args[index]
+		if !strings.HasPrefix(arg, "--") || arg == "--" {
+			break
+		}
+		var value string
+		var err error
+		switch {
+		case arg == "--remote":
+			value, err = readValue("--remote")
+			if err == nil {
+				options.Remote, remoteSet = value, true
+			}
+		case strings.HasPrefix(arg, "--remote="):
+			options.Remote, remoteSet = strings.TrimPrefix(arg, "--remote="), true
+		case arg == "--token":
+			value, err = readValue("--token")
+			if err == nil {
+				options.Token, tokenSet = value, true
+			}
+		case strings.HasPrefix(arg, "--token="):
+			options.Token, tokenSet = strings.TrimPrefix(arg, "--token="), true
+		case arg == "--remote-timeout":
+			value, err = readValue("--remote-timeout")
+			if err == nil {
+				options.Timeout, err = time.ParseDuration(value)
+				timeoutSet = true
+			}
+		case strings.HasPrefix(arg, "--remote-timeout="):
+			options.Timeout, err = time.ParseDuration(strings.TrimPrefix(arg, "--remote-timeout="))
+			timeoutSet = true
+		case arg == "--local":
+			local = true
+		default:
+			return globalOptions{}, nil, fmt.Errorf("unknown global option %s; global options must appear before the command", arg)
+		}
+		if err != nil {
+			return globalOptions{}, nil, err
+		}
+		index++
+	}
+	if local && (remoteSet || tokenSet || timeoutSet) {
+		return globalOptions{}, nil, fmt.Errorf("--local cannot be combined with remote options")
+	}
+	if local {
+		return options, args[index:], nil
+	}
+	if remoteSet && options.Remote == "" {
+		return globalOptions{}, nil, fmt.Errorf("--remote requires a non-empty URL")
+	}
+	if !remoteSet {
+		options.Remote = os.Getenv("UPAG_REMOTE")
+	}
+	if !tokenSet {
+		options.Token = os.Getenv("UPAG_TOKEN")
+	}
+	if !timeoutSet {
+		if raw := os.Getenv("UPAG_REMOTE_TIMEOUT"); raw != "" {
+			parsed, err := time.ParseDuration(raw)
+			if err != nil {
+				return globalOptions{}, nil, fmt.Errorf("UPAG_REMOTE_TIMEOUT: %w", err)
+			}
+			options.Timeout = parsed
+		}
+	}
+	if options.Remote == "" && (options.Token != "" || timeoutSet || os.Getenv("UPAG_REMOTE_TIMEOUT") != "") {
+		return globalOptions{}, nil, fmt.Errorf("remote options require --remote or UPAG_REMOTE")
+	}
+	return options, args[index:], nil
+}
+
+func remoteCapableCommand(command string) bool {
+	switch command {
+	case "status", "check", "monitors", "incidents", "intervals", "failures", "maintenance":
+		return true
+	default:
+		return false
+	}
+}
+
+func runCheck(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("check", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
@@ -98,16 +218,40 @@ func runCheck(args []string) error {
 	if fs.NArg() != 0 {
 		return fmt.Errorf("check does not accept positional arguments")
 	}
-	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-	); err != nil {
-		return err
-	}
 	if *monitorID == "" {
 		return fmt.Errorf("check requires --monitor")
 	}
 	if *format != "text" && *format != "json" {
 		return fmt.Errorf("check --format must be one of: text, json")
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("check --config cannot be used with --remote")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		response, err := remote.Check(ctx, *monitorID)
+		if err != nil {
+			return err
+		}
+		diagnostic := diagnosticFromRemote(response)
+		if *format == "json" {
+			err = cli.PrintDiagnosticJSON(os.Stdout, diagnostic)
+		} else {
+			err = cli.PrintDiagnosticText(os.Stdout, diagnostic)
+		}
+		if err != nil {
+			return err
+		}
+		if !diagnostic.OK {
+			return fmt.Errorf("diagnostic check failed")
+		}
+		return nil
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
 	}
 
 	cfg, err := config.LoadFile(*configPath)
@@ -251,11 +395,24 @@ func runStop(args []string) error {
 	return nil
 }
 
-func runDaemonStatus(args []string) error {
+func runDaemonStatus(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	pidFile := fs.String("pid-file", defaults.StandalonePIDFile, "path to daemon PID file")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "pid-file") {
+			return fmt.Errorf("status --pid-file cannot be used with --remote")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		response, err := remote.Status(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "upag remote daemon at %s is reachable (version %s, started %s)\n", remote.BaseURL(), response.Version, response.StartedAt.UTC().Format(time.RFC3339Nano))
+		return nil
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "pid-file", Value: pidFile, Default: func(d defaults.Paths) string { return d.PIDFile }},
@@ -340,11 +497,30 @@ func runConfigReload(args []string) error {
 	return nil
 }
 
-func runMonitors(args []string) error {
+func runMonitors(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("monitors", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("monitors --config cannot be used with --remote")
+		}
+		response, err := remote.Monitors(context.Background())
+		if err != nil {
+			return err
+		}
+		states := make([]storage.MonitorState, 0, len(response.Monitors))
+		for _, monitor := range response.Monitors {
+			states = append(states, monitor.Storage())
+		}
+		active := make(map[string]storage.MaintenanceWindow, len(response.ActiveMaintenance))
+		for _, window := range response.ActiveMaintenance {
+			stored := window.Storage()
+			active[stored.MonitorID] = stored
+		}
+		return cli.PrintStates(os.Stdout, states, active)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -375,7 +551,7 @@ func runMonitors(args []string) error {
 	return cli.PrintStates(os.Stdout, rows, activeMaintenanceByMonitor(windows, now))
 }
 
-func runIncidents(args []string) error {
+func runIncidents(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("incidents", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of incidents to print")
@@ -386,6 +562,20 @@ func runIncidents(args []string) error {
 	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
 	if err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("incidents --config cannot be used with --remote")
+		}
+		response, err := remote.Incidents(context.Background(), *limit, since)
+		if err != nil {
+			return err
+		}
+		rows := make([]storage.Incident, 0, len(response.Incidents))
+		for _, incident := range response.Incidents {
+			rows = append(rows, incident.Storage())
+		}
+		return cli.PrintIncidents(os.Stdout, rows)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -414,7 +604,7 @@ func runIncidents(args []string) error {
 	return cli.PrintIncidents(os.Stdout, rows)
 }
 
-func runIntervals(args []string) error {
+func runIntervals(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("intervals", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
@@ -430,6 +620,20 @@ func runIntervals(args []string) error {
 	since, err := parseCLISince(*sinceRaw, "--since", now)
 	if err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("intervals --config cannot be used with --remote")
+		}
+		response, err := remote.Intervals(context.Background(), *monitorID, *limit, since)
+		if err != nil {
+			return err
+		}
+		rows := make([]storage.StatusInterval, 0, len(response.Intervals))
+		for _, interval := range response.Intervals {
+			rows = append(rows, interval.Storage())
+		}
+		return cli.PrintStatusIntervalsAt(os.Stdout, rows, response.GeneratedAt)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -476,7 +680,17 @@ func configuredFailureThresholds(cfg config.Config) storage.FailureThresholds {
 	return thresholds
 }
 
-func runFailures(args []string) error {
+func diagnosticFromRemote(result controlapi.Diagnostic) cli.DiagnosticResult {
+	return cli.DiagnosticResult{
+		MonitorID: result.MonitorID, Name: result.Name, ConfiguredURL: result.ConfiguredURL,
+		FinalURL: result.FinalURL, OK: result.OK, ExpectedStatusCode: result.ExpectedStatusCode,
+		ObservedStatusCode: result.ObservedStatusCode, RedirectsFollowed: result.RedirectsFollowed,
+		LatencyMS: result.LatencyMS, ResponseTimeMS: result.ResponseTimeMS,
+		CheckedAt: result.CheckedAt, Error: result.Error,
+	}
+}
+
+func runFailures(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("failures", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	limit := fs.Int("limit", 50, "maximum number of failures per section")
@@ -487,6 +701,24 @@ func runFailures(args []string) error {
 	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
 	if err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("failures --config cannot be used with --remote")
+		}
+		response, err := remote.Failures(context.Background(), *limit, since)
+		if err != nil {
+			return err
+		}
+		probes := make([]storage.ProbeResult, 0, len(response.FailedProbes))
+		for _, probe := range response.FailedProbes {
+			probes = append(probes, probe.Storage())
+		}
+		events := make([]storage.ObserverSentinelResult, 0, len(response.SentinelEvents))
+		for _, event := range response.SentinelEvents {
+			events = append(events, event.Storage())
+		}
+		return cli.PrintFailures(os.Stdout, probes, response.Observer.Storage(), response.ObserverKnown, events)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -526,17 +758,17 @@ func runFailures(args []string) error {
 	return cli.PrintFailures(os.Stdout, failedProbes, observerState, observerKnown, sentinelEvents)
 }
 
-func runMaintenance(args []string) error {
+func runMaintenance(args []string, remote *controlapi.Client) error {
 	if len(args) == 0 {
 		return maintenanceUsage()
 	}
 	switch args[0] {
 	case "add":
-		return runMaintenanceAdd(args[1:])
+		return runMaintenanceAdd(args[1:], remote)
 	case "cancel":
-		return runMaintenanceCancel(args[1:])
+		return runMaintenanceCancel(args[1:], remote)
 	case "list":
-		return runMaintenanceList(args[1:])
+		return runMaintenanceList(args[1:], remote)
 	default:
 		return maintenanceUsage()
 	}
@@ -742,7 +974,7 @@ func runStorageMigrate(args []string) error {
 	return nil
 }
 
-func runMaintenanceAdd(args []string) error {
+func runMaintenanceAdd(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("maintenance add", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
@@ -751,11 +983,6 @@ func runMaintenanceAdd(args []string) error {
 	reason := fs.String("reason", "", "maintenance reason")
 	actor := fs.String("by", "", "operator identity for audit records")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-	); err != nil {
 		return err
 	}
 	if *monitorID == "" {
@@ -771,6 +998,22 @@ func runMaintenanceAdd(args []string) error {
 	}
 	by, err := auditActor(*actor)
 	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("maintenance add --config cannot be used with --remote")
+		}
+		response, err := remote.AddMaintenance(context.Background(), controlapi.AddMaintenanceRequest{MonitorID: *monitorID, StartsAt: start, EndsAt: end, Reason: *reason, CreatedBy: by})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", response.ID, response.MonitorID)
+		return nil
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
 		return err
 	}
 	cfg, err := config.LoadFile(*configPath)
@@ -798,18 +1041,13 @@ func runMaintenanceAdd(args []string) error {
 	return nil
 }
 
-func runMaintenanceCancel(args []string) error {
+func runMaintenanceCancel(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("maintenance cancel", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	idRaw := fs.String("id", "", "maintenance window ID")
 	reason := fs.String("reason", "", "cancellation reason")
 	actor := fs.String("by", "", "operator identity for audit records")
 	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if err := defaults.ApplyPaths(fs,
-		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
-	); err != nil {
 		return err
 	}
 	if *idRaw == "" {
@@ -821,6 +1059,22 @@ func runMaintenanceCancel(args []string) error {
 	}
 	by, err := auditActor(*actor)
 	if err != nil {
+		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("maintenance cancel --config cannot be used with --remote")
+		}
+		response, err := remote.CancelMaintenance(context.Background(), id, controlapi.CancelMaintenanceRequest{Reason: *reason, CancelledBy: by})
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stdout, "maintenance window %d cancelled\n", response.ID)
+		return nil
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
 		return err
 	}
 	cfg, err := config.LoadFile(*configPath)
@@ -840,13 +1094,27 @@ func runMaintenanceCancel(args []string) error {
 	return nil
 }
 
-func runMaintenanceList(args []string) error {
+func runMaintenanceList(args []string, remote *controlapi.Client) error {
 	fs := flag.NewFlagSet("maintenance list", flag.ContinueOnError)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
 	monitorID := fs.String("monitor", "", "monitor ID")
 	includeAll := fs.Bool("all", false, "include cancelled and ended maintenance windows")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("maintenance list --config cannot be used with --remote")
+		}
+		response, err := remote.Maintenance(context.Background(), *monitorID, *includeAll)
+		if err != nil {
+			return err
+		}
+		rows := make([]storage.MaintenanceWindow, 0, len(response.Windows))
+		for _, window := range response.Windows {
+			rows = append(rows, window.Storage())
+		}
+		return cli.PrintMaintenanceWindows(os.Stdout, rows, response.GeneratedAt)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -964,8 +1232,12 @@ Storage commands:
   storage      Configure or migrate storage
 
 Global options:
-  -h, --help   Show this help page
-  --version    Print the upag version
+  --remote URL             Run a supported command against a remote daemon
+  --token TOKEN            Bearer token for the remote daemon
+  --remote-timeout DURATION  Remote request timeout (default 1m)
+  --local                  Ignore UPAG_REMOTE and run on this host
+  -h, --help               Show this help page
+  --version                Print the upag version
 `)
 	return err
 }

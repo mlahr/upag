@@ -16,6 +16,7 @@ import (
 	"upag/internal/alert"
 	"upag/internal/checker"
 	"upag/internal/config"
+	"upag/internal/controlapi"
 	"upag/internal/monitor"
 	"upag/internal/observer"
 	"upag/internal/state"
@@ -60,6 +61,8 @@ type observerWorker struct {
 	cancel context.CancelFunc
 	config config.ObserverConfig
 }
+
+var statusServerShutdownTimeout = 5 * time.Second
 
 func NewRunner(configPath string, cfg config.Config, store storage.Backend, out io.Writer, errOut io.Writer, version string) (*Runner, error) {
 	return &Runner{
@@ -219,22 +222,26 @@ func (r *Runner) applyStatusServer(parent context.Context, address string, port 
 	var nextServer *httpstatus.Server
 	if port > 0 {
 		var err error
-		nextServer, err = httpstatus.Start(parent, address, port, r.store, tenantID, r.statusMetadata)
+		controlHandler := controlapi.NewHandler(r.store, r.controlRuntime)
+		nextServer, err = httpstatus.Start(parent, address, port, r.store, tenantID, r.statusMetadata, controlHandler)
 		if err != nil {
 			return err
 		}
 	}
 
 	if currentServer != nil {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), statusServerShutdownTimeout)
 		if err := currentServer.Shutdown(shutdownCtx); err != nil {
 			cancel()
-			if nextServer != nil {
-				_ = nextServer.Shutdown(context.Background())
+			closeErr := currentServer.Close()
+			closeError := ""
+			if closeErr != nil {
+				closeError = closeErr.Error()
 			}
-			return err
+			r.logError("status_http_shutdown_forced", "address=%q error=%q close_error=%q", httpstatus.ListenAddress(currentAddress, currentPort), err, closeError)
+		} else {
+			cancel()
 		}
-		cancel()
 	}
 
 	r.mu.Lock()
@@ -279,6 +286,21 @@ func (r *Runner) statusMetadata() httpstatus.Metadata {
 		StartedAt:         r.startedAt,
 		ConfigPath:        r.configPath,
 		MonitorCount:      len(r.cfg.Monitors),
+		FailureThresholds: failureThresholds(r.cfg),
+	}
+}
+
+func (r *Runner) controlRuntime() controlapi.Runtime {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	monitors := make([]config.MonitorConfig, len(r.cfg.Monitors))
+	copy(monitors, r.cfg.Monitors)
+	return controlapi.Runtime{
+		Version:           r.version,
+		StartedAt:         r.startedAt,
+		TenantID:          r.cfg.TenantID,
+		BearerToken:       r.cfg.HTTP.Auth.BearerToken,
+		Monitors:          monitors,
 		FailureThresholds: failureThresholds(r.cfg),
 	}
 }

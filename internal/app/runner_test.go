@@ -716,6 +716,100 @@ func TestApplyStatusServerRestartsWhenTenantChanges(t *testing.T) {
 	runner.stopStatusServer()
 }
 
+func TestApplyStatusServerKeepsReplacementAfterForcedOldServerClose(t *testing.T) {
+	checkStarted := make(chan struct{})
+	checkTarget := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(checkStarted)
+		<-r.Context().Done()
+	}))
+	defer checkTarget.Close()
+
+	store, err := storage.Open(filepath.Join(t.TempDir(), "test.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	cfg := config.Config{
+		HTTP:     config.HTTPConfig{Auth: config.HTTPAuthConfig{BearerToken: "secret"}},
+		TenantID: "default",
+		Defaults: config.Defaults{FailureThreshold: 1},
+		Monitors: []config.MonitorConfig{{
+			ID:                 "slow",
+			Name:               "Slow",
+			URL:                checkTarget.URL,
+			ExpectedStatusCode: http.StatusOK,
+			Timeout:            config.Duration{Duration: 30 * time.Second},
+		}},
+	}
+	runner, err := NewRunner("config.yaml", cfg, store, io.Discard, io.Discard, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	firstPort := reserveTCPPort(t)
+	secondPort := reserveTCPPort(t)
+	for secondPort == firstPort {
+		secondPort = reserveTCPPort(t)
+	}
+	if err := runner.applyStatusServer(ctx, "127.0.0.1", firstPort, "default"); err != nil {
+		t.Fatal(err)
+	}
+	defer runner.stopStatusServer()
+
+	request, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://127.0.0.1:%d/v1/checks/slow", firstPort), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer secret")
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-checkStarted:
+	case <-time.After(time.Second):
+		t.Fatal("remote check did not start")
+	}
+
+	previousTimeout := statusServerShutdownTimeout
+	statusServerShutdownTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { statusServerShutdownTimeout = previousTimeout })
+	if err := runner.applyStatusServer(ctx, "127.0.0.1", secondPort, "default"); err != nil {
+		t.Fatalf("replace status server: %v", err)
+	}
+	response, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/health", secondPort))
+	if err != nil {
+		t.Fatalf("replacement server unavailable: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("replacement health status = %d, want 200", response.StatusCode)
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("old remote check was not terminated by forced close")
+	}
+}
+
+func reserveTCPPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return port
+}
+
 func monitorIDWithMinimumDelay(t *testing.T, interval time.Duration, minimum time.Duration) string {
 	t.Helper()
 	for i := 0; i < 1000; i++ {

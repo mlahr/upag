@@ -511,6 +511,50 @@ monitors:
 	}
 }
 
+func TestParseAcceptsHTTPBearerToken(t *testing.T) {
+	cfg, err := Parse([]byte(`
+http:
+  port: 8080
+  auth:
+    bearer_token: direct-token
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com
+    expected_status_code: 200
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.Auth.BearerToken != "direct-token" {
+		t.Fatalf("bearer token = %q", cfg.HTTP.Auth.BearerToken)
+	}
+}
+
+func TestParseRejectsHTTPBearerTokenWhitespace(t *testing.T) {
+	_, err := Parse([]byte(`
+http:
+  auth:
+    bearer_token: " token"
+smtp:
+  host: smtp.example.com
+  from: alerts@example.com
+  to: [ops@example.com]
+monitors:
+  - id: home
+    name: Home
+    url: https://example.com
+    expected_status_code: 200
+`))
+	if err == nil || !strings.Contains(err.Error(), "http.auth.bearer_token") {
+		t.Fatalf("error = %v, want bearer token validation error", err)
+	}
+}
+
 func TestParseAcceptsHTTPAddress(t *testing.T) {
 	for _, address := range []string{"0.0.0.0", "::1", "localhost"} {
 		t.Run(address, func(t *testing.T) {

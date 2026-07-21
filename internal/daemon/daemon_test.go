@@ -3,9 +3,25 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 )
+
+func TestDaemonEnvironmentRemovesRemoteClientTargeting(t *testing.T) {
+	environment := []string{
+		"PATH=/usr/bin",
+		"UPAG_REMOTE=https://remote.example",
+		"UPAG_TOKEN=secret",
+		"UPAG_REMOTE_TIMEOUT=5s",
+		"UPAG_CONFIG=/etc/upag/config.yaml",
+	}
+	got := daemonEnvironment(environment)
+	want := []string{"PATH=/usr/bin", "UPAG_CONFIG=/etc/upag/config.yaml"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("daemon environment = %v, want %v", got, want)
+	}
+}
 
 func TestInspectMissingPIDFileReportsNotRunning(t *testing.T) {
 	status, err := Inspect(filepath.Join(t.TempDir(), "missing.pid"))

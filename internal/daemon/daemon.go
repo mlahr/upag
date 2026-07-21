@@ -70,6 +70,7 @@ func Start(opts Options) (int, error) {
 		cmdArgs = append(cmdArgs, "--syslog")
 	}
 	cmd := exec.Command(exe, cmdArgs...)
+	cmd.Env = daemonEnvironment(os.Environ())
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.Stdin = nil
@@ -86,6 +87,20 @@ func Start(opts Options) (int, error) {
 		return 0, fmt.Errorf("write pid file %q: %w", opts.PIDFile, err)
 	}
 	return pid, nil
+}
+
+func daemonEnvironment(environment []string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		key, _, _ := strings.Cut(entry, "=")
+		switch key {
+		case "UPAG_REMOTE", "UPAG_TOKEN", "UPAG_REMOTE_TIMEOUT":
+			continue
+		default:
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func validateStartOptions(opts Options) error {

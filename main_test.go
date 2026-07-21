@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"upag/internal/cli"
+	"upag/internal/controlapi"
 	"upag/internal/defaults"
 	"upag/internal/state"
 	"upag/internal/storage"
@@ -178,6 +179,93 @@ func TestRunRecognizesDaemonStatusCommand(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "daemon is not running") {
 		t.Fatalf("status error = %q, want daemon not running", err.Error())
+	}
+}
+
+func TestParseGlobalOptionsUsesFlagsEnvironmentAndLocalOverride(t *testing.T) {
+	t.Setenv("UPAG_REMOTE", "https://env.example")
+	t.Setenv("UPAG_TOKEN", "env-token")
+	options, args, err := parseGlobalOptions([]string{"--token", "flag-token", "monitors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Remote != "https://env.example" || options.Token != "flag-token" || len(args) != 1 || args[0] != "monitors" {
+		t.Fatalf("options = %+v, args = %v", options, args)
+	}
+	options, args, err = parseGlobalOptions([]string{"--local", "monitors"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Remote != "" || options.Token != "" || len(args) != 1 || args[0] != "monitors" {
+		t.Fatalf("local options = %+v, args = %v", options, args)
+	}
+}
+
+func TestParseGlobalOptionsRejectsExplicitEmptyRemote(t *testing.T) {
+	t.Setenv("UPAG_REMOTE", "")
+	t.Setenv("UPAG_TOKEN", "")
+	for _, args := range [][]string{{"--remote", "", "monitors"}, {"--remote=", "maintenance", "cancel", "--id", "1"}} {
+		_, _, err := parseGlobalOptions(args)
+		if err == nil || !strings.Contains(err.Error(), "--remote requires a non-empty URL") {
+			t.Fatalf("parseGlobalOptions(%v) error = %v", args, err)
+		}
+	}
+}
+
+func TestRunRemoteStatusPrintsReachabilityMetadata(t *testing.T) {
+	started := time.Date(2026, 7, 21, 3, 4, 5, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("authorization = %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok", "version": "v2", "started_at": started})
+	}))
+	defer server.Close()
+	var runErr error
+	stdout := captureStdout(t, func() { runErr = run([]string{"--remote", server.URL, "--token", "secret", "status"}) })
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	for _, want := range []string{server.URL, "v2", started.Format(time.RFC3339Nano), "reachable"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("output %q does not contain %q", stdout, want)
+		}
+	}
+}
+
+func TestRunRemoteIntervalsUsesServerGenerationTime(t *testing.T) {
+	generatedAt := time.Date(2020, 1, 2, 3, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/intervals" {
+			t.Fatalf("path = %q", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode(controlapi.IntervalsResponse{
+			GeneratedAt: generatedAt,
+			Intervals: []controlapi.Interval{{
+				MonitorID: "home",
+				Status:    "DOWN",
+				StartedAt: generatedAt.Add(-90 * time.Minute),
+				Downtime:  true,
+			}},
+		})
+	}))
+	defer server.Close()
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{"--remote", server.URL, "--token", "secret", "intervals"})
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !strings.Contains(stdout, "1h30m0s") {
+		t.Fatalf("output %q does not use server generation time", stdout)
+	}
+}
+
+func TestRunRejectsLocalOnlyCommandInRemoteMode(t *testing.T) {
+	err := run([]string{"--remote", "http://example.com", "--token", "secret", "start"})
+	if err == nil || !strings.Contains(err.Error(), "cannot run remotely") {
+		t.Fatalf("error = %v", err)
 	}
 }
 

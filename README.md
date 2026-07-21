@@ -349,7 +349,9 @@ the daemon listens on `http.address:<port>`. `http.address` defaults to
 
 Use `0.0.0.0` or `::` only when the status endpoints should be reachable from
 other hosts, and restrict access at the host, firewall, or reverse-proxy layer.
-The status endpoints do not perform authentication.
+The legacy status endpoints do not perform authentication. Configure
+`http.auth.bearer_token` to enable the separate authenticated `/v1` remote
+command API.
 
 Endpoints:
 
@@ -518,6 +520,55 @@ The history endpoint is intentionally derived from confirmed status intervals,
 not raw failed probes. It therefore uses the same failure-threshold,
 maintenance, and observer-suppression semantics as the aggregate uptime windows
 returned by `GET /status`.
+
+### Remote Commands
+
+A running daemon can serve authenticated remote CLI commands when its HTTP
+listener and bearer token are configured:
+
+```yaml
+http:
+  address: 0.0.0.0
+  port: 8080
+  auth:
+    bearer_token: replace-with-a-random-secret
+```
+
+Put global remote options before the command:
+
+```sh
+upag --remote https://host-b.example --token "$UPAG_TOKEN" status
+upag --remote https://host-b.example --token "$UPAG_TOKEN" monitors
+upag --remote https://host-b.example --token "$UPAG_TOKEN" check --monitor homepage
+upag --remote https://host-b.example --token "$UPAG_TOKEN" incidents --limit 20
+upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
+  --monitor homepage --start 2026-07-21T01:00:00Z \
+  --end 2026-07-21T02:00:00Z --reason deploy
+```
+
+`UPAG_REMOTE`, `UPAG_TOKEN`, and `UPAG_REMOTE_TIMEOUT` provide defaults. The
+request timeout defaults to `1m`. Use `--local` to ignore those environment
+variables for one invocation. Remote-capable commands are `status`, `check`,
+`monitors`, `incidents`, `intervals`, `failures`, and `maintenance`; every
+other command is local-only.
+
+Remote `check` executes from the daemon host using the daemon's active monitor
+configuration. It makes one attempt without configured probe retries and does
+not change stored monitor state. A configured `response_body.command` runs on
+the daemon host, but a remote request cannot supply or change that command.
+
+The bearer token is sent in the `Authorization` header. Passing it with
+`--token` may expose it in shell history or process listings; `UPAG_TOKEN` is
+usually safer. The daemon does not provide TLS. Use a reverse proxy or another
+protected transport for HTTPS. Plain HTTP is supported but exposes the token
+to anyone able to observe the network path. HTTPS certificates must be trusted
+by the client host's system certificate store; self-signed certificate
+bypasses are not supported.
+
+The legacy `/health`, `/status`, and `/status/history` endpoints remain public.
+The `/v1` routes return `404` when no bearer token is configured and require the
+configured token otherwise. A local configuration reload applies a changed
+token to subsequent requests.
 
 ### Defaults
 

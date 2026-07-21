@@ -1325,18 +1325,18 @@ func (s *PostgresStore) ListDueAlertNotificationRetries(ctx context.Context, now
 func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window MaintenanceWindow) (int64, error) {
 	tenantID := TenantFromContext(ctx)
 	if !window.EndsAt.After(window.StartsAt) {
-		return 0, fmt.Errorf("maintenance end must be after start")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance end must be after start")
 	}
 	if strings.TrimSpace(window.Reason) == "" {
-		return 0, fmt.Errorf("maintenance reason is required")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance reason is required")
 	}
 	if strings.TrimSpace(window.CreatedBy) == "" {
-		return 0, fmt.Errorf("maintenance created_by is required")
+		return 0, newMaintenanceError(ErrMaintenanceInvalid, "maintenance created_by is required")
 	}
 	var exists int
 	if err := s.pool.QueryRow(ctx, `SELECT 1 FROM monitor_states WHERE tenant_id = $1 AND monitor_id = $2`, tenantID, window.MonitorID).Scan(&exists); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, fmt.Errorf("monitor %q does not exist in monitor_states", window.MonitorID)
+			return 0, newMaintenanceError(ErrMaintenanceNotFound, "monitor %q does not exist in monitor_states", window.MonitorID)
 		}
 		return 0, err
 	}
@@ -1353,7 +1353,7 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 		return 0, err
 	}
 	if overlappingID != 0 {
-		return 0, fmt.Errorf("maintenance window overlaps existing window %d", overlappingID)
+		return 0, newMaintenanceError(ErrMaintenanceConflict, "maintenance window overlaps existing window %d", overlappingID)
 	}
 	createdAt := window.CreatedAt
 	if createdAt.IsZero() {
@@ -1375,7 +1375,7 @@ func (s *PostgresStore) AddMaintenanceWindow(ctx context.Context, window Mainten
 func (s *PostgresStore) CancelMaintenanceWindow(ctx context.Context, id int64, cancelledAt time.Time, cancelledBy string, reason string) error {
 	tenantID := TenantFromContext(ctx)
 	if strings.TrimSpace(cancelledBy) == "" {
-		return fmt.Errorf("maintenance cancelled_by is required")
+		return newMaintenanceError(ErrMaintenanceInvalid, "maintenance cancelled_by is required")
 	}
 	if cancelledAt.IsZero() {
 		cancelledAt = time.Now().UTC()
@@ -1390,11 +1390,11 @@ func (s *PostgresStore) CancelMaintenanceWindow(ctx context.Context, id int64, c
 	if result.RowsAffected() == 0 {
 		var existing int
 		if err := s.pool.QueryRow(ctx, `SELECT 1 FROM maintenance_windows WHERE tenant_id = $1 AND id = $2`, tenantID, id).Scan(&existing); errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("maintenance window %d does not exist", id)
+			return newMaintenanceError(ErrMaintenanceNotFound, "maintenance window %d does not exist", id)
 		} else if err != nil {
 			return err
 		}
-		return fmt.Errorf("maintenance window %d is already cancelled", id)
+		return newMaintenanceError(ErrMaintenanceConflict, "maintenance window %d is already cancelled", id)
 	}
 	return nil
 }

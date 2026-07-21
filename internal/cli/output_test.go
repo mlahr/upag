@@ -172,6 +172,18 @@ func TestPrintStatusIntervals(t *testing.T) {
 	}
 }
 
+func TestPrintStatusIntervalsAtUsesProvidedTimeForOpenInterval(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	intervals := []storage.StatusInterval{{MonitorID: "home", Status: "DOWN", StartedAt: generatedAt.Add(-90 * time.Minute), Downtime: true}}
+	var buf bytes.Buffer
+	if err := PrintStatusIntervalsAt(&buf, intervals, generatedAt); err != nil {
+		t.Fatal(err)
+	}
+	if output := buf.String(); !contains(output, "1h30m0s") {
+		t.Fatalf("output %q does not use provided generation time", output)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && containsStr(s, substr)
 }

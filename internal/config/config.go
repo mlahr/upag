@@ -26,8 +26,13 @@ type Config struct {
 }
 
 type HTTPConfig struct {
-	Address string `yaml:"address"`
-	Port    int    `yaml:"port"`
+	Address string         `yaml:"address"`
+	Port    int            `yaml:"port"`
+	Auth    HTTPAuthConfig `yaml:"auth"`
+}
+
+type HTTPAuthConfig struct {
+	BearerToken string `yaml:"bearer_token"`
 }
 
 type AlertsConfig struct {
@@ -402,6 +407,13 @@ func validateHTTPConfigSchema(node *yaml.Node, path string) error {
 	return validateMapping(node, path, map[string]schemaValidator{
 		"address": nil,
 		"port":    nil,
+		"auth":    validateHTTPAuthConfigSchema,
+	})
+}
+
+func validateHTTPAuthConfigSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"bearer_token": nil,
 	})
 }
 
@@ -898,6 +910,17 @@ func (c Config) Validate() error {
 	}
 	if err := validateHTTPAddress(c.HTTP.Address); err != nil {
 		errs = append(errs, fmt.Errorf("http.address: %w", err))
+	}
+	if token := c.HTTP.Auth.BearerToken; token != "" {
+		if strings.TrimSpace(token) != token {
+			errs = append(errs, errors.New("http.auth.bearer_token must not have leading or trailing whitespace"))
+		}
+		for _, r := range token {
+			if r <= 0x20 || r == 0x7f {
+				errs = append(errs, errors.New("http.auth.bearer_token must not contain whitespace or control characters"))
+				break
+			}
+		}
 	}
 	if c.Observer.Interval.Duration <= 0 {
 		errs = append(errs, errors.New("observer.interval must be positive"))

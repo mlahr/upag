@@ -86,11 +86,14 @@ func PrintIncidents(w io.Writer, incidents []storage.Incident) error {
 }
 
 func PrintStatusIntervals(w io.Writer, intervals []storage.StatusInterval) error {
+	return PrintStatusIntervalsAt(w, intervals, time.Now())
+}
+
+func PrintStatusIntervalsAt(w io.Writer, intervals []storage.StatusInterval, now time.Time) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
 	if _, err := fmt.Fprintln(tw, "START\tEND\tDURATION\tDOWNTIME\tSTATUS\tMONITOR"); err != nil {
 		return err
 	}
-	now := time.Now()
 	for _, interval := range intervals {
 		downtime := "no"
 		if interval.Downtime {

@@ -29,6 +29,9 @@ http:
   # Optional status listener. Use port 0 to disable.
   address: 127.0.0.1
   port: 0
+  # Configure a bearer token to enable authenticated /v1 remote commands.
+  # auth:
+  #   bearer_token: replace-with-a-random-secret
 
 observer:
   # Checks whether this upag host can reach the wider network. When observer
