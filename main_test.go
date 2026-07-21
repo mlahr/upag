@@ -348,11 +348,11 @@ func TestRunRemoteStatusJSONUsesAPIShape(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	var response controlapi.StatusResponse
+	var response remoteStatusResult
 	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
 		t.Fatalf("decode remote status JSON %q: %v", stdout, err)
 	}
-	if response.Status != "ok" || response.Version != "v2" || !response.StartedAt.Equal(started) {
+	if response.Status != "ok" || response.Version != "v2" || !response.StartedAt.Equal(started) || response.RemoteURL != server.URL {
 		t.Fatalf("response = %+v", response)
 	}
 }

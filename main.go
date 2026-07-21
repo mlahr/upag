@@ -283,6 +283,13 @@ type localStatusResult struct {
 	PIDFile string `json:"pid_file"`
 }
 
+type remoteStatusResult struct {
+	Status    string    `json:"status"`
+	Version   string    `json:"version"`
+	StartedAt time.Time `json:"started_at"`
+	RemoteURL string    `json:"remote_url"`
+}
+
 type storageDSNResult struct {
 	Backend string `json:"backend"`
 	DSN     string `json:"dsn"`
@@ -511,7 +518,12 @@ func runDaemonStatus(args []string, remote *controlapi.Client, jsonOutput bool) 
 			return err
 		}
 		if jsonOutput {
-			return cli.PrintJSON(os.Stdout, response)
+			return cli.PrintJSON(os.Stdout, remoteStatusResult{
+				Status:    response.Status,
+				Version:   response.Version,
+				StartedAt: response.StartedAt,
+				RemoteURL: remote.BaseURL(),
+			})
 		}
 		fmt.Fprintf(os.Stdout, "upag remote daemon at %s is reachable (version %s, started %s)\n", remote.BaseURL(), response.Version, response.StartedAt.UTC().Format(time.RFC3339Nano))
 		return nil

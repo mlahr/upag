@@ -873,6 +873,9 @@ are emitted on stderr as an object containing `error.code` and
 `--json` because they are operational log and documentation streams rather
 than finite command results.
 
+Remote `status` JSON additionally includes `remote_url`, containing the
+configured remote daemon base URL.
+
 The global option replaces the former `check --format json` interface;
 `check` no longer accepts a `--format` flag.
 
