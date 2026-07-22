@@ -121,7 +121,7 @@ func TestUptimeResponseFromStorage(t *testing.T) {
 		"future": {FailureFreeSince: generatedAt.Add(time.Minute), DowntimeFreeSince: generatedAt.Add(time.Minute)},
 	}, generatedAt)
 
-	if !response.GeneratedAt.Equal(generatedAt) || len(response.Monitors) != 3 {
+	if !response.GeneratedAt.Equal(generatedAt) || response.Semantics != uptimeSemantics || len(response.Monitors) != 3 {
 		t.Fatalf("response = %+v", response)
 	}
 	home := response.Monitors[0]
@@ -166,6 +166,23 @@ func TestUptimeEndpointAndClient(t *testing.T) {
 	NewHandler(store, func() Runtime { return Runtime{BearerToken: "secret"} }).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST /v1/uptime status = %d, want 405", recorder.Code)
+	}
+}
+
+func TestUptimeClientRejectsPreRecoverySchema(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"generated_at": time.Now().UTC(),
+			"monitors":     []any{},
+		})
+	}))
+	defer server.Close()
+	client, err := NewClient(server.URL, "secret", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Uptime(context.Background()); err == nil || !strings.Contains(err.Error(), "upgrade and restart") {
+		t.Fatalf("Uptime error = %v, want incompatible-schema error", err)
 	}
 }
 

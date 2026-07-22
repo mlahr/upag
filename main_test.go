@@ -401,6 +401,7 @@ func TestRunRemoteUptimeUsesServerGenerationTime(t *testing.T) {
 		downtimeFreeSeconds := int64(90000)
 		_ = json.NewEncoder(w).Encode(controlapi.UptimeResponse{
 			GeneratedAt: generatedAt,
+			Semantics:   "recovery_streaks_v1",
 			Monitors: []controlapi.UptimeMonitor{{
 				MonitorID:           "home",
 				Name:                "Homepage",

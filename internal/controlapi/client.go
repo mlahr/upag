@@ -114,6 +114,9 @@ func (c *Client) Monitors(ctx context.Context) (MonitorsResponse, error) {
 func (c *Client) Uptime(ctx context.Context) (UptimeResponse, error) {
 	var response UptimeResponse
 	err := c.do(ctx, http.MethodGet, "/v1/uptime", nil, nil, &response)
+	if err == nil && response.Semantics != uptimeSemantics {
+		return UptimeResponse{}, fmt.Errorf("remote uptime endpoint uses an incompatible response schema; upgrade and restart the remote daemon")
+	}
 	return response, err
 }
 

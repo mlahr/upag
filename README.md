@@ -565,6 +565,9 @@ variables for one invocation. Remote-capable commands are `status`, `check`,
 every other command is local-only. The `uptime` command uses authenticated
 `GET /v1/uptime`; the daemon performs the tenant-scoped recovery-streak
 aggregation and supplies the generation timestamp used for elapsed durations.
+The response includes a recovery-semantics identifier; a newer CLI rejects an
+older daemon response instead of interpreting obsolete event-age fields as
+uptime.
 
 Remote `check` executes from the daemon host using the daemon's active monitor
 configuration. It makes one attempt without configured probe retries and does

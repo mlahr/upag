@@ -21,7 +21,10 @@ import (
 	"upag/internal/storage"
 )
 
-const maxRequestBody = 64 << 10
+const (
+	maxRequestBody  = 64 << 10
+	uptimeSemantics = "recovery_streaks_v1"
+)
 
 type Store interface {
 	ListStates(context.Context) ([]storage.MonitorState, error)
@@ -116,6 +119,7 @@ type UptimeMonitor struct {
 
 type UptimeResponse struct {
 	GeneratedAt time.Time       `json:"generated_at"`
+	Semantics   string          `json:"semantics"`
 	Monitors    []UptimeMonitor `json:"monitors"`
 }
 
@@ -614,7 +618,7 @@ func UptimeResponseFromStorage(states []storage.MonitorState, starts map[string]
 			DowntimeFreeSeconds: elapsedSeconds(generatedAt, downtimeFreeSince),
 		})
 	}
-	return UptimeResponse{GeneratedAt: generatedAt, Monitors: monitors}
+	return UptimeResponse{GeneratedAt: generatedAt, Semantics: uptimeSemantics, Monitors: monitors}
 }
 
 func utcTimePtr(value time.Time) *time.Time {
