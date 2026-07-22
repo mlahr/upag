@@ -172,11 +172,15 @@ upag incidents --config ./config.yaml --limit 50
 upag incidents --config ./config.yaml --limit 50 --since 2026-06-23T00:00:00Z
 ```
 
-`upag uptime` reports two independent ages for every stored monitor state: the
-time since its latest completed failed check and the time since its latest
-persisted `DOWN` transition. The failed-check timestamp includes failures
-during maintenance and excludes failures suppressed while the observer is
-down. A monitor with no recorded event displays `-`; JSON output uses `null`.
+`upag uptime` reports two recovery-based uptime streaks for every stored
+monitor state. "Uptime since last failure" starts with the current open `UP`
+interval, after the latest failed-check sequence. "Uptime since last downtime"
+starts when the latest confirmed `DOWN` interval ended; if no `DOWN` interval
+exists, it starts with the earliest recorded status interval. A monitor that is
+not currently `UP` displays `-`; JSON output uses `null`.
+Text durations use calendar-aware UTC years (`y`) and months (`M`), followed by
+days, hours, and minutes, for example `5y3M3d8h3m`. Exact UTC streak-start
+timestamps and elapsed seconds remain available in JSON.
 
 Run one immediate diagnostic attempt for a configured monitor:
 
@@ -559,7 +563,7 @@ request timeout defaults to `1m`. Use `--local` to ignore those environment
 variables for one invocation. Remote-capable commands are `status`, `check`,
 `monitors`, `uptime`, `incidents`, `intervals`, `failures`, and `maintenance`;
 every other command is local-only. The `uptime` command uses authenticated
-`GET /v1/uptime`; the daemon performs the tenant-scoped latest-`DOWN`
+`GET /v1/uptime`; the daemon performs the tenant-scoped recovery-streak
 aggregation and supplies the generation timestamp used for elapsed durations.
 
 Remote `check` executes from the daemon host using the daemon's active monitor

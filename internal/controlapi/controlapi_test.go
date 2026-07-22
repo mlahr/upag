@@ -15,16 +15,16 @@ import (
 )
 
 type fakeStore struct {
-	states      []storage.MonitorState
-	latestDown  map[string]time.Time
-	maintenance []storage.MaintenanceWindow
-	addErr      error
-	addCalls    int
+	states       []storage.MonitorState
+	uptimeStarts map[string]storage.UptimeStreakStarts
+	maintenance  []storage.MaintenanceWindow
+	addErr       error
+	addCalls     int
 }
 
 func (s *fakeStore) ListStates(context.Context) ([]storage.MonitorState, error) { return s.states, nil }
-func (s *fakeStore) ListLatestDownIncidentTimes(context.Context) (map[string]time.Time, error) {
-	return s.latestDown, nil
+func (s *fakeStore) ListUptimeStreakStarts(context.Context) (map[string]storage.UptimeStreakStarts, error) {
+	return s.uptimeStarts, nil
 }
 func (s *fakeStore) EnsureStatusIntervalsBackfilled(context.Context, storage.FailureThresholds) error {
 	return nil
@@ -113,38 +113,38 @@ func TestV1RequiresConfiguredBearerToken(t *testing.T) {
 func TestUptimeResponseFromStorage(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	response := UptimeResponseFromStorage([]storage.MonitorState{
-		{MonitorID: "home", Name: "Homepage", Status: "UP", LastFailureAt: generatedAt.Add(-90 * time.Minute)},
+		{MonitorID: "home", Name: "Homepage", Status: "UP"},
 		{MonitorID: "never", Name: "Never Failed", Status: "UP"},
-		{MonitorID: "future", Name: "Future", Status: "UP", LastFailureAt: generatedAt.Add(time.Minute)},
-	}, map[string]time.Time{
-		"home":   generatedAt.Add(-25 * time.Hour),
-		"future": generatedAt.Add(time.Minute),
+		{MonitorID: "future", Name: "Future", Status: "UP"},
+	}, map[string]storage.UptimeStreakStarts{
+		"home":   {FailureFreeSince: generatedAt.Add(-90 * time.Minute), DowntimeFreeSince: generatedAt.Add(-25 * time.Hour)},
+		"future": {FailureFreeSince: generatedAt.Add(time.Minute), DowntimeFreeSince: generatedAt.Add(time.Minute)},
 	}, generatedAt)
 
 	if !response.GeneratedAt.Equal(generatedAt) || len(response.Monitors) != 3 {
 		t.Fatalf("response = %+v", response)
 	}
 	home := response.Monitors[0]
-	if home.SecondsSinceLastFailedCheck == nil || *home.SecondsSinceLastFailedCheck != 5400 {
-		t.Fatalf("home failed-check age = %#v, want 5400", home.SecondsSinceLastFailedCheck)
+	if home.FailureFreeSeconds == nil || *home.FailureFreeSeconds != 5400 {
+		t.Fatalf("home failure-free seconds = %#v, want 5400", home.FailureFreeSeconds)
 	}
-	if home.SecondsSinceLastDownIncident == nil || *home.SecondsSinceLastDownIncident != 90000 {
-		t.Fatalf("home DOWN-incident age = %#v, want 90000", home.SecondsSinceLastDownIncident)
+	if home.DowntimeFreeSeconds == nil || *home.DowntimeFreeSeconds != 90000 {
+		t.Fatalf("home downtime-free seconds = %#v, want 90000", home.DowntimeFreeSeconds)
 	}
-	if response.Monitors[1].LastFailedCheckAt != nil || response.Monitors[1].SecondsSinceLastFailedCheck != nil || response.Monitors[1].LastDownIncidentAt != nil || response.Monitors[1].SecondsSinceLastDownIncident != nil {
+	if response.Monitors[1].FailureFreeSince != nil || response.Monitors[1].FailureFreeSeconds != nil || response.Monitors[1].DowntimeFreeSince != nil || response.Monitors[1].DowntimeFreeSeconds != nil {
 		t.Fatalf("never-failed monitor = %+v, want null event fields", response.Monitors[1])
 	}
-	if response.Monitors[2].LastFailedCheckAt == nil || response.Monitors[2].SecondsSinceLastFailedCheck != nil || response.Monitors[2].LastDownIncidentAt == nil || response.Monitors[2].SecondsSinceLastDownIncident != nil {
+	if response.Monitors[2].FailureFreeSince == nil || response.Monitors[2].FailureFreeSeconds != nil || response.Monitors[2].DowntimeFreeSince == nil || response.Monitors[2].DowntimeFreeSeconds != nil {
 		t.Fatalf("future monitor = %+v, want timestamps with null ages", response.Monitors[2])
 	}
 }
 
 func TestUptimeEndpointAndClient(t *testing.T) {
-	failedAt := time.Now().UTC().Add(-time.Hour)
-	downAt := failedAt.Add(-time.Hour)
+	failureFreeSince := time.Now().UTC().Add(-time.Hour)
+	downtimeFreeSince := failureFreeSince.Add(-time.Hour)
 	store := &fakeStore{
-		states:     []storage.MonitorState{{MonitorID: "home", Name: "Homepage", Status: "UP", LastFailureAt: failedAt}},
-		latestDown: map[string]time.Time{"home": downAt},
+		states:       []storage.MonitorState{{MonitorID: "home", Name: "Homepage", Status: "UP"}},
+		uptimeStarts: map[string]storage.UptimeStreakStarts{"home": {FailureFreeSince: failureFreeSince, DowntimeFreeSince: downtimeFreeSince}},
 	}
 	server := httptest.NewServer(NewHandler(store, func() Runtime { return Runtime{BearerToken: "secret", TenantID: "tenant-a"} }))
 	defer server.Close()
@@ -156,7 +156,7 @@ func TestUptimeEndpointAndClient(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(response.Monitors) != 1 || response.Monitors[0].MonitorID != "home" || response.Monitors[0].LastDownIncidentAt == nil || !response.Monitors[0].LastDownIncidentAt.Equal(downAt) {
+	if len(response.Monitors) != 1 || response.Monitors[0].MonitorID != "home" || response.Monitors[0].DowntimeFreeSince == nil || !response.Monitors[0].DowntimeFreeSince.Equal(downtimeFreeSince) {
 		t.Fatalf("response = %+v", response)
 	}
 

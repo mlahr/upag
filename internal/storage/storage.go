@@ -30,7 +30,7 @@ type Backend interface {
 	ListUptimeStats(context.Context, time.Time, FailureThresholds) (map[string]UptimeStats, error)
 	ListDailyUptimeStats(context.Context, time.Time, int, FailureThresholds) (map[string][]DailyUptimeStats, error)
 	ListIncidents(context.Context, IncidentFilter) ([]Incident, error)
-	ListLatestDownIncidentTimes(context.Context) (map[string]time.Time, error)
+	ListUptimeStreakStarts(context.Context) (map[string]UptimeStreakStarts, error)
 	ListFailedProbeResults(context.Context, ProbeResultFilter) ([]ProbeResult, error)
 	ListObserverSentinelEvents(context.Context, ObserverSentinelEventFilter) ([]ObserverSentinelResult, error)
 	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
@@ -93,11 +93,16 @@ type MonitorState struct {
 }
 
 type MonitorUptime struct {
-	MonitorID          string
-	Name               string
-	Status             string
-	LastFailedCheckAt  time.Time
-	LastDownIncidentAt time.Time
+	MonitorID         string
+	Name              string
+	Status            string
+	FailureFreeSince  time.Time
+	DowntimeFreeSince time.Time
+}
+
+type UptimeStreakStarts struct {
+	FailureFreeSince  time.Time
+	DowntimeFreeSince time.Time
 }
 
 type ProbeResult struct {
@@ -1634,25 +1639,32 @@ func (s *Store) ListIncidents(ctx context.Context, filter IncidentFilter) ([]Inc
 	return incidents, rows.Err()
 }
 
-func (s *Store) ListLatestDownIncidentTimes(ctx context.Context) (map[string]time.Time, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, MAX(observed_at)
-		FROM incidents
-		WHERE transition = ?
-		GROUP BY monitor_id`, state.Down)
+func (s *Store) ListUptimeStreakStarts(ctx context.Context) (map[string]UptimeStreakStarts, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id,
+		CASE WHEN SUM(CASE WHEN status = ? AND ended_at IS NULL THEN 1 ELSE 0 END) > 0
+			THEN MAX(CASE WHEN status = ? AND ended_at IS NULL THEN started_at END) END,
+		CASE WHEN SUM(CASE WHEN status = ? AND ended_at IS NULL THEN 1 ELSE 0 END) > 0
+			THEN COALESCE(MAX(CASE WHEN status = ? AND ended_at IS NOT NULL THEN ended_at END), MIN(started_at)) END
+		FROM monitor_status_intervals
+		GROUP BY monitor_id`, state.Up, state.Up, state.Up, state.Down)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	latest := map[string]time.Time{}
+	starts := map[string]UptimeStreakStarts{}
 	for rows.Next() {
-		var monitorID, observedAt string
-		if err := rows.Scan(&monitorID, &observedAt); err != nil {
+		var monitorID string
+		var failureFreeSince, downtimeFreeSince sql.NullString
+		if err := rows.Scan(&monitorID, &failureFreeSince, &downtimeFreeSince); err != nil {
 			return nil, err
 		}
-		latest[monitorID] = parseTime(observedAt)
+		starts[monitorID] = UptimeStreakStarts{
+			FailureFreeSince:  parseNullTime(failureFreeSince),
+			DowntimeFreeSince: parseNullTime(downtimeFreeSince),
+		}
 	}
-	return latest, rows.Err()
+	return starts, rows.Err()
 }
 
 func (s *Store) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {

@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -43,17 +44,15 @@ func PrintStates(w io.Writer, states []storage.MonitorState, activeMaintenance m
 
 func PrintUptimeAt(w io.Writer, monitors []storage.MonitorUptime, generatedAt time.Time) error {
 	return printTable(w, func(tw *tabwriter.Writer) error {
-		if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tFAILED CHECK AGE\tLAST FAILED CHECK\tDOWN INCIDENT AGE\tLAST DOWN INCIDENT\tNAME"); err != nil {
+		if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tUPTIME SINCE LAST FAILURE\tUPTIME SINCE LAST DOWNTIME\tNAME"); err != nil {
 			return err
 		}
 		for _, monitor := range monitors {
-			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
 				monitor.MonitorID,
 				monitor.Status,
-				formatElapsedSince(monitor.LastFailedCheckAt, generatedAt),
-				formatCLITime(monitor.LastFailedCheckAt),
-				formatElapsedSince(monitor.LastDownIncidentAt, generatedAt),
-				formatCLITime(monitor.LastDownIncidentAt),
+				formatElapsedSince(monitor.FailureFreeSince, generatedAt),
+				formatElapsedSince(monitor.DowntimeFreeSince, generatedAt),
 				monitor.Name,
 			); err != nil {
 				return err
@@ -67,7 +66,58 @@ func formatElapsedSince(event, now time.Time) string {
 	if event.IsZero() || event.After(now) {
 		return "-"
 	}
-	return now.Sub(event).Truncate(time.Second).String()
+	event = event.UTC()
+	now = now.UTC()
+
+	totalMonths := (now.Year()-event.Year())*12 + int(now.Month()-event.Month())
+	for totalMonths > 0 && addCalendarMonthsClamped(event, totalMonths).After(now) {
+		totalMonths--
+	}
+	cursor := addCalendarMonthsClamped(event, totalMonths)
+	remainder := now.Sub(cursor)
+
+	years := totalMonths / 12
+	months := totalMonths % 12
+	days := int(remainder / (24 * time.Hour))
+	remainder -= time.Duration(days) * 24 * time.Hour
+	hours := int(remainder / time.Hour)
+	remainder -= time.Duration(hours) * time.Hour
+	minutes := int(remainder / time.Minute)
+
+	parts := make([]string, 0, 5)
+	for _, part := range []struct {
+		value  int
+		suffix string
+	}{
+		{years, "y"},
+		{months, "M"},
+		{days, "d"},
+		{hours, "h"},
+		{minutes, "m"},
+	} {
+		if part.value > 0 {
+			parts = append(parts, fmt.Sprintf("%d%s", part.value, part.suffix))
+		}
+	}
+	if len(parts) == 0 {
+		if now.Equal(event) {
+			return "0m"
+		}
+		return "<1m"
+	}
+	return strings.Join(parts, "")
+}
+
+func addCalendarMonthsClamped(value time.Time, months int) time.Time {
+	monthIndex := value.Year()*12 + int(value.Month()) - 1 + months
+	year := monthIndex / 12
+	month := time.Month(monthIndex%12 + 1)
+	lastDay := time.Date(year, month+1, 0, 0, 0, 0, 0, value.Location()).Day()
+	day := value.Day()
+	if day > lastDay {
+		day = lastDay
+	}
+	return time.Date(year, month, day, value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), value.Location())
 }
 
 func PrintMaintenanceWindows(w io.Writer, windows []storage.MaintenanceWindow, now time.Time) error {

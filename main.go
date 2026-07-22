@@ -740,15 +740,18 @@ func runUptime(args []string, remote *controlapi.Client, jsonOutput bool) error 
 			return err
 		}
 		defer store.Close()
+		if err := store.EnsureStatusIntervalsBackfilled(ctx, configuredFailureThresholds(cfg)); err != nil {
+			return err
+		}
 		states, err := store.ListStates(ctx)
 		if err != nil {
 			return err
 		}
-		latestDown, err := store.ListLatestDownIncidentTimes(ctx)
+		starts, err := store.ListUptimeStreakStarts(ctx)
 		if err != nil {
 			return err
 		}
-		response = controlapi.UptimeResponseFromStorage(states, latestDown, time.Now().UTC())
+		response = controlapi.UptimeResponseFromStorage(states, starts, time.Now().UTC())
 	}
 
 	if jsonOutput {

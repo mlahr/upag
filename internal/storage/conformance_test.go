@@ -141,7 +141,7 @@ func TestStorageConformanceProbeStateIncidentAndSyntheticFailures(t *testing.T) 
 	}
 }
 
-func TestStorageConformanceLatestDownIncidentTimes(t *testing.T) {
+func TestStorageConformanceUptimeStreakStarts(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {
 			store := backend.open(t)
@@ -149,47 +149,61 @@ func TestStorageConformanceLatestDownIncidentTimes(t *testing.T) {
 
 			ctx := storageContextForConformance(backend.name, "uptime-a")
 			base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
-			for _, incident := range []Incident{
-				{MonitorID: "home", Name: "Home", Transition: state.Down, ObservedAt: base},
-				{MonitorID: "home", Name: "Home", Transition: state.Up, ObservedAt: base.Add(time.Minute)},
-				{MonitorID: "home", Name: "Home", Transition: state.Down, ObservedAt: base.Add(2 * time.Minute)},
-				{MonitorID: "api", Name: "API", Transition: "FAILURE", ObservedAt: base.Add(3 * time.Minute)},
-				{MonitorID: "__observer__", Name: "Observer", Transition: state.ObserverDown, ObservedAt: base.Add(4 * time.Minute)},
+			for _, step := range []struct {
+				monitorID string
+				status    string
+				at        time.Time
+			}{
+				{monitorID: "home", status: state.Up, at: base},
+				{monitorID: "home", status: state.Failing, at: base.Add(time.Minute)},
+				{monitorID: "home", status: state.Down, at: base.Add(2 * time.Minute)},
+				{monitorID: "home", status: state.Up, at: base.Add(3 * time.Minute)},
+				{monitorID: "home", status: state.Failing, at: base.Add(4 * time.Minute)},
+				{monitorID: "home", status: state.Up, at: base.Add(5 * time.Minute)},
+				{monitorID: "never-down", status: state.Up, at: base.Add(6 * time.Minute)},
+				{monitorID: "currently-down", status: state.Up, at: base.Add(7 * time.Minute)},
+				{monitorID: "currently-down", status: state.Down, at: base.Add(8 * time.Minute)},
 			} {
 				if _, err := store.SaveProbeAndState(ctx, ProbeResult{
-					MonitorID: incident.MonitorID,
-					CheckedAt: incident.ObservedAt,
-					OK:        incident.Transition == state.Up,
+					MonitorID: step.monitorID,
+					CheckedAt: step.at,
+					OK:        step.status == state.Up,
 				}, MonitorState{
-					MonitorID:     incident.MonitorID,
-					Name:          incident.Name,
-					Status:        incident.Transition,
-					LastCheckedAt: incident.ObservedAt,
-					UpdatedAt:     incident.ObservedAt,
-				}, &incident); err != nil {
+					MonitorID:     step.monitorID,
+					Name:          step.monitorID,
+					Status:        step.status,
+					LastCheckedAt: step.at,
+					UpdatedAt:     step.at,
+				}, nil); err != nil {
 					t.Fatal(err)
 				}
 			}
 
-			latest, err := store.ListLatestDownIncidentTimes(ctx)
+			starts, err := store.ListUptimeStreakStarts(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(latest) != 1 || !latest["home"].Equal(base.Add(2*time.Minute)) {
-				t.Fatalf("latest DOWN incident times = %+v", latest)
+			if got := starts["home"]; !got.FailureFreeSince.Equal(base.Add(5*time.Minute)) || !got.DowntimeFreeSince.Equal(base.Add(3*time.Minute)) {
+				t.Fatalf("home uptime streak starts = %+v", got)
+			}
+			if got := starts["never-down"]; !got.FailureFreeSince.Equal(base.Add(6*time.Minute)) || !got.DowntimeFreeSince.Equal(base.Add(6*time.Minute)) {
+				t.Fatalf("never-down uptime streak starts = %+v", got)
+			}
+			if got := starts["currently-down"]; !got.FailureFreeSince.IsZero() || !got.DowntimeFreeSince.IsZero() {
+				t.Fatalf("currently-down uptime streak starts = %+v, want zero values", got)
 			}
 
 			if backend.name == "postgres" {
 				other := WithTenant(context.Background(), "uptime-b")
-				if _, err := store.SaveProbeAndState(other, ProbeResult{MonitorID: "other", CheckedAt: base.Add(5 * time.Minute)}, MonitorState{MonitorID: "other", Name: "Other", Status: state.Down, LastCheckedAt: base.Add(5 * time.Minute), UpdatedAt: base.Add(5 * time.Minute)}, &Incident{MonitorID: "other", Name: "Other", Transition: state.Down, ObservedAt: base.Add(5 * time.Minute)}); err != nil {
+				if _, err := store.SaveProbeAndState(other, ProbeResult{MonitorID: "other", CheckedAt: base.Add(9 * time.Minute), OK: true}, MonitorState{MonitorID: "other", Name: "Other", Status: state.Up, LastCheckedAt: base.Add(9 * time.Minute), UpdatedAt: base.Add(9 * time.Minute)}, nil); err != nil {
 					t.Fatal(err)
 				}
-				latest, err = store.ListLatestDownIncidentTimes(ctx)
+				starts, err = store.ListUptimeStreakStarts(ctx)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, ok := latest["other"]; ok {
-					t.Fatalf("latest DOWN incident times leaked another tenant: %+v", latest)
+				if _, ok := starts["other"]; ok {
+					t.Fatalf("uptime streak starts leaked another tenant: %+v", starts)
 				}
 			}
 		})

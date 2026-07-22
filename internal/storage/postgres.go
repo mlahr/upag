@@ -1124,27 +1124,38 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, filter IncidentFilter
 	return incidents, rows.Err()
 }
 
-func (s *PostgresStore) ListLatestDownIncidentTimes(ctx context.Context) (map[string]time.Time, error) {
+func (s *PostgresStore) ListUptimeStreakStarts(ctx context.Context) (map[string]UptimeStreakStarts, error) {
 	tenantID := TenantFromContext(ctx)
-	rows, err := s.pool.Query(ctx, `SELECT monitor_id, MAX(observed_at)
-		FROM incidents
-		WHERE tenant_id = $1 AND transition = $2
-		GROUP BY monitor_id`, tenantID, state.Down)
+	rows, err := s.pool.Query(ctx, `SELECT monitor_id,
+		CASE WHEN COUNT(*) FILTER (WHERE status = $2 AND ended_at IS NULL) > 0
+			THEN MAX(started_at) FILTER (WHERE status = $2 AND ended_at IS NULL) END,
+		CASE WHEN COUNT(*) FILTER (WHERE status = $2 AND ended_at IS NULL) > 0
+			THEN COALESCE(MAX(ended_at) FILTER (WHERE status = $3 AND ended_at IS NOT NULL), MIN(started_at)) END
+		FROM monitor_status_intervals
+		WHERE tenant_id = $1
+		GROUP BY monitor_id`, tenantID, state.Up, state.Down)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	latest := map[string]time.Time{}
+	starts := map[string]UptimeStreakStarts{}
 	for rows.Next() {
 		var monitorID string
-		var observedAt time.Time
-		if err := rows.Scan(&monitorID, &observedAt); err != nil {
+		var failureFreeSince, downtimeFreeSince *time.Time
+		if err := rows.Scan(&monitorID, &failureFreeSince, &downtimeFreeSince); err != nil {
 			return nil, err
 		}
-		latest[monitorID] = observedAt.UTC()
+		value := UptimeStreakStarts{}
+		if failureFreeSince != nil {
+			value.FailureFreeSince = failureFreeSince.UTC()
+		}
+		if downtimeFreeSince != nil {
+			value.DowntimeFreeSince = downtimeFreeSince.UTC()
+		}
+		starts[monitorID] = value
 	}
-	return latest, rows.Err()
+	return starts, rows.Err()
 }
 
 func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {

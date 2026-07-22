@@ -388,8 +388,8 @@ func TestRunRemoteIntervalsUsesServerGenerationTime(t *testing.T) {
 
 func TestRunRemoteUptimeUsesServerGenerationTime(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
-	failedAt := generatedAt.Add(-90 * time.Minute)
-	downAt := generatedAt.Add(-25 * time.Hour)
+	failureFreeSince := generatedAt.Add(-90 * time.Minute)
+	downtimeFreeSince := generatedAt.Add(-25 * time.Hour)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/uptime" {
 			t.Fatalf("path = %q, want /v1/uptime", r.URL.Path)
@@ -397,18 +397,18 @@ func TestRunRemoteUptimeUsesServerGenerationTime(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
 			t.Fatalf("authorization = %q", got)
 		}
-		failedSeconds := int64(5400)
-		downSeconds := int64(90000)
+		failureFreeSeconds := int64(5400)
+		downtimeFreeSeconds := int64(90000)
 		_ = json.NewEncoder(w).Encode(controlapi.UptimeResponse{
 			GeneratedAt: generatedAt,
 			Monitors: []controlapi.UptimeMonitor{{
-				MonitorID:                    "home",
-				Name:                         "Homepage",
-				Status:                       state.Up,
-				LastFailedCheckAt:            &failedAt,
-				SecondsSinceLastFailedCheck:  &failedSeconds,
-				LastDownIncidentAt:           &downAt,
-				SecondsSinceLastDownIncident: &downSeconds,
+				MonitorID:           "home",
+				Name:                "Homepage",
+				Status:              state.Up,
+				FailureFreeSince:    &failureFreeSince,
+				FailureFreeSeconds:  &failureFreeSeconds,
+				DowntimeFreeSince:   &downtimeFreeSince,
+				DowntimeFreeSeconds: &downtimeFreeSeconds,
 			}},
 		})
 	}))
@@ -421,7 +421,7 @@ func TestRunRemoteUptimeUsesServerGenerationTime(t *testing.T) {
 	if runErr != nil {
 		t.Fatal(runErr)
 	}
-	for _, want := range []string{"home", "Homepage", "UP", "1h30m0s", "25h0m0s", failedAt.Local().Format(time.RFC3339), downAt.Local().Format(time.RFC3339)} {
+	for _, want := range []string{"home", "Homepage", "UP", "UPTIME SINCE LAST FAILURE", "UPTIME SINCE LAST DOWNTIME", "1h30m", "1d1h"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("uptime output %q does not contain %q", stdout, want)
 		}
@@ -436,8 +436,14 @@ func TestRunLocalUptimeJSON(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.EnsureStatusIntervalsBackfilled(context.Background(), storage.FailureThresholds{Default: 3}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
 	downAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	downtimeRecoveredAt := downAt.Add(10 * time.Minute)
 	failedAt := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	failureRecoveredAt := failedAt.Add(time.Minute)
 	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: downAt, OK: false}, storage.MonitorState{
 		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Down,
 		LastCheckedAt: downAt, LastFailureAt: downAt, UpdatedAt: downAt,
@@ -445,9 +451,23 @@ func TestRunLocalUptimeJSON(t *testing.T) {
 		store.Close()
 		t.Fatal(err)
 	}
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: downtimeRecoveredAt, OK: true}, storage.MonitorState{
+		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Up,
+		LastCheckedAt: downtimeRecoveredAt, LastSuccessAt: downtimeRecoveredAt, LastFailureAt: downAt, UpdatedAt: downtimeRecoveredAt,
+	}, &storage.Incident{MonitorID: "home", Name: "Home", Transition: state.Up, ObservedAt: downtimeRecoveredAt}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
 	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: failedAt, OK: false}, storage.MonitorState{
 		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Failing,
 		ConsecutiveFailures: 1, LastCheckedAt: failedAt, LastFailureAt: failedAt, UpdatedAt: failedAt,
+	}, nil); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: failureRecoveredAt, OK: true}, storage.MonitorState{
+		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Up,
+		LastCheckedAt: failureRecoveredAt, LastSuccessAt: failureRecoveredAt, LastFailureAt: failedAt, UpdatedAt: failureRecoveredAt,
 	}, nil); err != nil {
 		store.Close()
 		t.Fatal(err)
@@ -469,14 +489,14 @@ func TestRunLocalUptimeJSON(t *testing.T) {
 		t.Fatalf("monitors = %+v", response.Monitors)
 	}
 	monitor := response.Monitors[0]
-	if monitor.MonitorID != "home" || monitor.Status != state.Failing || monitor.LastFailedCheckAt == nil || !monitor.LastFailedCheckAt.Equal(failedAt) || monitor.LastDownIncidentAt == nil || !monitor.LastDownIncidentAt.Equal(downAt) {
+	if monitor.MonitorID != "home" || monitor.Status != state.Up || monitor.FailureFreeSince == nil || !monitor.FailureFreeSince.Equal(failureRecoveredAt) || monitor.DowntimeFreeSince == nil || !monitor.DowntimeFreeSince.Equal(downtimeRecoveredAt) {
 		t.Fatalf("monitor = %+v", monitor)
 	}
-	if monitor.SecondsSinceLastFailedCheck == nil || *monitor.SecondsSinceLastFailedCheck < 1700 || *monitor.SecondsSinceLastFailedCheck > 1900 {
-		t.Fatalf("failed-check age = %#v, want approximately 1800", monitor.SecondsSinceLastFailedCheck)
+	if monitor.FailureFreeSeconds == nil || *monitor.FailureFreeSeconds < 1640 || *monitor.FailureFreeSeconds > 1840 {
+		t.Fatalf("failure-free seconds = %#v, want approximately 1740", monitor.FailureFreeSeconds)
 	}
-	if monitor.SecondsSinceLastDownIncident == nil || *monitor.SecondsSinceLastDownIncident < 7100 || *monitor.SecondsSinceLastDownIncident > 7300 {
-		t.Fatalf("DOWN-incident age = %#v, want approximately 7200", monitor.SecondsSinceLastDownIncident)
+	if monitor.DowntimeFreeSeconds == nil || *monitor.DowntimeFreeSeconds < 6500 || *monitor.DowntimeFreeSeconds > 6700 {
+		t.Fatalf("downtime-free seconds = %#v, want approximately 6600", monitor.DowntimeFreeSeconds)
 	}
 }
 

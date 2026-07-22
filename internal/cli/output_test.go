@@ -213,14 +213,14 @@ func TestPrintUptimeAtShowsIndependentFailureAndDownIncidentAges(t *testing.T) {
 	generatedAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
 	monitors := []storage.MonitorUptime{
 		{
-			MonitorID:          "home",
-			Name:               "Homepage",
-			Status:             "UP",
-			LastFailedCheckAt:  generatedAt.Add(-90 * time.Minute),
-			LastDownIncidentAt: generatedAt.Add(-25 * time.Hour),
+			MonitorID:         "home",
+			Name:              "Homepage",
+			Status:            "UP",
+			FailureFreeSince:  generatedAt.Add(-90 * time.Minute),
+			DowntimeFreeSince: generatedAt.Add(-25 * time.Hour),
 		},
 		{MonitorID: "api", Name: "API", Status: "UNKNOWN"},
-		{MonitorID: "future", Name: "Future", Status: "UP", LastFailedCheckAt: generatedAt.Add(time.Minute)},
+		{MonitorID: "future", Name: "Future", Status: "UP", FailureFreeSince: generatedAt.Add(time.Minute)},
 	}
 
 	var buf bytes.Buffer
@@ -229,8 +229,8 @@ func TestPrintUptimeAtShowsIndependentFailureAndDownIncidentAges(t *testing.T) {
 	}
 	output := buf.String()
 	for _, want := range []string{
-		"FAILED CHECK AGE", "LAST FAILED CHECK", "DOWN INCIDENT AGE", "LAST DOWN INCIDENT",
-		"home", "Homepage", "1h30m0s", "25h0m0s", generatedAt.Add(-90 * time.Minute).Local().Format(time.RFC3339), generatedAt.Add(-25 * time.Hour).Local().Format(time.RFC3339),
+		"UPTIME SINCE LAST FAILURE", "UPTIME SINCE LAST DOWNTIME",
+		"home", "Homepage", "1h30m", "1d1h",
 		"api", "UNKNOWN", "future",
 	} {
 		if !contains(output, want) {
@@ -239,6 +239,27 @@ func TestPrintUptimeAtShowsIndependentFailureAndDownIncidentAges(t *testing.T) {
 	}
 	if got := formatElapsedSince(generatedAt.Add(time.Minute), generatedAt); got != "-" {
 		t.Fatalf("future event age = %q, want dash", got)
+	}
+}
+
+func TestFormatElapsedSinceUsesCalendarUnitsAndMinutePrecision(t *testing.T) {
+	now := time.Date(2026, 7, 22, 12, 3, 30, 0, time.UTC)
+	tests := []struct {
+		name  string
+		event time.Time
+		want  string
+	}{
+		{name: "years months days", event: time.Date(2021, 4, 19, 4, 0, 0, 0, time.UTC), want: "5y3M3d8h3m"},
+		{name: "month end clamps", event: time.Date(2026, 1, 31, 12, 3, 30, 0, time.UTC), want: "5M22d"},
+		{name: "less than minute", event: now.Add(-30 * time.Second), want: "<1m"},
+		{name: "zero", event: now, want: "0m"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := formatElapsedSince(test.event, now); got != test.want {
+				t.Fatalf("formatElapsedSince(%s, %s) = %q, want %q", test.event, now, got, test.want)
+			}
+		})
 	}
 }
 
