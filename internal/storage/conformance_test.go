@@ -141,6 +141,68 @@ func TestStorageConformanceProbeStateIncidentAndSyntheticFailures(t *testing.T) 
 	}
 }
 
+func TestStorageConformanceLatestDownIncidentTimes(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := storageContextForConformance(backend.name, "uptime-a")
+			base := time.Date(2026, 7, 22, 10, 0, 0, 0, time.UTC)
+			for _, incident := range []Incident{
+				{MonitorID: "home", Name: "Home", Transition: state.Down, ObservedAt: base},
+				{MonitorID: "home", Name: "Home", Transition: state.Up, ObservedAt: base.Add(time.Minute)},
+				{MonitorID: "home", Name: "Home", Transition: state.Down, ObservedAt: base.Add(2 * time.Minute)},
+				{MonitorID: "api", Name: "API", Transition: "FAILURE", ObservedAt: base.Add(3 * time.Minute)},
+				{MonitorID: "__observer__", Name: "Observer", Transition: state.ObserverDown, ObservedAt: base.Add(4 * time.Minute)},
+			} {
+				if _, err := store.SaveProbeAndState(ctx, ProbeResult{
+					MonitorID: incident.MonitorID,
+					CheckedAt: incident.ObservedAt,
+					OK:        incident.Transition == state.Up,
+				}, MonitorState{
+					MonitorID:     incident.MonitorID,
+					Name:          incident.Name,
+					Status:        incident.Transition,
+					LastCheckedAt: incident.ObservedAt,
+					UpdatedAt:     incident.ObservedAt,
+				}, &incident); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			latest, err := store.ListLatestDownIncidentTimes(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(latest) != 1 || !latest["home"].Equal(base.Add(2*time.Minute)) {
+				t.Fatalf("latest DOWN incident times = %+v", latest)
+			}
+
+			if backend.name == "postgres" {
+				other := WithTenant(context.Background(), "uptime-b")
+				if _, err := store.SaveProbeAndState(other, ProbeResult{MonitorID: "other", CheckedAt: base.Add(5 * time.Minute)}, MonitorState{MonitorID: "other", Name: "Other", Status: state.Down, LastCheckedAt: base.Add(5 * time.Minute), UpdatedAt: base.Add(5 * time.Minute)}, &Incident{MonitorID: "other", Name: "Other", Transition: state.Down, ObservedAt: base.Add(5 * time.Minute)}); err != nil {
+					t.Fatal(err)
+				}
+				latest, err = store.ListLatestDownIncidentTimes(ctx)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := latest["other"]; ok {
+					t.Fatalf("latest DOWN incident times leaked another tenant: %+v", latest)
+				}
+			}
+		})
+	}
+}
+
+func storageContextForConformance(backendName, tenantID string) context.Context {
+	if backendName == "postgres" {
+		return WithTenant(context.Background(), tenantID)
+	}
+	return context.Background()
+}
+
 func TestStorageConformanceStatusIntervals(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {

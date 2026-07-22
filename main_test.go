@@ -386,10 +386,129 @@ func TestRunRemoteIntervalsUsesServerGenerationTime(t *testing.T) {
 	}
 }
 
+func TestRunRemoteUptimeUsesServerGenerationTime(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	failedAt := generatedAt.Add(-90 * time.Minute)
+	downAt := generatedAt.Add(-25 * time.Hour)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/uptime" {
+			t.Fatalf("path = %q, want /v1/uptime", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Fatalf("authorization = %q", got)
+		}
+		failedSeconds := int64(5400)
+		downSeconds := int64(90000)
+		_ = json.NewEncoder(w).Encode(controlapi.UptimeResponse{
+			GeneratedAt: generatedAt,
+			Monitors: []controlapi.UptimeMonitor{{
+				MonitorID:                    "home",
+				Name:                         "Homepage",
+				Status:                       state.Up,
+				LastFailedCheckAt:            &failedAt,
+				SecondsSinceLastFailedCheck:  &failedSeconds,
+				LastDownIncidentAt:           &downAt,
+				SecondsSinceLastDownIncident: &downSeconds,
+			}},
+		})
+	}))
+	defer server.Close()
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{"--remote", server.URL, "--token", "secret", "uptime"})
+	})
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	for _, want := range []string{"home", "Homepage", "UP", "1h30m0s", "25h0m0s", failedAt.Local().Format(time.RFC3339), downAt.Local().Format(time.RFC3339)} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("uptime output %q does not contain %q", stdout, want)
+		}
+	}
+}
+
+func TestRunLocalUptimeJSON(t *testing.T) {
+	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	downAt := time.Now().UTC().Add(-2 * time.Hour).Truncate(time.Second)
+	failedAt := time.Now().UTC().Add(-30 * time.Minute).Truncate(time.Second)
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: downAt, OK: false}, storage.MonitorState{
+		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Down,
+		LastCheckedAt: downAt, LastFailureAt: downAt, UpdatedAt: downAt,
+	}, &storage.Incident{MonitorID: "home", Name: "Home", Transition: state.Down, ObservedAt: downAt}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.SaveProbeAndState(context.Background(), storage.ProbeResult{MonitorID: "home", CheckedAt: failedAt, OK: false}, storage.MonitorState{
+		MonitorID: "home", Name: "Home", URL: "https://example.com/", Status: state.Failing,
+		ConsecutiveFailures: 1, LastCheckedAt: failedAt, LastFailureAt: failedAt, UpdatedAt: failedAt,
+	}, nil); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout := captureStdout(t, func() {
+		if err := run([]string{"--json", "uptime", "--config", configPath}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	var response controlapi.UptimeResponse
+	if err := json.Unmarshal([]byte(stdout), &response); err != nil {
+		t.Fatalf("decode uptime JSON %q: %v", stdout, err)
+	}
+	if len(response.Monitors) != 1 {
+		t.Fatalf("monitors = %+v", response.Monitors)
+	}
+	monitor := response.Monitors[0]
+	if monitor.MonitorID != "home" || monitor.Status != state.Failing || monitor.LastFailedCheckAt == nil || !monitor.LastFailedCheckAt.Equal(failedAt) || monitor.LastDownIncidentAt == nil || !monitor.LastDownIncidentAt.Equal(downAt) {
+		t.Fatalf("monitor = %+v", monitor)
+	}
+	if monitor.SecondsSinceLastFailedCheck == nil || *monitor.SecondsSinceLastFailedCheck < 1700 || *monitor.SecondsSinceLastFailedCheck > 1900 {
+		t.Fatalf("failed-check age = %#v, want approximately 1800", monitor.SecondsSinceLastFailedCheck)
+	}
+	if monitor.SecondsSinceLastDownIncident == nil || *monitor.SecondsSinceLastDownIncident < 7100 || *monitor.SecondsSinceLastDownIncident > 7300 {
+		t.Fatalf("DOWN-incident age = %#v, want approximately 7200", monitor.SecondsSinceLastDownIncident)
+	}
+}
+
+func TestRunUptimeValidatesArguments(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{args: []string{"uptime", "home"}, want: "uptime does not accept positional arguments"},
+		{args: []string{"--remote", "http://example.com", "--token", "secret", "uptime", "--config", "config.yaml"}, want: "uptime --config cannot be used with --remote"},
+	}
+	for _, test := range tests {
+		if err := run(test.args); err == nil || !strings.Contains(err.Error(), test.want) {
+			t.Fatalf("run(%v) error = %v, want %q", test.args, err, test.want)
+		}
+	}
+}
+
 func TestRunRejectsLocalOnlyCommandInRemoteMode(t *testing.T) {
 	err := run([]string{"--remote", "http://example.com", "--token", "secret", "start"})
 	if err == nil || !strings.Contains(err.Error(), "cannot run remotely") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRunReportsUsageForUnknownCommandInRemoteMode(t *testing.T) {
+	err := run([]string{"--remote", "http://example.com", "asdoifhasldfhsf"})
+	if err == nil {
+		t.Fatal("unknown command returned nil error")
+	}
+	if err.Error() != usage().Error() {
+		t.Fatalf("error = %q, want usage error %q", err, usage())
 	}
 }
 

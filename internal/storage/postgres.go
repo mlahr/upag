@@ -1124,6 +1124,29 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, filter IncidentFilter
 	return incidents, rows.Err()
 }
 
+func (s *PostgresStore) ListLatestDownIncidentTimes(ctx context.Context) (map[string]time.Time, error) {
+	tenantID := TenantFromContext(ctx)
+	rows, err := s.pool.Query(ctx, `SELECT monitor_id, MAX(observed_at)
+		FROM incidents
+		WHERE tenant_id = $1 AND transition = $2
+		GROUP BY monitor_id`, tenantID, state.Down)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	latest := map[string]time.Time{}
+	for rows.Next() {
+		var monitorID string
+		var observedAt time.Time
+		if err := rows.Scan(&monitorID, &observedAt); err != nil {
+			return nil, err
+		}
+		latest[monitorID] = observedAt.UTC()
+	}
+	return latest, rows.Err()
+}
+
 func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {
 	limit := filter.Limit
 	if limit <= 0 {

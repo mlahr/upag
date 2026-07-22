@@ -209,6 +209,39 @@ func TestPrintStatusIntervalsAtUsesProvidedTimeForOpenInterval(t *testing.T) {
 	}
 }
 
+func TestPrintUptimeAtShowsIndependentFailureAndDownIncidentAges(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 22, 12, 0, 0, 0, time.UTC)
+	monitors := []storage.MonitorUptime{
+		{
+			MonitorID:          "home",
+			Name:               "Homepage",
+			Status:             "UP",
+			LastFailedCheckAt:  generatedAt.Add(-90 * time.Minute),
+			LastDownIncidentAt: generatedAt.Add(-25 * time.Hour),
+		},
+		{MonitorID: "api", Name: "API", Status: "UNKNOWN"},
+		{MonitorID: "future", Name: "Future", Status: "UP", LastFailedCheckAt: generatedAt.Add(time.Minute)},
+	}
+
+	var buf bytes.Buffer
+	if err := PrintUptimeAt(&buf, monitors, generatedAt); err != nil {
+		t.Fatal(err)
+	}
+	output := buf.String()
+	for _, want := range []string{
+		"FAILED CHECK AGE", "LAST FAILED CHECK", "DOWN INCIDENT AGE", "LAST DOWN INCIDENT",
+		"home", "Homepage", "1h30m0s", "25h0m0s", generatedAt.Add(-90 * time.Minute).Local().Format(time.RFC3339), generatedAt.Add(-25 * time.Hour).Local().Format(time.RFC3339),
+		"api", "UNKNOWN", "future",
+	} {
+		if !contains(output, want) {
+			t.Fatalf("uptime output %q does not contain %q", output, want)
+		}
+	}
+	if got := formatElapsedSince(generatedAt.Add(time.Minute), generatedAt); got != "-" {
+		t.Fatalf("future event age = %q, want dash", got)
+	}
+}
+
 func contains(s, substr string) bool {
 	return len(s) >= len(substr) && containsStr(s, substr)
 }

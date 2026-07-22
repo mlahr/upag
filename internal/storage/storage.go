@@ -30,6 +30,7 @@ type Backend interface {
 	ListUptimeStats(context.Context, time.Time, FailureThresholds) (map[string]UptimeStats, error)
 	ListDailyUptimeStats(context.Context, time.Time, int, FailureThresholds) (map[string][]DailyUptimeStats, error)
 	ListIncidents(context.Context, IncidentFilter) ([]Incident, error)
+	ListLatestDownIncidentTimes(context.Context) (map[string]time.Time, error)
 	ListFailedProbeResults(context.Context, ProbeResultFilter) ([]ProbeResult, error)
 	ListObserverSentinelEvents(context.Context, ObserverSentinelEventFilter) ([]ObserverSentinelResult, error)
 	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
@@ -89,6 +90,14 @@ type MonitorState struct {
 	LastError               string
 	LastObservedStatusCode  int
 	UpdatedAt               time.Time
+}
+
+type MonitorUptime struct {
+	MonitorID          string
+	Name               string
+	Status             string
+	LastFailedCheckAt  time.Time
+	LastDownIncidentAt time.Time
 }
 
 type ProbeResult struct {
@@ -1623,6 +1632,27 @@ func (s *Store) ListIncidents(ctx context.Context, filter IncidentFilter) ([]Inc
 		incidents = append(incidents, incident)
 	}
 	return incidents, rows.Err()
+}
+
+func (s *Store) ListLatestDownIncidentTimes(ctx context.Context) (map[string]time.Time, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT monitor_id, MAX(observed_at)
+		FROM incidents
+		WHERE transition = ?
+		GROUP BY monitor_id`, state.Down)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	latest := map[string]time.Time{}
+	for rows.Next() {
+		var monitorID, observedAt string
+		if err := rows.Scan(&monitorID, &observedAt); err != nil {
+			return nil, err
+		}
+		latest[monitorID] = parseTime(observedAt)
+	}
+	return latest, rows.Err()
 }
 
 func (s *Store) ListFailedProbeResults(ctx context.Context, filter ProbeResultFilter) ([]ProbeResult, error) {

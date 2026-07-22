@@ -167,9 +167,16 @@ Inspect monitor state and recent incidents from another shell:
 
 ```sh
 upag monitors --config ./config.yaml
+upag uptime --config ./config.yaml
 upag incidents --config ./config.yaml --limit 50
 upag incidents --config ./config.yaml --limit 50 --since 2026-06-23T00:00:00Z
 ```
+
+`upag uptime` reports two independent ages for every stored monitor state: the
+time since its latest completed failed check and the time since its latest
+persisted `DOWN` transition. The failed-check timestamp includes failures
+during maintenance and excludes failures suppressed while the observer is
+down. A monitor with no recorded event displays `-`; JSON output uses `null`.
 
 Run one immediate diagnostic attempt for a configured monitor:
 
@@ -539,6 +546,7 @@ Put global remote options before the command:
 ```sh
 upag --remote https://host-b.example --token "$UPAG_TOKEN" status
 upag --remote https://host-b.example --token "$UPAG_TOKEN" monitors
+upag --remote https://host-b.example --token "$UPAG_TOKEN" uptime
 upag --remote https://host-b.example --token "$UPAG_TOKEN" check --monitor homepage
 upag --remote https://host-b.example --token "$UPAG_TOKEN" incidents --limit 20
 upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
@@ -549,8 +557,10 @@ upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
 `UPAG_REMOTE`, `UPAG_TOKEN`, and `UPAG_REMOTE_TIMEOUT` provide defaults. The
 request timeout defaults to `1m`. Use `--local` to ignore those environment
 variables for one invocation. Remote-capable commands are `status`, `check`,
-`monitors`, `incidents`, `intervals`, `failures`, and `maintenance`; every
-other command is local-only.
+`monitors`, `uptime`, `incidents`, `intervals`, `failures`, and `maintenance`;
+every other command is local-only. The `uptime` command uses authenticated
+`GET /v1/uptime`; the daemon performs the tenant-scoped latest-`DOWN`
+aggregation and supplies the generation timestamp used for elapsed durations.
 
 Remote `check` executes from the daemon host using the daemon's active monitor
 configuration. It makes one attempt without configured probe retries and does
@@ -812,6 +822,7 @@ Inspect stored state:
 
 ```sh
 upag monitors
+upag uptime
 upag incidents --limit 50
 upag failures --limit 20 --since 24h
 upag intervals --monitor homepage --limit 20 --since 24h

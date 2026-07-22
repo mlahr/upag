@@ -95,6 +95,9 @@ func run(args []string) error {
 		fmt.Fprintln(os.Stdout, "upag", version)
 		return nil
 	}
+	if !knownCommand(commandArgs[0]) {
+		return usage()
+	}
 	var remote *controlapi.Client
 	if global.Remote != "" {
 		remote, err = controlapi.NewClient(global.Remote, global.Token, global.Timeout)
@@ -127,6 +130,8 @@ func run(args []string) error {
 		return runCheck(args[1:], remote, global.JSON)
 	case "monitors":
 		return runMonitors(args[1:], remote, global.JSON)
+	case "uptime":
+		return runUptime(args[1:], remote, global.JSON)
 	case "incidents":
 		return runIncidents(args[1:], remote, global.JSON)
 	case "intervals":
@@ -304,7 +309,16 @@ type storageMigrationResult struct {
 
 func remoteCapableCommand(command string) bool {
 	switch command {
-	case "status", "check", "monitors", "incidents", "intervals", "failures", "maintenance":
+	case "status", "check", "monitors", "uptime", "incidents", "intervals", "failures", "maintenance":
+		return true
+	default:
+		return false
+	}
+}
+
+func knownCommand(command string) bool {
+	switch command {
+	case "run", "start", "stop", "status", "restart", "config", "check", "monitors", "uptime", "incidents", "intervals", "failures", "maintenance", "storage":
 		return true
 	default:
 		return false
@@ -688,6 +702,63 @@ func runMonitors(args []string, remote *controlapi.Client, jsonOutput bool) erro
 		})
 	}
 	return cli.PrintStates(os.Stdout, rows, activeMaintenanceByMonitor(windows, now))
+}
+
+func runUptime(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("uptime", jsonOutput)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("uptime does not accept positional arguments")
+	}
+
+	var response controlapi.UptimeResponse
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("uptime --config cannot be used with --remote")
+		}
+		var err error
+		response, err = remote.Uptime(context.Background())
+		if err != nil {
+			return err
+		}
+	} else {
+		if err := defaults.ApplyPaths(fs,
+			defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+		); err != nil {
+			return err
+		}
+		cfg, err := config.LoadFile(*configPath)
+		if err != nil {
+			return err
+		}
+		ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+		store, err := storage.OpenBackend(ctx, cfg.Storage)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		states, err := store.ListStates(ctx)
+		if err != nil {
+			return err
+		}
+		latestDown, err := store.ListLatestDownIncidentTimes(ctx)
+		if err != nil {
+			return err
+		}
+		response = controlapi.UptimeResponseFromStorage(states, latestDown, time.Now().UTC())
+	}
+
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, response)
+	}
+	rows := make([]storage.MonitorUptime, 0, len(response.Monitors))
+	for _, monitor := range response.Monitors {
+		rows = append(rows, monitor.Storage())
+	}
+	return cli.PrintUptimeAt(os.Stdout, rows, response.GeneratedAt)
 }
 
 func runIncidents(args []string, remote *controlapi.Client, jsonOutput bool) error {
@@ -1412,6 +1483,7 @@ Daemon commands:
 Monitoring commands:
   check        Run one diagnostic check without changing stored state
   monitors     List current monitor states
+  uptime       Show time since each monitor's latest failure and DOWN incident
   incidents    List recorded incidents
   intervals    List monitor status intervals
   failures     List failed probes and observer failures
@@ -1433,5 +1505,5 @@ Global options:
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [global options] <run|start|stop|status|restart|config|check|monitors|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
+	return fmt.Errorf("usage: upag [global options] <run|start|stop|status|restart|config|check|monitors|uptime|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
 }

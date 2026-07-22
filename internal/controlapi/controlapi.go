@@ -25,6 +25,7 @@ const maxRequestBody = 64 << 10
 
 type Store interface {
 	ListStates(context.Context) ([]storage.MonitorState, error)
+	ListLatestDownIncidentTimes(context.Context) (map[string]time.Time, error)
 	EnsureStatusIntervalsBackfilled(context.Context, storage.FailureThresholds) error
 	ListStatusIntervals(context.Context, storage.StatusIntervalFilter) ([]storage.StatusInterval, error)
 	ListIncidents(context.Context, storage.IncidentFilter) ([]storage.Incident, error)
@@ -101,6 +102,21 @@ type MonitorsResponse struct {
 	GeneratedAt       time.Time     `json:"generated_at"`
 	Monitors          []Monitor     `json:"monitors"`
 	ActiveMaintenance []Maintenance `json:"active_maintenance"`
+}
+
+type UptimeMonitor struct {
+	MonitorID                    string     `json:"monitor_id"`
+	Name                         string     `json:"name"`
+	Status                       string     `json:"status"`
+	LastFailedCheckAt            *time.Time `json:"last_failed_check_at"`
+	SecondsSinceLastFailedCheck  *int64     `json:"seconds_since_last_failed_check"`
+	LastDownIncidentAt           *time.Time `json:"last_down_incident_at"`
+	SecondsSinceLastDownIncident *int64     `json:"seconds_since_last_down_incident"`
+}
+
+type UptimeResponse struct {
+	GeneratedAt time.Time       `json:"generated_at"`
+	Monitors    []UptimeMonitor `json:"monitors"`
 }
 
 type Incident struct {
@@ -238,6 +254,11 @@ func serveAuthenticated(w http.ResponseWriter, r *http.Request, store Store, run
 			return
 		}
 		serveMonitors(w, r, store, runtime)
+	case r.URL.Path == "/v1/uptime":
+		if !allowMethod(w, r, http.MethodGet) {
+			return
+		}
+		serveUptime(w, r, store, runtime)
 	case r.URL.Path == "/v1/incidents":
 		if !allowMethod(w, r, http.MethodGet) {
 			return
@@ -348,6 +369,21 @@ func serveMonitors(w http.ResponseWriter, r *http.Request, store Store, runtime 
 		}
 	}
 	writeJSON(w, 200, MonitorsResponse{GeneratedAt: now, Monitors: MonitorsFromStorage(states), ActiveMaintenance: MaintenanceFromStorage(active)})
+}
+
+func serveUptime(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
+	ctx := tenantContext(r, runtime)
+	states, err := store.ListStates(ctx)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	latestDown, err := store.ListLatestDownIncidentTimes(ctx)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, UptimeResponseFromStorage(states, latestDown, time.Now().UTC()))
 }
 
 func serveIncidents(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -555,6 +591,52 @@ func MonitorsFromStorage(rows []storage.MonitorState) []Monitor {
 		out = append(out, Monitor{ID: v.MonitorID, Name: v.Name, URL: v.URL, ExpectedStatusCode: v.ExpectedStatusCode, Status: v.Status, StatusBeforeMaintenance: v.StatusBeforeMaintenance, ConsecutiveFailures: v.ConsecutiveFailures, LastCheckedAt: v.LastCheckedAt, LastSuccessAt: v.LastSuccessAt, LastFailureAt: v.LastFailureAt, LastError: v.LastError, LastObservedStatusCode: v.LastObservedStatusCode, UpdatedAt: v.UpdatedAt})
 	}
 	return out
+}
+
+func UptimeResponseFromStorage(states []storage.MonitorState, latestDown map[string]time.Time, generatedAt time.Time) UptimeResponse {
+	generatedAt = generatedAt.UTC()
+	monitors := make([]UptimeMonitor, 0, len(states))
+	for _, monitorState := range states {
+		lastFailed := utcTimePtr(monitorState.LastFailureAt)
+		lastDown := utcTimePtr(latestDown[monitorState.MonitorID])
+		monitors = append(monitors, UptimeMonitor{
+			MonitorID:                    monitorState.MonitorID,
+			Name:                         monitorState.Name,
+			Status:                       monitorState.Status,
+			LastFailedCheckAt:            lastFailed,
+			SecondsSinceLastFailedCheck:  elapsedSeconds(generatedAt, lastFailed),
+			LastDownIncidentAt:           lastDown,
+			SecondsSinceLastDownIncident: elapsedSeconds(generatedAt, lastDown),
+		})
+	}
+	return UptimeResponse{GeneratedAt: generatedAt, Monitors: monitors}
+}
+
+func utcTimePtr(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	value = value.UTC()
+	return &value
+}
+
+func elapsedSeconds(now time.Time, event *time.Time) *int64 {
+	if event == nil || event.After(now) {
+		return nil
+	}
+	seconds := int64(now.Sub(*event) / time.Second)
+	return &seconds
+}
+
+func (m UptimeMonitor) Storage() storage.MonitorUptime {
+	row := storage.MonitorUptime{MonitorID: m.MonitorID, Name: m.Name, Status: m.Status}
+	if m.LastFailedCheckAt != nil {
+		row.LastFailedCheckAt = m.LastFailedCheckAt.UTC()
+	}
+	if m.LastDownIncidentAt != nil {
+		row.LastDownIncidentAt = m.LastDownIncidentAt.UTC()
+	}
+	return row
 }
 func MaintenanceFromStorage(rows []storage.MaintenanceWindow) []Maintenance {
 	out := make([]Maintenance, 0, len(rows))

@@ -111,6 +111,12 @@ func (c *Client) Monitors(ctx context.Context) (MonitorsResponse, error) {
 	return response, err
 }
 
+func (c *Client) Uptime(ctx context.Context) (UptimeResponse, error) {
+	var response UptimeResponse
+	err := c.do(ctx, http.MethodGet, "/v1/uptime", nil, nil, &response)
+	return response, err
+}
+
 func (c *Client) Incidents(ctx context.Context, limit int, since time.Time) (IncidentsResponse, error) {
 	query := listQuery(limit, since)
 	var response IncidentsResponse

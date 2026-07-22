@@ -41,6 +41,35 @@ func PrintStates(w io.Writer, states []storage.MonitorState, activeMaintenance m
 	})
 }
 
+func PrintUptimeAt(w io.Writer, monitors []storage.MonitorUptime, generatedAt time.Time) error {
+	return printTable(w, func(tw *tabwriter.Writer) error {
+		if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tFAILED CHECK AGE\tLAST FAILED CHECK\tDOWN INCIDENT AGE\tLAST DOWN INCIDENT\tNAME"); err != nil {
+			return err
+		}
+		for _, monitor := range monitors {
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+				monitor.MonitorID,
+				monitor.Status,
+				formatElapsedSince(monitor.LastFailedCheckAt, generatedAt),
+				formatCLITime(monitor.LastFailedCheckAt),
+				formatElapsedSince(monitor.LastDownIncidentAt, generatedAt),
+				formatCLITime(monitor.LastDownIncidentAt),
+				monitor.Name,
+			); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+func formatElapsedSince(event, now time.Time) string {
+	if event.IsZero() || event.After(now) {
+		return "-"
+	}
+	return now.Sub(event).Truncate(time.Second).String()
+}
+
 func PrintMaintenanceWindows(w io.Writer, windows []storage.MaintenanceWindow, now time.Time) error {
 	return printTable(w, func(tw *tabwriter.Writer) error {
 		if _, err := fmt.Fprintln(tw, "ID\tMONITOR\tSTATE\tSTART\tEND\tCREATED BY\tCREATED AT\tCANCELLED BY\tCANCELLED AT\tREASON\tCANCELLATION REASON"); err != nil {
