@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -753,6 +754,7 @@ func runUptime(args []string, remote *controlapi.Client, jsonOutput bool) error 
 		}
 		response = controlapi.UptimeResponseFromStorage(states, starts, time.Now().UTC())
 	}
+	sortUptimeMonitors(response.Monitors)
 
 	if jsonOutput {
 		return cli.PrintJSON(os.Stdout, response)
@@ -762,6 +764,25 @@ func runUptime(args []string, remote *controlapi.Client, jsonOutput bool) error 
 		rows = append(rows, monitor.Storage())
 	}
 	return cli.PrintUptimeAt(os.Stdout, rows, response.GeneratedAt)
+}
+
+func sortUptimeMonitors(monitors []controlapi.UptimeMonitor) {
+	sort.Slice(monitors, func(i, j int) bool {
+		left := monitors[i].FailureFreeSeconds
+		right := monitors[j].FailureFreeSeconds
+		switch {
+		case left == nil && right == nil:
+			return monitors[i].MonitorID < monitors[j].MonitorID
+		case left == nil:
+			return false
+		case right == nil:
+			return true
+		case *left == *right:
+			return monitors[i].MonitorID < monitors[j].MonitorID
+		default:
+			return *left < *right
+		}
+	})
 }
 
 func runIncidents(args []string, remote *controlapi.Client, jsonOutput bool) error {

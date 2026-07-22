@@ -181,6 +181,9 @@ not currently `UP` displays `-`; JSON output uses `null`.
 Text durations use calendar-aware UTC years (`y`) and months (`M`), followed by
 days, hours, and minutes, for example `5y3M3d8h3m`. Exact UTC streak-start
 timestamps and elapsed seconds remain available in JSON.
+The CLI orders rows client-side by failure-free uptime ascending, with
+unavailable values last and monitor ID as the tie-breaker. The HTTP endpoint
+does not impose this presentation ordering.
 
 Run one immediate diagnostic attempt for a configured monitor:
 

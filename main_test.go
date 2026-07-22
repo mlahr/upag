@@ -516,6 +516,24 @@ func TestRunUptimeValidatesArguments(t *testing.T) {
 	}
 }
 
+func TestSortUptimeMonitorsOrdersAscendingWithUnavailableLast(t *testing.T) {
+	minute := int64(60)
+	day := int64(86400)
+	monitors := []controlapi.UptimeMonitor{
+		{MonitorID: "long", FailureFreeSeconds: &day},
+		{MonitorID: "unknown-b"},
+		{MonitorID: "short", FailureFreeSeconds: &minute},
+		{MonitorID: "unknown-a"},
+	}
+	sortUptimeMonitors(monitors)
+	want := []string{"short", "long", "unknown-a", "unknown-b"}
+	for i, monitorID := range want {
+		if monitors[i].MonitorID != monitorID {
+			t.Fatalf("monitor %d = %q, want %q; monitors = %+v", i, monitors[i].MonitorID, monitorID, monitors)
+		}
+	}
+}
+
 func TestRunRejectsLocalOnlyCommandInRemoteMode(t *testing.T) {
 	err := run([]string{"--remote", "http://example.com", "--token", "secret", "start"})
 	if err == nil || !strings.Contains(err.Error(), "cannot run remotely") {
