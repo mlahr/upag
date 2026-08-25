@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -44,6 +45,9 @@ func main() {
 }
 
 func printRunError(w io.Writer, args []string, err error) error {
+	if _, ok := err.(*maintenanceAddBatchError); ok {
+		return nil
+	}
 	if jsonOutputRequested(args) {
 		return cli.PrintErrorJSON(w, err)
 	}
@@ -306,6 +310,35 @@ type storageMigrationResult struct {
 	Source   string `json:"source"`
 	Target   string `json:"target"`
 	TenantID string `json:"tenant_id"`
+}
+
+type repeatedStringValue []string
+
+func (v *repeatedStringValue) String() string {
+	return strings.Join(*v, ",")
+}
+
+func (v *repeatedStringValue) Set(value string) error {
+	*v = append(*v, value)
+	return nil
+}
+
+type maintenanceAddFailure struct {
+	MonitorID string `json:"monitor_id"`
+	Error     string `json:"error"`
+}
+
+type maintenanceAddResult struct {
+	Created []controlapi.AddMaintenanceResponse `json:"created"`
+	Errors  []maintenanceAddFailure             `json:"errors"`
+}
+
+type maintenanceAddBatchError struct {
+	Failures int
+}
+
+func (e *maintenanceAddBatchError) Error() string {
+	return fmt.Sprintf("maintenance add failed for %d monitor(s)", e.Failures)
 }
 
 func remoteCapableCommand(command string) bool {
@@ -1243,42 +1276,56 @@ func runStorageMigrate(args []string, jsonOutput bool) error {
 func runMaintenanceAdd(args []string, remote *controlapi.Client, jsonOutput bool) error {
 	fs := newCommandFlagSet("maintenance add", jsonOutput)
 	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
-	monitorID := fs.String("monitor", "", "monitor ID")
-	startRaw := fs.String("start", "", "maintenance start time in RFC3339 format")
-	endRaw := fs.String("end", "", "maintenance end time in RFC3339 format")
-	reason := fs.String("reason", "", "maintenance reason")
+	var monitorIDs repeatedStringValue
+	fs.Var(&monitorIDs, "monitor", "monitor ID; repeat for multiple monitors")
+	startRaw := fs.String("start", "", "maintenance start time: RFC3339, now, or signed duration")
+	endRaw := fs.String("end", "", "maintenance end time: RFC3339, now, or signed duration")
+	reason := fs.String("reason", "maintenance", "maintenance reason")
 	actor := fs.String("by", "", "operator identity for audit records")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *monitorID == "" {
+	if len(monitorIDs) == 0 {
 		return fmt.Errorf("maintenance add requires --monitor")
 	}
-	start, err := parseCLITime(*startRaw, "--start")
+	for _, monitorID := range monitorIDs {
+		if monitorID == "" {
+			return fmt.Errorf("maintenance add requires --monitor")
+		}
+	}
+	now := time.Now().UTC()
+	start, err := parseCLITime(*startRaw, "--start", now)
 	if err != nil {
 		return err
 	}
-	end, err := parseCLITime(*endRaw, "--end")
+	end, err := parseCLITime(*endRaw, "--end", now)
 	if err != nil {
 		return err
+	}
+	if !end.After(start) {
+		return fmt.Errorf("maintenance add --end must be after --start")
 	}
 	by, err := auditActor(*actor)
 	if err != nil {
 		return err
 	}
+	result := maintenanceAddResult{
+		Created: make([]controlapi.AddMaintenanceResponse, 0, len(monitorIDs)),
+		Errors:  make([]maintenanceAddFailure, 0),
+	}
 	if remote != nil {
 		if defaults.FlagWasSet(fs, "config") {
 			return fmt.Errorf("maintenance add --config cannot be used with --remote")
 		}
-		response, err := remote.AddMaintenance(context.Background(), controlapi.AddMaintenanceRequest{MonitorID: *monitorID, StartsAt: start, EndsAt: end, Reason: *reason, CreatedBy: by})
-		if err != nil {
-			return err
+		for _, monitorID := range monitorIDs {
+			response, err := remote.AddMaintenance(context.Background(), controlapi.AddMaintenanceRequest{MonitorID: monitorID, StartsAt: start, EndsAt: end, Reason: *reason, CreatedBy: by})
+			if err != nil {
+				result.Errors = append(result.Errors, maintenanceAddFailure{MonitorID: monitorID, Error: err.Error()})
+				continue
+			}
+			result.Created = append(result.Created, response)
 		}
-		if jsonOutput {
-			return cli.PrintJSON(os.Stdout, response)
-		}
-		fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", response.ID, response.MonitorID)
-		return nil
+		return finishMaintenanceAdd(result, len(monitorIDs), jsonOutput)
 	}
 	if err := defaults.ApplyPaths(fs,
 		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
@@ -1295,21 +1342,55 @@ func runMaintenanceAdd(args []string, remote *controlapi.Client, jsonOutput bool
 		return err
 	}
 	defer store.Close()
-	id, err := store.AddMaintenanceWindow(ctx, storage.MaintenanceWindow{
-		MonitorID: *monitorID,
-		StartsAt:  start,
-		EndsAt:    end,
-		Reason:    *reason,
-		CreatedBy: by,
-		CreatedAt: time.Now().UTC(),
-	})
-	if err != nil {
+	for _, monitorID := range monitorIDs {
+		id, err := store.AddMaintenanceWindow(ctx, storage.MaintenanceWindow{
+			MonitorID: monitorID,
+			StartsAt:  start,
+			EndsAt:    end,
+			Reason:    *reason,
+			CreatedBy: by,
+			CreatedAt: now,
+		})
+		if err != nil {
+			result.Errors = append(result.Errors, maintenanceAddFailure{MonitorID: monitorID, Error: err.Error()})
+			continue
+		}
+		result.Created = append(result.Created, controlapi.AddMaintenanceResponse{ID: id, MonitorID: monitorID})
+	}
+	return finishMaintenanceAdd(result, len(monitorIDs), jsonOutput)
+}
+
+func finishMaintenanceAdd(result maintenanceAddResult, monitorCount int, jsonOutput bool) error {
+	if monitorCount == 1 && len(result.Errors) == 0 && len(result.Created) == 1 {
+		response := result.Created[0]
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
+		}
+		_, err := fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", response.ID, response.MonitorID)
 		return err
 	}
-	if jsonOutput {
-		return cli.PrintJSON(os.Stdout, controlapi.AddMaintenanceResponse{ID: id, MonitorID: *monitorID})
+	if monitorCount == 1 && len(result.Errors) == 1 {
+		return errors.New(result.Errors[0].Error)
 	}
-	fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", id, *monitorID)
+	if jsonOutput {
+		if err := cli.PrintJSON(os.Stdout, result); err != nil {
+			return err
+		}
+	} else {
+		for _, response := range result.Created {
+			if _, err := fmt.Fprintf(os.Stdout, "maintenance window %d scheduled for monitor %s\n", response.ID, response.MonitorID); err != nil {
+				return err
+			}
+		}
+		for _, failure := range result.Errors {
+			if _, err := fmt.Fprintf(os.Stdout, "failed to schedule maintenance for monitor %s: %s\n", failure.MonitorID, failure.Error); err != nil {
+				return err
+			}
+		}
+	}
+	if len(result.Errors) > 0 {
+		return &maintenanceAddBatchError{Failures: len(result.Errors)}
+	}
 	return nil
 }
 
@@ -1438,15 +1519,28 @@ func activeMaintenanceByMonitor(windows []storage.MaintenanceWindow, now time.Ti
 	return active
 }
 
-func parseCLITime(raw string, flagName string) (time.Time, error) {
+func parseCLITime(raw string, flagName string, anchors ...time.Time) (time.Time, error) {
+	now := time.Now().UTC()
+	if len(anchors) > 0 {
+		now = anchors[0].UTC()
+	}
 	if raw == "" {
 		return time.Time{}, fmt.Errorf("maintenance add requires %s", flagName)
 	}
-	parsed, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp: %w", flagName, err)
+	if raw == "now" {
+		return now.UTC(), nil
 	}
-	return parsed.UTC(), nil
+	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
+		return parsed.UTC(), nil
+	}
+	if !strings.HasPrefix(raw, "+") && !strings.HasPrefix(raw, "-") {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp, now, or signed duration", flagName)
+	}
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp, now, or signed duration: %w", flagName, err)
+	}
+	return now.UTC().Add(duration), nil
 }
 
 func parseCLISince(raw string, flagName string, now time.Time) (time.Time, error) {

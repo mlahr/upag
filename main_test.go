@@ -835,6 +835,196 @@ func TestRunRecognizesMaintenanceCommands(t *testing.T) {
 	}
 }
 
+func TestRunMaintenanceAddSupportsRepeatedMonitorsAndRelativeTimes(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	seedMonitorState(t, dbPath, "home")
+	seedMonitorState(t, dbPath, "pdfdancer-api v2")
+
+	stdout := captureStdout(t, func() {
+		if err := run([]string{
+			"maintenance", "add",
+			"--config", configPath,
+			"--monitor", "pdfdancer-api",
+			"--monitor", "pdfdancer-api v2",
+			"--start", "now",
+			"--end", "+1h",
+			"--by", "tester",
+		}); err == nil {
+			t.Fatal("maintenance add returned nil error, want unknown monitor failure")
+		}
+	})
+	if !strings.Contains(stdout, "maintenance window 1 scheduled for monitor pdfdancer-api v2") {
+		t.Fatalf("output = %q, want successful second monitor", stdout)
+	}
+	if !strings.Contains(stdout, `failed to schedule maintenance for monitor pdfdancer-api`) {
+		t.Fatalf("output = %q, want first monitor failure", stdout)
+	}
+
+	store, err := storage.Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	windows, err := store.ListMaintenanceWindows(context.Background(), storage.MaintenanceWindowFilter{IncludeAll: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(windows) != 1 || windows[0].MonitorID != "pdfdancer-api v2" {
+		t.Fatalf("maintenance windows = %+v, want one window for the second monitor", windows)
+	}
+	if windows[0].Reason != "maintenance" {
+		t.Fatalf("maintenance reason = %q, want default reason", windows[0].Reason)
+	}
+	if got := windows[0].EndsAt.Sub(windows[0].StartsAt); got != time.Hour {
+		t.Fatalf("maintenance duration = %s, want 1h", got)
+	}
+}
+
+func TestRunMaintenanceAddJSONBatchIncludesSuccessesAndErrors(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "upag.sqlite")
+	configPath := writeSQLiteConfig(t, dbPath)
+	seedMonitorState(t, dbPath, "home")
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{
+			"--json", "maintenance", "add",
+			"--config", configPath,
+			"--monitor", "home",
+			"--monitor", "missing",
+			"--start", "2026-06-23T01:00:00Z",
+			"--end", "2026-06-23T02:00:00Z",
+			"--reason", "deploy",
+			"--by", "tester",
+		})
+	})
+	if runErr == nil {
+		t.Fatal("maintenance add returned nil error, want batch error")
+	}
+	var result maintenanceAddResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode batch result %q: %v", stdout, err)
+	}
+	if len(result.Created) != 1 || result.Created[0].MonitorID != "home" {
+		t.Fatalf("created = %+v, want home", result.Created)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].MonitorID != "missing" {
+		t.Fatalf("errors = %+v, want missing", result.Errors)
+	}
+
+	var errorOutput strings.Builder
+	if err := printRunError(&errorOutput, []string{"--json", "maintenance", "add"}, runErr); err != nil {
+		t.Fatal(err)
+	}
+	if errorOutput.Len() != 0 {
+		t.Fatalf("batch error output = %q, want no duplicate output", errorOutput.String())
+	}
+}
+
+func TestRunMaintenanceAddRemoteContinuesAfterError(t *testing.T) {
+	var requests []controlapi.AddMaintenanceRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/maintenance" {
+			http.NotFound(w, r)
+			return
+		}
+		var request controlapi.AddMaintenanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		requests = append(requests, request)
+		if request.MonitorID == "bad" {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{
+				"code":    "conflict",
+				"message": "monitor is busy",
+			}})
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(controlapi.AddMaintenanceResponse{ID: int64(len(requests)), MonitorID: request.MonitorID})
+	}))
+	defer server.Close()
+
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = run([]string{
+			"--json", "--remote", server.URL, "--token", "token",
+			"maintenance", "add",
+			"--monitor", "one",
+			"--monitor", "bad",
+			"--monitor", "two",
+			"--start", "2026-08-25T04:00:00Z",
+			"--end", "2026-08-25T05:00:00Z",
+			"--reason", "deploy",
+			"--by", "tester",
+		})
+	})
+	if runErr == nil {
+		t.Fatal("remote maintenance add returned nil error, want batch error")
+	}
+	if len(requests) != 3 || requests[0].MonitorID != "one" || requests[1].MonitorID != "bad" || requests[2].MonitorID != "two" {
+		t.Fatalf("requests = %+v, want all monitors in argument order", requests)
+	}
+	var result maintenanceAddResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatalf("decode batch result %q: %v", stdout, err)
+	}
+	if len(result.Created) != 2 || result.Created[0].MonitorID != "one" || result.Created[1].MonitorID != "two" {
+		t.Fatalf("created = %+v, want one and two", result.Created)
+	}
+	if len(result.Errors) != 1 || result.Errors[0].MonitorID != "bad" || result.Errors[0].Error != "monitor is busy" {
+		t.Fatalf("errors = %+v, want bad monitor error", result.Errors)
+	}
+}
+
+func TestParseCLITimeSupportsNowAndSignedDuration(t *testing.T) {
+	anchor := time.Date(2026, 8, 25, 4, 5, 6, 123, time.UTC)
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want time.Time
+	}{
+		{name: "now", raw: "now", want: anchor},
+		{name: "positive duration", raw: "+1h", want: anchor.Add(time.Hour)},
+		{name: "negative duration", raw: "-15m", want: anchor.Add(-15 * time.Minute)},
+		{name: "RFC3339", raw: "2026-08-25T05:00:00Z", want: time.Date(2026, 8, 25, 5, 0, 0, 0, time.UTC)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseCLITime(tc.raw, "--start", anchor)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !got.Equal(tc.want) {
+				t.Fatalf("parseCLITime(%q) = %s, want %s", tc.raw, got, tc.want)
+			}
+		})
+	}
+
+	for _, raw := range []string{"1h", "later", "+nope"} {
+		if _, err := parseCLITime(raw, "--start", anchor); err == nil {
+			t.Fatalf("parseCLITime(%q) returned nil error", raw)
+		}
+	}
+}
+
+func TestRunMaintenanceAddRejectsInvalidWindowBeforeStorage(t *testing.T) {
+	err := run([]string{
+		"maintenance", "add",
+		"--monitor", "home",
+		"--start", "now",
+		"--end", "now",
+		"--by", "tester",
+	})
+	if err == nil || err.Error() != "maintenance add --end must be after --start" {
+		t.Fatalf("run error = %v, want end ordering error", err)
+	}
+}
+
 func TestRunRejectsUnknownMaintenanceCommand(t *testing.T) {
 	withPackageDefaultsPath(t, filepath.Join(t.TempDir(), "missing"))
 

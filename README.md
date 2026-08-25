@@ -559,6 +559,8 @@ upag --remote https://host-b.example --token "$UPAG_TOKEN" incidents --limit 20
 upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
   --monitor homepage --start 2026-07-21T01:00:00Z \
   --end 2026-07-21T02:00:00Z --reason deploy
+upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
+  --monitor homepage --monitor "homepage v2" --start now --end +1h
 ```
 
 `UPAG_REMOTE`, `UPAG_TOKEN`, and `UPAG_REMOTE_TIMEOUT` provide defaults. The
@@ -856,18 +858,25 @@ Manage one-off maintenance windows:
 upag maintenance add --monitor homepage \
   --start 2026-06-23T01:00:00Z --end 2026-06-23T02:00:00Z \
   --reason "deploy"
+upag maintenance add --monitor homepage --monitor "homepage v2" \
+  --start now --end +1h --reason "deploy"
 upag maintenance list
 upag maintenance list --all
 upag maintenance cancel --id 1 --reason "finished"
 ```
 
-Maintenance windows are attached to a single monitor. Checks still run during
-maintenance. Failed checks covered by `starts_at <= checked_at < ends_at` do
-not create alerts and do not count as reported downtime. Raw probe results are
-still stored with their maintenance window ID. `maintenance add` rejects monitor
-IDs that are not already present in `monitor_states` and rejects overlapping
-non-cancelled windows for the same monitor. Audit fields default to the local
-OS user; pass `--by` to override the recorded operator.
+Maintenance windows are attached to one monitor. Repeat `--monitor` to create
+one window per monitor. The command attempts all monitors and reports each
+failure. Checks still run during maintenance. Failed checks covered by
+`starts_at <= checked_at < ends_at` do not create alerts and do not count as
+reported downtime. Raw probe results are still stored with their maintenance
+window ID. `maintenance add` rejects monitor IDs that are not already present
+in `monitor_states` and rejects overlapping non-cancelled windows for the same
+monitor. `--start` and `--end` accept RFC3339 timestamps, `now`, or signed Go
+durations such as `+1h`. Relative values use one UTC time for the command.
+The default reason is `maintenance`; use `--reason` to set another reason.
+Audit fields default to the local OS user; pass `--by` to override the recorded
+operator.
 
 Print the binary version:
 
