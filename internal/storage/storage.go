@@ -1680,10 +1680,9 @@ func applyAvailabilityWindow(stats UptimeWindowStats, firstProbe time.Time, cuto
 		stats.DowntimeSeconds = 0
 		return stats
 	}
-	reportable := now.Sub(start) - overlapDuration(start, now, maintenance)
-	if reportable < 0 {
-		reportable = 0
-	}
+	// Maintenance counts as available time, as in dailyUptimeStats: only
+	// outage time outside maintenance is downtime.
+	reportable := now.Sub(start)
 	var downtime time.Duration
 	for _, outage := range outages {
 		overlapStart, overlapEnd, ok := clippedInterval(start, now, outage)

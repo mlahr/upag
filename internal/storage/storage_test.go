@@ -604,6 +604,29 @@ func TestDailyUptimeStatsCountsMaintenanceAsAvailableTime(t *testing.T) {
 	assertDailyUptime(t, stats[2], "2026-10-19", 60*60, 60*60)
 }
 
+func TestApplyAvailabilityWindowCountsMaintenanceAsAvailableTime(t *testing.T) {
+	now := time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC)
+	firstProbe := time.Date(2026, 7, 18, 0, 0, 0, 0, time.UTC)
+	maintenanceStart := time.Date(2026, 10, 17, 23, 8, 48, 0, time.UTC)
+	maintenanceEnd := time.Date(2026, 10, 18, 23, 8, 48, 0, time.UTC)
+	// The outage starts inside maintenance and continues after it.
+	outages := []timeInterval{{Start: maintenanceStart.Add(30 * time.Minute), End: now}}
+	maintenance := []timeInterval{{Start: maintenanceStart, End: maintenanceEnd}}
+
+	got := applyAvailabilityWindow(UptimeWindowStats{}, firstProbe, now.Add(-24*time.Hour), now, outages, maintenance)
+	// Downtime is 23:08:48 to 01:00:00 the next day.
+	wantDowntime := int64((1*time.Hour + 51*time.Minute + 12*time.Second) / time.Second)
+	if got.ReportableSeconds != 24*60*60 || got.DowntimeSeconds != wantDowntime {
+		t.Fatalf("24h window = reportable %d, downtime %d, want reportable 86400, downtime %d", got.ReportableSeconds, got.DowntimeSeconds, wantDowntime)
+	}
+
+	got = applyAvailabilityWindow(UptimeWindowStats{}, firstProbe, time.Time{}, now, outages, maintenance)
+	wantReportable := int64(now.Sub(firstProbe) / time.Second)
+	if got.ReportableSeconds != wantReportable || got.DowntimeSeconds != wantDowntime {
+		t.Fatalf("retained window = reportable %d, downtime %d, want reportable %d, downtime %d", got.ReportableSeconds, got.DowntimeSeconds, wantReportable, wantDowntime)
+	}
+}
+
 func assertDailyUptime(t *testing.T, got DailyUptimeStats, date string, reportableSeconds int64, downtimeSeconds int64) {
 	t.Helper()
 	if got.Date.Format("2006-01-02") != date || got.ReportableSeconds != reportableSeconds || got.DowntimeSeconds != downtimeSeconds {

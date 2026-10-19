@@ -517,8 +517,10 @@ window are excluded from `total_checks`, `successful_checks`, and
 A confirmed outage starts at the first failed probe in a consecutive failure
 streak once that streak reaches `failure_threshold`, and it ends at the first
 later successful probe. `downtime_seconds` is confirmed outage duration inside
-the window. `reportable_seconds` is the reportable window duration after
-subtracting maintenance. `uptime_percent` is
+the window, except that outage time inside a maintenance window is not
+counted. `reportable_seconds` is the window duration from the monitor's first
+reportable probe up to the time of the request. Maintenance time counts as
+available time and is not subtracted. `uptime_percent` is
 `(reportable_seconds - downtime_seconds) / reportable_seconds * 100`, rounded
 to two decimal places. For a window with no reportable seconds,
 `uptime_percent` is `null`.
@@ -527,15 +529,13 @@ to two decimal places. For a window with no reportable seconds,
 calendar and uptime-tick consumers. The response contains every monitor in the
 current status feed and exactly 90 UTC calendar dates, ordered oldest to newest
 and including the current date. Each daily entry contains `date`,
-`reportable_seconds`, `downtime_seconds`, and `uptime_percent`. Unlike the
-aggregate windows, a daily entry does not subtract maintenance from
-`reportable_seconds`: it is the part of the date after the monitor's first
-reportable probe and up to `generated_at`. Maintenance time counts as
-available time, and outage time inside maintenance is not counted as
-`downtime_seconds`. Dates before a monitor's first reportable probe have zero
-reportable and downtime seconds and a null percentage. Confirmed outages that
-cross a UTC midnight are split by their actual overlap with each date; an open
-outage accrues through `generated_at`.
+`reportable_seconds`, `downtime_seconds`, and `uptime_percent`. A daily entry
+uses the same rule as the aggregate windows: `reportable_seconds` is the part of
+the date after the monitor's first reportable probe and up to `generated_at`,
+and maintenance time counts as available time. Dates before a monitor's first
+reportable probe have zero reportable and downtime seconds and a null
+percentage. Confirmed outages that cross a UTC midnight are split by their
+actual overlap with each date; an open outage accrues through `generated_at`.
 
 The history endpoint is intentionally derived from confirmed status intervals,
 not raw failed probes. It therefore uses the same failure-threshold,
