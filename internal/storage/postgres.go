@@ -914,11 +914,15 @@ func (s *PostgresStore) ListDailyUptimeStats(ctx context.Context, now time.Time,
 	if err != nil {
 		return nil, err
 	}
+	observerDown, err := s.listObserverDownIntervals(ctx, now.UTC())
+	if err != nil {
+		return nil, err
+	}
 	states, err := s.ListStates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return dailyUptimeStats(now, days, states, retained, outages, maintenance), nil
+	return dailyUptimeStats(now, days, states, retained, outages, maintenance, observerDown), nil
 }
 
 func (s *PostgresStore) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
@@ -1000,6 +1004,10 @@ func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time
 	if err != nil {
 		return err
 	}
+	observerDown, err := s.listObserverDownIntervals(ctx, now)
+	if err != nil {
+		return err
+	}
 	maintenanceByMonitor := map[string][]timeInterval{}
 	for _, window := range maintenance {
 		maintenanceByMonitor[window.MonitorID] = append(maintenanceByMonitor[window.MonitorID], timeInterval{Start: window.StartsAt, End: window.EndsAt})
@@ -1010,7 +1018,7 @@ func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time
 			continue
 		}
 		outages := outagesByMonitor[monitorID]
-		maintenanceWindows := maintenanceByMonitor[monitorID]
+		maintenanceWindows := excludedIntervals(maintenanceByMonitor[monitorID], observerDown)
 		monitorStats.TwentyFourHour = applyAvailabilityWindow(monitorStats.TwentyFourHour, firstProbe, now.Add(-24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.SevenDay = applyAvailabilityWindow(monitorStats.SevenDay, firstProbe, now.Add(-7*24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.ThirtyDay = applyAvailabilityWindow(monitorStats.ThirtyDay, firstProbe, now.Add(-30*24*time.Hour), now, outages, maintenanceWindows)
@@ -1018,6 +1026,31 @@ func (s *PostgresStore) addStrictAvailability(ctx context.Context, now time.Time
 		stats[monitorID] = monitorStats
 	}
 	return nil
+}
+
+func (s *PostgresStore) listObserverDownIntervals(ctx context.Context, now time.Time) ([]timeInterval, error) {
+	tenantID := TenantFromContext(ctx)
+	rows, err := s.pool.Query(ctx, `SELECT transition, observed_at
+		FROM incidents
+		WHERE tenant_id = $1 AND monitor_id = '__observer__' AND transition IN ($2, $3)
+		ORDER BY observed_at, id`, tenantID, state.ObserverDown, state.ObserverUp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var transitions []observerTransition
+	for rows.Next() {
+		var status string
+		var observedAt time.Time
+		if err := rows.Scan(&status, &observedAt); err != nil {
+			return nil, err
+		}
+		transitions = append(transitions, observerTransition{Status: status, At: observedAt.UTC()})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return observerDownIntervals(transitions, now), nil
 }
 
 func (s *PostgresStore) listDowntimeIntervals(ctx context.Context, now time.Time) (map[string][]timeInterval, error) {

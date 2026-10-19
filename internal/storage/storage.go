@@ -1336,11 +1336,15 @@ func (s *Store) ListDailyUptimeStats(ctx context.Context, now time.Time, days in
 	if err != nil {
 		return nil, err
 	}
+	observerDown, err := s.listObserverDownIntervals(ctx, now.UTC())
+	if err != nil {
+		return nil, err
+	}
 	states, err := s.ListStates(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return dailyUptimeStats(now, days, states, retained, outages, maintenance), nil
+	return dailyUptimeStats(now, days, states, retained, outages, maintenance, observerDown), nil
 }
 
 func (s *Store) listUptimeWindowStats(ctx context.Context, cutoff time.Time) (map[string]UptimeWindowStats, error) {
@@ -1436,7 +1440,53 @@ type timeInterval struct {
 	End   time.Time
 }
 
-func dailyUptimeStats(now time.Time, days int, states []MonitorState, retained map[string]UptimeWindowStats, outagesByMonitor map[string][]timeInterval, maintenance []MaintenanceWindow) map[string][]DailyUptimeStats {
+type observerTransition struct {
+	Status string
+	At     time.Time
+}
+
+// observerDownIntervals pairs each OBSERVER_DOWN transition with the next
+// OBSERVER_UP. The transitions must be ordered oldest first. An observer that
+// is still down stays down through now.
+func observerDownIntervals(transitions []observerTransition, now time.Time) []timeInterval {
+	var intervals []timeInterval
+	var downSince time.Time
+	for _, transition := range transitions {
+		switch {
+		case transition.Status == state.ObserverDown && downSince.IsZero():
+			downSince = transition.At.UTC()
+		case transition.Status == state.ObserverUp && !downSince.IsZero():
+			intervals = append(intervals, timeInterval{Start: downSince, End: transition.At.UTC()})
+			downSince = time.Time{}
+		}
+	}
+	if !downSince.IsZero() {
+		intervals = append(intervals, timeInterval{Start: downSince, End: now.UTC()})
+	}
+	return intervals
+}
+
+// excludedIntervals returns the union of the given intervals, ordered by start,
+// so overlapping maintenance and observer-down time is subtracted only once.
+func excludedIntervals(groups ...[]timeInterval) []timeInterval {
+	var all []timeInterval
+	for _, group := range groups {
+		all = append(all, group...)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].Start.Before(all[j].Start) })
+	var merged []timeInterval
+	for _, interval := range all {
+		last := len(merged) - 1
+		if last >= 0 && !interval.Start.After(merged[last].End) {
+			merged[last].End = maxTime(merged[last].End, interval.End)
+			continue
+		}
+		merged = append(merged, interval)
+	}
+	return merged
+}
+
+func dailyUptimeStats(now time.Time, days int, states []MonitorState, retained map[string]UptimeWindowStats, outagesByMonitor map[string][]timeInterval, maintenance []MaintenanceWindow, observerDown []timeInterval) map[string][]DailyUptimeStats {
 	result := make(map[string][]DailyUptimeStats, len(states))
 	if days <= 0 {
 		return result
@@ -1458,9 +1508,10 @@ func dailyUptimeStats(now time.Time, days int, states []MonitorState, retained m
 			coverageEnd := minTime(dayEnd, now)
 			entry := DailyUptimeStats{Date: dayStart}
 			if !firstProbe.IsZero() && coverageEnd.After(coverageStart) {
-				maintenanceIntervals := maintenanceByMonitor[state.MonitorID]
-				// Daily entries count maintenance as available time, so a day that
-				// is mostly maintenance is not reduced to its few remaining minutes.
+				// Maintenance and observer-down time are not counted as downtime. Both
+				// count as available time, so a day that is mostly maintenance is not
+				// reduced to its few remaining minutes.
+				maintenanceIntervals := excludedIntervals(maintenanceByMonitor[state.MonitorID], observerDown)
 				reportable := coverageEnd.Sub(coverageStart)
 				var downtime time.Duration
 				for _, outage := range outagesByMonitor[state.MonitorID] {
@@ -1495,6 +1546,10 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, stats 
 	if err != nil {
 		return err
 	}
+	observerDown, err := s.listObserverDownIntervals(ctx, now)
+	if err != nil {
+		return err
+	}
 
 	maintenanceByMonitor := map[string][]timeInterval{}
 	for _, window := range maintenance {
@@ -1510,7 +1565,7 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, stats 
 			continue
 		}
 		outages := outagesByMonitor[monitorID]
-		maintenanceWindows := maintenanceByMonitor[monitorID]
+		maintenanceWindows := excludedIntervals(maintenanceByMonitor[monitorID], observerDown)
 		monitorStats.TwentyFourHour = applyAvailabilityWindow(monitorStats.TwentyFourHour, firstProbe, now.Add(-24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.SevenDay = applyAvailabilityWindow(monitorStats.SevenDay, firstProbe, now.Add(-7*24*time.Hour), now, outages, maintenanceWindows)
 		monitorStats.ThirtyDay = applyAvailabilityWindow(monitorStats.ThirtyDay, firstProbe, now.Add(-30*24*time.Hour), now, outages, maintenanceWindows)
@@ -1518,6 +1573,31 @@ func (s *Store) addStrictAvailability(ctx context.Context, now time.Time, stats 
 		stats[monitorID] = monitorStats
 	}
 	return nil
+}
+
+func (s *Store) listObserverDownIntervals(ctx context.Context, now time.Time) ([]timeInterval, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT transition, observed_at
+		FROM incidents
+		WHERE monitor_id = '__observer__' AND transition IN (?, ?)
+		ORDER BY observed_at, id`, state.ObserverDown, state.ObserverUp)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var transitions []observerTransition
+	for rows.Next() {
+		var status string
+		var observedAt string
+		if err := rows.Scan(&status, &observedAt); err != nil {
+			return nil, err
+		}
+		transitions = append(transitions, observerTransition{Status: status, At: parseTime(observedAt)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return observerDownIntervals(transitions, now), nil
 }
 
 func (s *Store) listDowntimeIntervals(ctx context.Context, now time.Time) (map[string][]timeInterval, error) {

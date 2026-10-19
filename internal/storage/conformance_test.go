@@ -703,6 +703,82 @@ func TestStorageConformanceDailyUptimeSplitsConfirmedOutageAcrossUTCDays(t *test
 	}
 }
 
+func TestStorageConformanceUptimeExcludesObserverDownTime(t *testing.T) {
+	for _, backend := range conformanceBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.open(t)
+			defer store.Close()
+
+			ctx := context.Background()
+			now := time.Date(2026, 7, 15, 12, 0, 0, 0, time.UTC)
+			at := func(hour int, minute int) time.Time {
+				return time.Date(2026, 7, 15, hour, minute, 0, 0, time.UTC)
+			}
+			saveMonitor := func(when time.Time, status string, ok bool) {
+				t.Helper()
+				_, err := store.SaveProbeAndState(ctx, ProbeResult{
+					MonitorID: "home",
+					CheckedAt: when,
+					OK:        ok,
+				}, MonitorState{
+					MonitorID:     "home",
+					Name:          "Home",
+					URL:           "https://example.com/",
+					Status:        status,
+					LastCheckedAt: when,
+					UpdatedAt:     when,
+				}, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			saveObserver := func(when time.Time, status string) {
+				t.Helper()
+				_, err := store.SaveObserverCheck(ctx, ObserverState{
+					Status:        status,
+					LastCheckedAt: when,
+					UpdatedAt:     when,
+				}, nil, &Incident{
+					MonitorID:  "__observer__",
+					Name:       "Observer Connectivity",
+					Transition: status,
+					ObservedAt: when,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			// The monitor goes down at 01:00. The observer reports no
+			// connectivity from 01:05 to 04:00, and the monitor recovers at 04:01.
+			saveMonitor(at(0, 0), state.Up, true)
+			saveMonitor(at(1, 0), state.Failing, false)
+			saveMonitor(at(1, 1), state.Down, false)
+			saveObserver(at(1, 5), state.ObserverDown)
+			saveObserver(at(4, 0), state.ObserverUp)
+			saveMonitor(at(4, 1), state.Up, true)
+
+			wantDowntime := int64((6 * time.Minute) / time.Second)
+			daily, err := store.ListDailyUptimeStats(ctx, now, 1, SingleFailureThreshold(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(daily["home"]) != 1 {
+				t.Fatalf("daily entries = %d, want 1", len(daily["home"]))
+			}
+			assertDailyUptime(t, daily["home"][0], "2026-07-15", 12*60*60, wantDowntime)
+
+			stats, err := store.ListUptimeStats(ctx, now, SingleFailureThreshold(2))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := stats["home"].TwentyFourHour.DowntimeSeconds; got != wantDowntime {
+				t.Fatalf("24h downtime_seconds = %d, want %d", got, wantDowntime)
+			}
+		})
+	}
+}
+
 func TestStorageConformanceFailedProbesAndSentinelEvents(t *testing.T) {
 	for _, backend := range conformanceBackends() {
 		t.Run(backend.name, func(t *testing.T) {

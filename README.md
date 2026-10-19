@@ -517,8 +517,10 @@ window are excluded from `total_checks`, `successful_checks`, and
 A confirmed outage starts at the first failed probe in a consecutive failure
 streak once that streak reaches `failure_threshold`, and it ends at the first
 later successful probe. `downtime_seconds` is confirmed outage duration inside
-the window, except that outage time inside a maintenance window is not
-counted. `reportable_seconds` is the window duration from the monitor's first
+the window, except that outage time inside a maintenance window or while the
+observer is `OBSERVER_DOWN` is not counted. While the observer is down, UPAG
+cannot tell whether a monitor is up, so that time counts as available time.
+`reportable_seconds` is the window duration from the monitor's first
 reportable probe up to the time of the request. Maintenance time counts as
 available time and is not subtracted. `uptime_percent` is
 `(reportable_seconds - downtime_seconds) / reportable_seconds * 100`, rounded

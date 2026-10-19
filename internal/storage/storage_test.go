@@ -561,7 +561,7 @@ func TestDailyUptimeStatsSplitsConfirmedOutagesAtUTCDayBoundaries(t *testing.T) 
 		},
 	}
 
-	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance)
+	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance, nil)
 	home := stats["home"]
 	if len(home) != 3 {
 		t.Fatalf("home daily entries = %d, want 3", len(home))
@@ -595,7 +595,7 @@ func TestDailyUptimeStatsCountsMaintenanceAsAvailableTime(t *testing.T) {
 	}
 	maintenance := []MaintenanceWindow{{MonitorID: "api", StartsAt: maintenanceStart, EndsAt: maintenanceEnd}}
 
-	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance)["api"]
+	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance, nil)["api"]
 	if len(stats) != 3 {
 		t.Fatalf("daily entries = %d, want 3", len(stats))
 	}
@@ -1716,4 +1716,65 @@ func storeWithIncident(t *testing.T) (*Store, int64, time.Time) {
 		t.Fatal(err)
 	}
 	return store, incidentID, now
+}
+
+func TestObserverDownIntervalsPairsTransitions(t *testing.T) {
+	now := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	at := func(hour int) time.Time { return time.Date(2026, 10, 19, hour, 0, 0, 0, time.UTC) }
+	got := observerDownIntervals([]observerTransition{
+		{Status: state.ObserverUp, At: at(0)},
+		{Status: state.ObserverDown, At: at(1)},
+		{Status: state.ObserverDown, At: at(2)},
+		{Status: state.ObserverUp, At: at(3)},
+		{Status: state.ObserverDown, At: at(4)},
+	}, now)
+	want := []timeInterval{{Start: at(1), End: at(3)}, {Start: at(4), End: now}}
+	if len(got) != len(want) {
+		t.Fatalf("intervals = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if !got[i].Start.Equal(want[i].Start) || !got[i].End.Equal(want[i].End) {
+			t.Fatalf("interval %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestExcludedIntervalsMergesOverlaps(t *testing.T) {
+	at := func(hour int) time.Time { return time.Date(2026, 10, 19, hour, 0, 0, 0, time.UTC) }
+	got := excludedIntervals(
+		[]timeInterval{{Start: at(3), End: at(5)}, {Start: at(10), End: at(11)}},
+		[]timeInterval{{Start: at(1), End: at(4)}},
+	)
+	want := []timeInterval{{Start: at(1), End: at(5)}, {Start: at(10), End: at(11)}}
+	if len(got) != len(want) {
+		t.Fatalf("intervals = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if !got[i].Start.Equal(want[i].Start) || !got[i].End.Equal(want[i].End) {
+			t.Fatalf("interval %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestDailyUptimeStatsDoesNotCountObserverDownTimeAsDowntime(t *testing.T) {
+	now := time.Date(2026, 10, 19, 6, 0, 0, 0, time.UTC)
+	states := []MonitorState{{MonitorID: "api"}}
+	retained := map[string]UptimeWindowStats{
+		"api": {WindowStartedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	// The outage starts at 01:31:40, before the observer notices that the
+	// host has no connectivity at 01:37:24. The monitor stays down until 05:09:53.
+	outageStart := time.Date(2026, 10, 19, 1, 31, 40, 0, time.UTC)
+	outages := map[string][]timeInterval{
+		"api": {{Start: outageStart, End: time.Date(2026, 10, 19, 5, 9, 53, 0, time.UTC)}},
+	}
+	observerDown := []timeInterval{
+		{Start: time.Date(2026, 10, 19, 1, 37, 24, 0, time.UTC), End: time.Date(2026, 10, 19, 5, 10, 22, 0, time.UTC)},
+	}
+
+	stats := dailyUptimeStats(now, 1, states, retained, outages, nil, observerDown)["api"]
+	if len(stats) != 1 {
+		t.Fatalf("daily entries = %d, want 1", len(stats))
+	}
+	assertDailyUptime(t, stats[0], "2026-10-19", 6*60*60, 5*60+44)
 }
