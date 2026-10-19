@@ -1459,10 +1459,9 @@ func dailyUptimeStats(now time.Time, days int, states []MonitorState, retained m
 			entry := DailyUptimeStats{Date: dayStart}
 			if !firstProbe.IsZero() && coverageEnd.After(coverageStart) {
 				maintenanceIntervals := maintenanceByMonitor[state.MonitorID]
-				reportable := coverageEnd.Sub(coverageStart) - overlapDuration(coverageStart, coverageEnd, maintenanceIntervals)
-				if reportable < 0 {
-					reportable = 0
-				}
+				// Daily entries count maintenance as available time, so a day that
+				// is mostly maintenance is not reduced to its few remaining minutes.
+				reportable := coverageEnd.Sub(coverageStart)
 				var downtime time.Duration
 				for _, outage := range outagesByMonitor[state.MonitorID] {
 					overlapStart, overlapEnd, ok := clippedInterval(coverageStart, coverageEnd, outage)

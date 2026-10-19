@@ -567,7 +567,7 @@ func TestDailyUptimeStatsSplitsConfirmedOutagesAtUTCDayBoundaries(t *testing.T) 
 		t.Fatalf("home daily entries = %d, want 3", len(home))
 	}
 	assertDailyUptime(t, home[0], "2026-07-14", 18*60*60, 60*60)
-	assertDailyUptime(t, home[1], "2026-07-15", (24*60*60)-(15*60), 45*60)
+	assertDailyUptime(t, home[1], "2026-07-15", 24*60*60, 45*60)
 	assertDailyUptime(t, home[2], "2026-07-16", 12*60*60, 12*60*60)
 
 	newMonitor := stats["new"]
@@ -579,6 +579,29 @@ func TestDailyUptimeStatsSplitsConfirmedOutagesAtUTCDayBoundaries(t *testing.T) 
 			t.Fatalf("new monitor entry = %+v, want no reportable data", entry)
 		}
 	}
+}
+
+func TestDailyUptimeStatsCountsMaintenanceAsAvailableTime(t *testing.T) {
+	now := time.Date(2026, 10, 19, 1, 0, 0, 0, time.UTC)
+	states := []MonitorState{{MonitorID: "api"}}
+	retained := map[string]UptimeWindowStats{
+		"api": {WindowStartedAt: time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)},
+	}
+	maintenanceStart := time.Date(2026, 10, 17, 23, 8, 48, 0, time.UTC)
+	maintenanceEnd := time.Date(2026, 10, 18, 23, 8, 48, 0, time.UTC)
+	outages := map[string][]timeInterval{
+		// The outage starts inside maintenance and continues after it.
+		"api": {{Start: maintenanceStart.Add(30 * time.Minute), End: now}},
+	}
+	maintenance := []MaintenanceWindow{{MonitorID: "api", StartsAt: maintenanceStart, EndsAt: maintenanceEnd}}
+
+	stats := dailyUptimeStats(now, 3, states, retained, outages, maintenance)["api"]
+	if len(stats) != 3 {
+		t.Fatalf("daily entries = %d, want 3", len(stats))
+	}
+	assertDailyUptime(t, stats[0], "2026-10-17", 24*60*60, 0)
+	assertDailyUptime(t, stats[1], "2026-10-18", 24*60*60, 51*60+12)
+	assertDailyUptime(t, stats[2], "2026-10-19", 60*60, 60*60)
 }
 
 func assertDailyUptime(t *testing.T, got DailyUptimeStats, date string, reportableSeconds int64, downtimeSeconds int64) {
