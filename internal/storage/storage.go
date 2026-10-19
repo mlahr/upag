@@ -19,6 +19,7 @@ type Backend interface {
 	Close() error
 	GetState(context.Context, string) (MonitorState, bool, error)
 	SaveProbeAndState(context.Context, ProbeResult, MonitorState, *Incident) (int64, error)
+	SaveProbeAndStateWithPendingAlert(context.Context, ProbeResult, MonitorState, *Incident, time.Time) (int64, bool, error)
 	SaveProbeResult(context.Context, ProbeResult) error
 	GetObserverState(context.Context) (ObserverState, bool, error)
 	ListObserverSentinelResults(context.Context) ([]ObserverSentinelResult, error)
@@ -33,6 +34,13 @@ type Backend interface {
 	ListUptimeStreakStarts(context.Context) (map[string]UptimeStreakStarts, error)
 	ListFailedProbeResults(context.Context, ProbeResultFilter) ([]ProbeResult, error)
 	ListObserverSentinelEvents(context.Context, ObserverSentinelEventFilter) ([]ObserverSentinelResult, error)
+	SaveConnectivitySamples(context.Context, []ConnectivitySample) error
+	ListConnectivitySamples(context.Context, ConnectivitySampleFilter) ([]ConnectivitySample, error)
+	PruneConnectivitySamples(context.Context, time.Time) error
+	ListDuePendingMonitorAlerts(context.Context, time.Time, int) ([]PendingMonitorAlert, error)
+	ClaimPendingMonitorAlert(context.Context, int64) (bool, error)
+	RecordPendingMonitorAlertDelivery(context.Context, int64, []AlertNotification, time.Time) error
+	CompletePendingMonitorAlert(context.Context, int64, time.Time) error
 	ListAlertNotifications(context.Context, int) ([]AlertNotification, error)
 	ListActionableAlertDeliveryFailures(context.Context, int) ([]AlertNotification, error)
 	ListDueAlertNotificationRetries(context.Context, time.Time, int) ([]AlertNotificationRetry, error)
@@ -106,16 +114,19 @@ type UptimeStreakStarts struct {
 }
 
 type ProbeResult struct {
-	MonitorID           string
-	CheckedAt           time.Time
-	OK                  bool
-	ObservedStatusCode  int
-	LatencyMS           int64
-	ResponseTimeMS      int64
-	AttemptCount        int
-	Error               string
-	MaintenanceWindowID int64
-	ObserverSuppressed  bool
+	MonitorID              string
+	CheckedAt              time.Time
+	OK                     bool
+	ObservedStatusCode     int
+	LatencyMS              int64
+	ResponseTimeMS         int64
+	AttemptCount           int
+	Error                  string
+	MaintenanceWindowID    int64
+	ObserverSuppressed     bool
+	ConnectivitySuppressed bool
+	FailureKind            string
+	SuppressionReason      string
 }
 
 type ObserverState struct {
@@ -137,8 +148,41 @@ type ObserverSentinelResult struct {
 	OK                 bool
 	ObservedStatusCode int
 	LatencyMS          int64
+	ResponseTimeMS     int64
 	Error              string
 	CheckedAt          time.Time
+}
+
+type ConnectivitySample struct {
+	ID                 int64
+	Kind               string
+	Source             string
+	TargetID           string
+	TargetName         string
+	URL                string
+	MonitorID          string
+	OK                 bool
+	Slow               bool
+	ExpectedStatusCode int
+	ObservedStatusCode int
+	LatencyMS          int64
+	ResponseTimeMS     int64
+	BytesRead          int64
+	Error              string
+	CheckedAt          time.Time
+}
+
+type ConnectivitySampleFilter struct {
+	Limit int
+	Since time.Time
+	Kind  string
+}
+
+type PendingMonitorAlert struct {
+	ID           int64
+	Incident     Incident
+	CurrentState MonitorState
+	DueAt        time.Time
 }
 
 type UptimeStats struct {
@@ -358,6 +402,7 @@ func migrations() []migration {
 		{ID: "0009_observer_sentinel_events", Fn: migrateObserverSentinelEvents},
 		{ID: "0010_monitor_status_intervals", Fn: migrateMonitorStatusIntervals},
 		{ID: "0011_maintenance_status_intervals", Fn: migrateMaintenanceStatusIntervals},
+		{ID: "0012_connectivity_samples_and_delayed_alerts", Fn: migrateConnectivitySamplesAndDelayedAlerts},
 	}
 }
 
@@ -617,6 +662,60 @@ func migrateMaintenanceStatusIntervals(ctx context.Context, tx *sql.Tx) error {
 	return err
 }
 
+func migrateConnectivitySamplesAndDelayedAlerts(ctx context.Context, tx *sql.Tx) error {
+	for _, column := range []struct{ name, statement string }{
+		{"connectivity_suppressed", `ALTER TABLE probe_results ADD COLUMN connectivity_suppressed INTEGER NOT NULL DEFAULT 0`},
+		{"failure_kind", `ALTER TABLE probe_results ADD COLUMN failure_kind TEXT NOT NULL DEFAULT ''`},
+		{"suppression_reason", `ALTER TABLE probe_results ADD COLUMN suppression_reason TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := addColumnIfMissing(ctx, tx, "probe_results", column.name, column.statement); err != nil {
+			return err
+		}
+	}
+	return execMigrationStatements(ctx, tx, []string{
+		`CREATE TABLE IF NOT EXISTS connectivity_samples (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind TEXT NOT NULL,
+			source TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			target_name TEXT NOT NULL,
+			url TEXT NOT NULL,
+			monitor_id TEXT NOT NULL,
+			ok INTEGER NOT NULL,
+			slow INTEGER NOT NULL,
+			expected_status_code INTEGER NOT NULL,
+			observed_status_code INTEGER NOT NULL,
+			latency_ms INTEGER NOT NULL,
+			response_time_ms INTEGER NOT NULL,
+			bytes_read INTEGER NOT NULL,
+			error TEXT NOT NULL,
+			checked_at TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_connectivity_samples_kind_checked
+			ON connectivity_samples (kind, checked_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_connectivity_samples_checked
+			ON connectivity_samples (checked_at DESC)`,
+		`CREATE TABLE IF NOT EXISTS monitor_alert_states (
+			monitor_id TEXT PRIMARY KEY,
+			last_notified_status TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS pending_monitor_alerts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			incident_id INTEGER NOT NULL,
+			monitor_id TEXT NOT NULL,
+			transition TEXT NOT NULL,
+			due_at TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			created_at TEXT NOT NULL,
+			delivered_at TEXT,
+			FOREIGN KEY (incident_id) REFERENCES incidents(id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_monitor_alerts_due
+			ON pending_monitor_alerts (status, due_at, id)`,
+	})
+}
+
 func execMigrationStatements(ctx context.Context, tx *sql.Tx, statements []string) error {
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -688,20 +787,42 @@ func (s *Store) GetState(ctx context.Context, monitorID string) (MonitorState, b
 }
 
 func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident) (int64, error) {
+	return s.saveProbeAndState(ctx, result, next, incident, nil)
+}
+
+func (s *Store) SaveProbeAndStateWithPendingAlert(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident, dueAt time.Time) (int64, bool, error) {
+	incidentID, err := s.saveProbeAndState(ctx, result, next, incident, &dueAt)
+	if err != nil || incident == nil {
+		return incidentID, false, err
+	}
+	var queued int
+	err = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_monitor_alerts WHERE incident_id = ? AND status != 'cancelled'`, incidentID).Scan(&queued)
+	return incidentID, queued > 0, err
+}
+
+func (s *Store) saveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident, pendingDueAt *time.Time) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	previousStatus := ""
+	previousStatusBeforeMaintenance := ""
+	if err := tx.QueryRowContext(ctx, `SELECT status, status_before_maintenance FROM monitor_states WHERE monitor_id = ?`, next.MonitorID).Scan(&previousStatus, &previousStatusBeforeMaintenance); err != nil && err != sql.ErrNoRows {
+		return 0, fmt.Errorf("read previous monitor status: %w", err)
+	}
+	if previousStatus == state.Maintenance && previousStatusBeforeMaintenance != "" {
+		previousStatus = previousStatusBeforeMaintenance
+	}
 
 	attemptCount := result.AttemptCount
 	if attemptCount == 0 {
 		attemptCount = 1
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed)); err != nil {
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed), boolInt(result.ConnectivitySuppressed), result.FailureKind, result.SuppressionReason); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
@@ -733,6 +854,10 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 			return 0, fmt.Errorf("save monitor status interval: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_monitor_alerts SET status = 'cancelled'
+		WHERE monitor_id = ? AND status = 'pending' AND transition <> ?`, next.MonitorID, next.Status); err != nil {
+		return 0, fmt.Errorf("cancel stale monitor alerts: %w", err)
+	}
 
 	var incidentID int64
 	if incident != nil {
@@ -748,6 +873,30 @@ func (s *Store) SaveProbeAndState(ctx context.Context, result ProbeResult, next 
 			return 0, fmt.Errorf("get incident id: %w", err)
 		}
 		incident.ID = incidentID
+		if pendingDueAt != nil {
+			if previousStatus == "" {
+				previousStatus = state.Unknown
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_alert_states (monitor_id, last_notified_status, updated_at)
+				VALUES (?, ?, ?) ON CONFLICT(monitor_id) DO NOTHING`, next.MonitorID, previousStatus, formatTime(next.UpdatedAt)); err != nil {
+				return 0, fmt.Errorf("initialize monitor alert state: %w", err)
+			}
+			var lastNotifiedStatus string
+			if err := tx.QueryRowContext(ctx, `SELECT last_notified_status FROM monitor_alert_states WHERE monitor_id = ?`, next.MonitorID).Scan(&lastNotifiedStatus); err != nil {
+				return 0, fmt.Errorf("read monitor alert state: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE pending_monitor_alerts SET status = 'cancelled'
+				WHERE monitor_id = ? AND status = 'pending'`, next.MonitorID); err != nil {
+				return 0, fmt.Errorf("cancel stale monitor alerts: %w", err)
+			}
+			if next.Status != lastNotifiedStatus {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO pending_monitor_alerts
+					(incident_id, monitor_id, transition, due_at, status, created_at)
+					VALUES (?, ?, ?, ?, 'pending', ?)`, incidentID, next.MonitorID, next.Status, formatTime(*pendingDueAt), formatTime(next.UpdatedAt)); err != nil {
+					return 0, fmt.Errorf("queue monitor alert: %w", err)
+				}
+			}
+		}
 	}
 
 	return incidentID, tx.Commit()
@@ -796,9 +945,9 @@ func (s *Store) SaveProbeResult(ctx context.Context, result ProbeResult) error {
 		attemptCount = 1
 	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO probe_results
-		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed))
+		(monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		result.MonitorID, formatTime(result.CheckedAt), boolInt(result.OK), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), boolInt(result.ObserverSuppressed), boolInt(result.ConnectivitySuppressed), result.FailureKind, result.SuppressionReason)
 	if err != nil {
 		return fmt.Errorf("insert probe result: %w", err)
 	}
@@ -1246,12 +1395,12 @@ func uptimeWindowQuery(cutoff time.Time) (string, []any) {
 			MAX(last_reportable_at)
 		FROM (
 			SELECT monitor_id,
-				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0) AS total_checks,
-				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0) AS successful_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN 1 ELSE 0 END), 0) AS total_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN ok ELSE 0 END), 0) AS successful_checks,
 				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0) AS maintenance_checks,
 				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0) AS maintenance_failed_checks,
-				MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END) AS first_reportable_at,
-				MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END) AS last_reportable_at
+				MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN checked_at ELSE NULL END) AS first_reportable_at,
+				MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN checked_at ELSE NULL END) AS last_reportable_at
 			FROM probe_results` + rawWhere + `
 			GROUP BY monitor_id
 			UNION ALL
@@ -1444,6 +1593,7 @@ func listReportableUptimeRunsTx(ctx context.Context, tx *sql.Tx) ([]uptimeRun, e
 		FROM probe_results
 		WHERE maintenance_window_id IS NULL
 			AND observer_suppressed = 0
+			AND connectivity_suppressed = 0
 		ORDER BY monitor_id ASC, started_at ASC`)
 	if err != nil {
 		return nil, err
@@ -1607,6 +1757,7 @@ func (s *Store) ListIncidents(ctx context.Context, filter IncidentFilter) ([]Inc
 			WHERE probe_results.ok = 0
 				AND probe_results.maintenance_window_id IS NULL
 				AND probe_results.observer_suppressed = 0
+				AND probe_results.connectivity_suppressed = 0
 				AND NOT EXISTS (
 					SELECT 1 FROM incidents
 					WHERE incidents.monitor_id = probe_results.monitor_id
@@ -1674,7 +1825,7 @@ func (s *Store) ListFailedProbeResults(ctx context.Context, filter ProbeResultFi
 	}
 	query := `SELECT
 		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
-		attempt_count, error, maintenance_window_id, observer_suppressed
+		attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason
 		FROM probe_results WHERE ok = 0`
 	args := []any{}
 	if !filter.Since.IsZero() {
@@ -1729,6 +1880,203 @@ func (s *Store) ListObserverSentinelEvents(ctx context.Context, filter ObserverS
 		results = append(results, result)
 	}
 	return results, rows.Err()
+}
+
+func (s *Store) SaveConnectivitySamples(ctx context.Context, samples []ConnectivitySample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, sample := range samples {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO connectivity_samples
+			(kind, source, target_id, target_name, url, monitor_id, ok, slow, expected_status_code,
+			 observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			sample.Kind, sample.Source, sample.TargetID, sample.TargetName, sample.URL, sample.MonitorID,
+			boolInt(sample.OK), boolInt(sample.Slow), sample.ExpectedStatusCode, sample.ObservedStatusCode,
+			sample.LatencyMS, sample.ResponseTimeMS, sample.BytesRead, sample.Error, formatTime(sample.CheckedAt)); err != nil {
+			return fmt.Errorf("save connectivity sample: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ListConnectivitySamples(ctx context.Context, filter ConnectivitySampleFilter) ([]ConnectivitySample, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	query := `SELECT id, kind, source, target_id, target_name, url, monitor_id, ok, slow,
+		expected_status_code, observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at
+		FROM connectivity_samples WHERE 1 = 1`
+	args := []any{}
+	if filter.Kind != "" {
+		query += ` AND kind = ?`
+		args = append(args, filter.Kind)
+	}
+	if !filter.Since.IsZero() {
+		query += ` AND checked_at >= ?`
+		args = append(args, formatTime(filter.Since))
+	}
+	query += ` ORDER BY checked_at DESC, id DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var samples []ConnectivitySample
+	for rows.Next() {
+		var sample ConnectivitySample
+		var ok, slow int
+		var checkedAt string
+		if err := rows.Scan(&sample.ID, &sample.Kind, &sample.Source, &sample.TargetID, &sample.TargetName,
+			&sample.URL, &sample.MonitorID, &ok, &slow, &sample.ExpectedStatusCode, &sample.ObservedStatusCode,
+			&sample.LatencyMS, &sample.ResponseTimeMS, &sample.BytesRead, &sample.Error, &checkedAt); err != nil {
+			return nil, err
+		}
+		sample.OK = intBool(ok)
+		sample.Slow = intBool(slow)
+		sample.CheckedAt = parseTime(checkedAt)
+		samples = append(samples, sample)
+	}
+	return samples, rows.Err()
+}
+
+func (s *Store) PruneConnectivitySamples(ctx context.Context, cutoff time.Time) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM connectivity_samples WHERE checked_at < ?`, formatTime(cutoff))
+	return err
+}
+
+func (s *Store) ListDuePendingMonitorAlerts(ctx context.Context, now time.Time, limit int) ([]PendingMonitorAlert, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT
+		p.id, i.id, i.monitor_id, i.name, i.transition, i.observed_at, i.error, i.status_code,
+		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.status_before_maintenance,
+		s.consecutive_failures, s.last_checked_at, s.last_success_at, s.last_failure_at, s.last_error,
+		s.last_observed_status_code, s.updated_at, p.due_at
+		FROM pending_monitor_alerts p
+		JOIN incidents i ON i.id = p.incident_id
+		JOIN monitor_states s ON s.monitor_id = p.monitor_id
+		WHERE p.status = 'pending' AND p.due_at <= ? AND s.status = p.transition
+		ORDER BY p.due_at ASC, p.id ASC LIMIT ?`, formatTime(now), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingMonitorAlert
+	for rows.Next() {
+		var item PendingMonitorAlert
+		var observedAt, dueAt string
+		var lastChecked, lastSuccess, lastFailure, updated string
+		if err := rows.Scan(&item.ID, &item.Incident.ID, &item.Incident.MonitorID, &item.Incident.Name,
+			&item.Incident.Transition, &observedAt, &item.Incident.Error, &item.Incident.StatusCode,
+			&item.CurrentState.MonitorID, &item.CurrentState.Name, &item.CurrentState.URL,
+			&item.CurrentState.ExpectedStatusCode, &item.CurrentState.Status,
+			&item.CurrentState.StatusBeforeMaintenance, &item.CurrentState.ConsecutiveFailures,
+			&lastChecked, &lastSuccess, &lastFailure, &item.CurrentState.LastError,
+			&item.CurrentState.LastObservedStatusCode, &updated, &dueAt); err != nil {
+			return nil, err
+		}
+		item.Incident.ObservedAt = parseTime(observedAt)
+		item.CurrentState.LastCheckedAt = parseTime(lastChecked)
+		item.CurrentState.LastSuccessAt = parseTime(lastSuccess)
+		item.CurrentState.LastFailureAt = parseTime(lastFailure)
+		item.CurrentState.UpdatedAt = parseTime(updated)
+		item.DueAt = parseTime(dueAt)
+		pending = append(pending, item)
+	}
+	return pending, rows.Err()
+}
+
+func (s *Store) ClaimPendingMonitorAlert(ctx context.Context, id int64) (bool, error) {
+	result, err := s.db.ExecContext(ctx, `UPDATE pending_monitor_alerts SET status = 'sending'
+		WHERE id = ? AND status = 'pending' AND EXISTS (
+			SELECT 1 FROM monitor_states s
+			WHERE s.monitor_id = pending_monitor_alerts.monitor_id AND s.status = pending_monitor_alerts.transition
+		)`, id)
+	if err != nil {
+		return false, err
+	}
+	changed, err := result.RowsAffected()
+	return changed == 1, err
+}
+
+func (s *Store) RecordPendingMonitorAlertDelivery(ctx context.Context, id int64, notifications []AlertNotification, deliveredAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var monitorID, transition, status string
+	if err := tx.QueryRowContext(ctx, `SELECT monitor_id, transition, status FROM pending_monitor_alerts WHERE id = ?`, id).Scan(&monitorID, &transition, &status); err != nil {
+		return err
+	}
+	if status == "delivered" {
+		return nil
+	}
+	if status != "sending" {
+		return fmt.Errorf("pending monitor alert %d is %q, expected sending", id, status)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE pending_monitor_alerts SET status = 'delivered', delivered_at = ?
+		WHERE id = ? AND status = 'sending'`, formatTime(deliveredAt), id)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("pending monitor alert %d was not claimed", id)
+	}
+	for _, notification := range notifications {
+		attemptNumber := notification.AttemptNumber
+		if attemptNumber == 0 {
+			attemptNumber = 1
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO alert_notifications
+			(incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, notification.IncidentID, notification.MonitorID,
+			notification.Provider, formatTime(notification.AttemptedAt), attemptNumber, boolInt(notification.Success),
+			notification.Error, formatTime(notification.NextRetryAt), boolInt(notification.RetryExhausted)); err != nil {
+			return fmt.Errorf("insert alert notification: %w", err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_alert_states (monitor_id, last_notified_status, updated_at)
+		VALUES (?, ?, ?) ON CONFLICT(monitor_id) DO UPDATE SET
+		last_notified_status = excluded.last_notified_status, updated_at = excluded.updated_at`, monitorID, transition, formatTime(deliveredAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) CompletePendingMonitorAlert(ctx context.Context, id int64, deliveredAt time.Time) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var monitorID, transition string
+	if err := tx.QueryRowContext(ctx, `SELECT monitor_id, transition FROM pending_monitor_alerts WHERE id = ?`, id).Scan(&monitorID, &transition); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE pending_monitor_alerts SET status = 'delivered', delivered_at = ? WHERE id = ?`, formatTime(deliveredAt), id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO monitor_alert_states (monitor_id, last_notified_status, updated_at)
+		VALUES (?, ?, ?) ON CONFLICT(monitor_id) DO UPDATE SET
+		last_notified_status = excluded.last_notified_status, updated_at = excluded.updated_at`, monitorID, transition, formatTime(deliveredAt)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ListAlertNotifications(ctx context.Context, limit int) ([]AlertNotification, error) {
@@ -2049,8 +2397,21 @@ func scanMaintenanceWindow(scanner rowScanner) (MaintenanceWindow, error) {
 
 func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
 	if len(monitorIDs) == 0 {
-		_, err := s.db.ExecContext(ctx, `DELETE FROM monitor_states`)
-		return err
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		for _, query := range []string{
+			`UPDATE pending_monitor_alerts SET status = 'cancelled' WHERE status = 'pending'`,
+			`DELETE FROM monitor_alert_states`,
+			`DELETE FROM monitor_states`,
+		} {
+			if _, err := tx.ExecContext(ctx, query); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
 	}
 
 	placeholders := make([]string, len(monitorIDs))
@@ -2059,11 +2420,21 @@ func (s *Store) DeleteStatesExcept(ctx context.Context, monitorIDs []string) err
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM monitor_states WHERE monitor_id NOT IN (`+strings.Join(placeholders, ",")+`)`,
-		args...,
-	)
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		`UPDATE pending_monitor_alerts SET status = 'cancelled' WHERE status = 'pending' AND monitor_id NOT IN (` + strings.Join(placeholders, ",") + `)`,
+		`DELETE FROM monitor_alert_states WHERE monitor_id NOT IN (` + strings.Join(placeholders, ",") + `)`,
+		`DELETE FROM monitor_states WHERE monitor_id NOT IN (` + strings.Join(placeholders, ",") + `)`,
+	} {
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) PruneProbeResults(ctx context.Context, retention time.Duration, now time.Time) error {
@@ -2127,6 +2498,7 @@ func compactRawOutcomeRuns(ctx context.Context, tx *sql.Tx, cutoff time.Time) er
 		WHERE checked_at < ?
 			AND maintenance_window_id IS NULL
 			AND observer_suppressed = 0
+			AND connectivity_suppressed = 0
 		ORDER BY monitor_id ASC, checked_at ASC, id ASC`, formatTime(cutoff))
 	if err != nil {
 		return err
@@ -2174,13 +2546,13 @@ func rollupRawProbeResults(ctx context.Context, tx *sql.Tx, target string, bucke
 		(monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
 			observer_suppressed_checks, first_reportable_at, last_reportable_at)
 		SELECT monitor_id, ` + bucketExpr + ` AS bucket_start,
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN ok ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN ok ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND ok = 0 THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN observer_suppressed = 1 THEN 1 ELSE 0 END), 0),
-			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END),
-			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 THEN checked_at ELSE NULL END)
+			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN checked_at ELSE NULL END),
+			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = 0 AND connectivity_suppressed = 0 THEN checked_at ELSE NULL END)
 		FROM probe_results
 		WHERE checked_at < ?
 		GROUP BY monitor_id, 2
@@ -2312,11 +2684,12 @@ func scanFailedProbeResult(scanner rowScanner) (ProbeResult, error) {
 	var checkedAt string
 	var ok int
 	var maintenanceWindowID sql.NullInt64
-	var observerSuppressed int
+	var observerSuppressed, connectivitySuppressed int
 	err := scanner.Scan(
 		&result.MonitorID, &checkedAt, &ok, &result.ObservedStatusCode,
 		&result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount,
-		&result.Error, &maintenanceWindowID, &observerSuppressed,
+		&result.Error, &maintenanceWindowID, &observerSuppressed, &connectivitySuppressed,
+		&result.FailureKind, &result.SuppressionReason,
 	)
 	if err != nil {
 		return ProbeResult{}, err
@@ -2327,6 +2700,7 @@ func scanFailedProbeResult(scanner rowScanner) (ProbeResult, error) {
 		result.MaintenanceWindowID = maintenanceWindowID.Int64
 	}
 	result.ObserverSuppressed = intBool(observerSuppressed)
+	result.ConnectivitySuppressed = intBool(connectivitySuppressed)
 	return result, nil
 }
 

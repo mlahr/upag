@@ -423,6 +423,58 @@ CREATE TABLE IF NOT EXISTS monitor_status_interval_backfills (
 			ID:  "0006_maintenance_status_intervals",
 			SQL: `DELETE FROM monitor_status_interval_backfills;`,
 		},
+		{
+			ID: "0007_connectivity_samples_and_delayed_alerts",
+			SQL: `
+ALTER TABLE probe_results ADD COLUMN IF NOT EXISTS connectivity_suppressed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE probe_results ADD COLUMN IF NOT EXISTS failure_kind TEXT NOT NULL DEFAULT '';
+ALTER TABLE probe_results ADD COLUMN IF NOT EXISTS suppression_reason TEXT NOT NULL DEFAULT '';
+CREATE TABLE IF NOT EXISTS connectivity_samples (
+	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	kind TEXT NOT NULL,
+	source TEXT NOT NULL,
+	target_id TEXT NOT NULL,
+	target_name TEXT NOT NULL,
+	url TEXT NOT NULL,
+	monitor_id TEXT NOT NULL,
+	ok BOOLEAN NOT NULL,
+	slow BOOLEAN NOT NULL,
+	expected_status_code INTEGER NOT NULL,
+	observed_status_code INTEGER NOT NULL,
+	latency_ms BIGINT NOT NULL,
+	response_time_ms BIGINT NOT NULL,
+	bytes_read BIGINT NOT NULL,
+	error TEXT NOT NULL,
+	checked_at TIMESTAMPTZ NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connectivity_samples_kind_checked
+	ON connectivity_samples (tenant_id, kind, checked_at DESC);
+CREATE INDEX IF NOT EXISTS idx_connectivity_samples_checked
+	ON connectivity_samples (tenant_id, checked_at DESC);
+CREATE TABLE IF NOT EXISTS monitor_alert_states (
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	monitor_id TEXT NOT NULL,
+	last_notified_status TEXT NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL,
+	PRIMARY KEY (tenant_id, monitor_id)
+);
+CREATE TABLE IF NOT EXISTS pending_monitor_alerts (
+	id BIGSERIAL PRIMARY KEY,
+	tenant_id TEXT NOT NULL DEFAULT 'default',
+	incident_id BIGINT NOT NULL,
+	monitor_id TEXT NOT NULL,
+	transition TEXT NOT NULL,
+	due_at TIMESTAMPTZ NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	created_at TIMESTAMPTZ NOT NULL,
+	delivered_at TIMESTAMPTZ,
+	FOREIGN KEY (incident_id) REFERENCES incidents(id)
+);
+CREATE INDEX IF NOT EXISTS idx_pending_monitor_alerts_due
+	ON pending_monitor_alerts (tenant_id, status, due_at, id);
+`,
+		},
 	}
 }
 
@@ -444,21 +496,44 @@ func (s *PostgresStore) GetState(ctx context.Context, monitorID string) (Monitor
 }
 
 func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident) (int64, error) {
+	return s.saveProbeAndState(ctx, result, next, incident, nil)
+}
+
+func (s *PostgresStore) SaveProbeAndStateWithPendingAlert(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident, dueAt time.Time) (int64, bool, error) {
+	incidentID, err := s.saveProbeAndState(ctx, result, next, incident, &dueAt)
+	if err != nil || incident == nil {
+		return incidentID, false, err
+	}
+	var queued bool
+	err = s.pool.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM pending_monitor_alerts
+		WHERE tenant_id = $1 AND incident_id = $2 AND status <> 'cancelled')`, TenantFromContext(ctx), incidentID).Scan(&queued)
+	return incidentID, queued, err
+}
+
+func (s *PostgresStore) saveProbeAndState(ctx context.Context, result ProbeResult, next MonitorState, incident *Incident, pendingDueAt *time.Time) (int64, error) {
 	tenantID := TenantFromContext(ctx)
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback(ctx)
+	previousStatus := ""
+	previousStatusBeforeMaintenance := ""
+	if err := tx.QueryRow(ctx, `SELECT status, status_before_maintenance FROM monitor_states WHERE tenant_id = $1 AND monitor_id = $2 FOR UPDATE`, tenantID, next.MonitorID).Scan(&previousStatus, &previousStatusBeforeMaintenance); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, fmt.Errorf("read previous monitor status: %w", err)
+	}
+	if previousStatus == state.Maintenance && previousStatusBeforeMaintenance != "" {
+		previousStatus = previousStatusBeforeMaintenance
+	}
 
 	attemptCount := result.AttemptCount
 	if attemptCount == 0 {
 		attemptCount = 1
 	}
 	if _, err := tx.Exec(ctx, `INSERT INTO probe_results
-		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tenantID, result.MonitorID, postgresNullableTime(result.CheckedAt), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed); err != nil {
+		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		tenantID, result.MonitorID, postgresNullableTime(result.CheckedAt), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed, result.ConnectivitySuppressed, result.FailureKind, result.SuppressionReason); err != nil {
 		return 0, fmt.Errorf("insert probe result: %w", err)
 	}
 
@@ -490,6 +565,10 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 			return 0, fmt.Errorf("save monitor status interval: %w", err)
 		}
 	}
+	if _, err := tx.Exec(ctx, `UPDATE pending_monitor_alerts SET status = 'cancelled'
+		WHERE tenant_id = $1 AND monitor_id = $2 AND status = 'pending' AND transition <> $3`, tenantID, next.MonitorID, next.Status); err != nil {
+		return 0, fmt.Errorf("cancel stale monitor alerts: %w", err)
+	}
 
 	var incidentID int64
 	if incident != nil {
@@ -501,6 +580,32 @@ func (s *PostgresStore) SaveProbeAndState(ctx context.Context, result ProbeResul
 			return 0, fmt.Errorf("insert incident: %w", err)
 		}
 		incident.ID = incidentID
+		if pendingDueAt != nil {
+			if previousStatus == "" {
+				previousStatus = state.Unknown
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO monitor_alert_states
+				(tenant_id, monitor_id, last_notified_status, updated_at) VALUES ($1, $2, $3, $4)
+				ON CONFLICT(tenant_id, monitor_id) DO NOTHING`, tenantID, next.MonitorID, previousStatus, next.UpdatedAt.UTC()); err != nil {
+				return 0, fmt.Errorf("initialize monitor alert state: %w", err)
+			}
+			var lastNotifiedStatus string
+			if err := tx.QueryRow(ctx, `SELECT last_notified_status FROM monitor_alert_states
+				WHERE tenant_id = $1 AND monitor_id = $2 FOR UPDATE`, tenantID, next.MonitorID).Scan(&lastNotifiedStatus); err != nil {
+				return 0, fmt.Errorf("read monitor alert state: %w", err)
+			}
+			if _, err := tx.Exec(ctx, `UPDATE pending_monitor_alerts SET status = 'cancelled'
+				WHERE tenant_id = $1 AND monitor_id = $2 AND status = 'pending'`, tenantID, next.MonitorID); err != nil {
+				return 0, fmt.Errorf("cancel stale monitor alerts: %w", err)
+			}
+			if next.Status != lastNotifiedStatus {
+				if _, err := tx.Exec(ctx, `INSERT INTO pending_monitor_alerts
+					(tenant_id, incident_id, monitor_id, transition, due_at, status, created_at)
+					VALUES ($1, $2, $3, $4, $5, 'pending', $6)`, tenantID, incidentID, next.MonitorID, next.Status, pendingDueAt.UTC(), next.UpdatedAt.UTC()); err != nil {
+					return 0, fmt.Errorf("queue monitor alert: %w", err)
+				}
+			}
+		}
 	}
 
 	return incidentID, tx.Commit(ctx)
@@ -546,9 +651,9 @@ func (s *PostgresStore) SaveProbeResult(ctx context.Context, result ProbeResult)
 		attemptCount = 1
 	}
 	_, err := s.pool.Exec(ctx, `INSERT INTO probe_results
-		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-		tenantID, result.MonitorID, result.CheckedAt.UTC(), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed)
+		(tenant_id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		tenantID, result.MonitorID, result.CheckedAt.UTC(), result.OK, result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, attemptCount, result.Error, nullableInt64(result.MaintenanceWindowID), result.ObserverSuppressed, result.ConnectivitySuppressed, result.FailureKind, result.SuppressionReason)
 	if err != nil {
 		return fmt.Errorf("insert probe result: %w", err)
 	}
@@ -837,12 +942,12 @@ func (s *PostgresStore) listUptimeWindowStats(ctx context.Context, cutoff time.T
 			MAX(last_reportable_at)
 		FROM (
 			SELECT monitor_id,
-				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN 1 ELSE 0 END), 0)::int AS total_checks,
-				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND ok THEN 1 ELSE 0 END), 0)::int AS successful_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN 1 ELSE 0 END), 0)::int AS total_checks,
+				COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE AND ok THEN 1 ELSE 0 END), 0)::int AS successful_checks,
 				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0)::int AS maintenance_checks,
 				COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND NOT ok THEN 1 ELSE 0 END), 0)::int AS maintenance_failed_checks,
-				MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END) AS first_reportable_at,
-				MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END) AS last_reportable_at
+				MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN checked_at ELSE NULL END) AS first_reportable_at,
+				MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN checked_at ELSE NULL END) AS last_reportable_at
 			FROM probe_results`+rawWhere+`
 			GROUP BY monitor_id
 			UNION ALL
@@ -996,6 +1101,7 @@ func postgresListReportableUptimeRunsTx(ctx context.Context, tx pgx.Tx, tenantID
 		WHERE tenant_id = $1
 			AND maintenance_window_id IS NULL
 			AND observer_suppressed = FALSE
+			AND connectivity_suppressed = FALSE
 		ORDER BY monitor_id ASC, started_at ASC`, tenantID)
 	if err != nil {
 		return nil, err
@@ -1093,6 +1199,7 @@ func (s *PostgresStore) ListIncidents(ctx context.Context, filter IncidentFilter
 				AND probe_results.ok = FALSE
 				AND probe_results.maintenance_window_id IS NULL
 				AND probe_results.observer_suppressed = FALSE
+				AND probe_results.connectivity_suppressed = FALSE
 				AND NOT EXISTS (
 					SELECT 1 FROM incidents
 					WHERE tenant_id = $1
@@ -1166,7 +1273,7 @@ func (s *PostgresStore) ListFailedProbeResults(ctx context.Context, filter Probe
 	tenantID := TenantFromContext(ctx)
 	query := `SELECT
 		monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms,
-		attempt_count, error, maintenance_window_id, observer_suppressed
+		attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason
 		FROM probe_results WHERE tenant_id = $1 AND ok = FALSE`
 	args := []any{tenantID}
 	if !filter.Since.IsZero() {
@@ -1222,6 +1329,205 @@ func (s *PostgresStore) ListObserverSentinelEvents(ctx context.Context, filter O
 		results = append(results, result)
 	}
 	return results, rows.Err()
+}
+
+func (s *PostgresStore) SaveConnectivitySamples(ctx context.Context, samples []ConnectivitySample) error {
+	if len(samples) == 0 {
+		return nil
+	}
+	tenantID := TenantFromContext(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, sample := range samples {
+		if _, err := tx.Exec(ctx, `INSERT INTO connectivity_samples
+			(tenant_id, kind, source, target_id, target_name, url, monitor_id, ok, slow,
+			expected_status_code, observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`,
+			tenantID, sample.Kind, sample.Source, sample.TargetID, sample.TargetName, sample.URL, sample.MonitorID,
+			sample.OK, sample.Slow, sample.ExpectedStatusCode, sample.ObservedStatusCode, sample.LatencyMS,
+			sample.ResponseTimeMS, sample.BytesRead, sample.Error, sample.CheckedAt.UTC()); err != nil {
+			return fmt.Errorf("save connectivity sample: %w", err)
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) ListConnectivitySamples(ctx context.Context, filter ConnectivitySampleFilter) ([]ConnectivitySample, error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 1000
+	}
+	tenantID := TenantFromContext(ctx)
+	query := `SELECT id, kind, source, target_id, target_name, url, monitor_id, ok, slow,
+		expected_status_code, observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at
+		FROM connectivity_samples WHERE tenant_id = $1`
+	args := []any{tenantID}
+	if filter.Kind != "" {
+		args = append(args, filter.Kind)
+		query += fmt.Sprintf(` AND kind = $%d`, len(args))
+	}
+	if !filter.Since.IsZero() {
+		args = append(args, filter.Since.UTC())
+		query += fmt.Sprintf(` AND checked_at >= $%d`, len(args))
+	}
+	args = append(args, limit)
+	query += fmt.Sprintf(` ORDER BY checked_at DESC, id DESC LIMIT $%d`, len(args))
+	rows, err := s.pool.Query(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var samples []ConnectivitySample
+	for rows.Next() {
+		var sample ConnectivitySample
+		if err := rows.Scan(&sample.ID, &sample.Kind, &sample.Source, &sample.TargetID, &sample.TargetName,
+			&sample.URL, &sample.MonitorID, &sample.OK, &sample.Slow, &sample.ExpectedStatusCode,
+			&sample.ObservedStatusCode, &sample.LatencyMS, &sample.ResponseTimeMS, &sample.BytesRead,
+			&sample.Error, &sample.CheckedAt); err != nil {
+			return nil, err
+		}
+		sample.CheckedAt = sample.CheckedAt.UTC()
+		samples = append(samples, sample)
+	}
+	return samples, rows.Err()
+}
+
+func (s *PostgresStore) PruneConnectivitySamples(ctx context.Context, cutoff time.Time) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM connectivity_samples WHERE tenant_id = $1 AND checked_at < $2`, TenantFromContext(ctx), cutoff.UTC())
+	return err
+}
+
+func (s *PostgresStore) ListDuePendingMonitorAlerts(ctx context.Context, now time.Time, limit int) ([]PendingMonitorAlert, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	tenantID := TenantFromContext(ctx)
+	rows, err := s.pool.Query(ctx, `SELECT
+		p.id, i.id, i.monitor_id, i.name, i.transition, i.observed_at, i.error, i.status_code,
+		s.monitor_id, s.name, s.url, s.expected_status_code, s.status, s.status_before_maintenance,
+		s.consecutive_failures, s.last_checked_at, s.last_success_at, s.last_failure_at, s.last_error,
+		s.last_observed_status_code, s.updated_at, p.due_at
+		FROM pending_monitor_alerts p
+		JOIN incidents i ON i.tenant_id = p.tenant_id AND i.id = p.incident_id
+		JOIN monitor_states s ON s.tenant_id = p.tenant_id AND s.monitor_id = p.monitor_id
+		WHERE p.tenant_id = $1 AND p.status = 'pending' AND p.due_at <= $2 AND s.status = p.transition
+		ORDER BY p.due_at ASC, p.id ASC LIMIT $3`, tenantID, now.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var pending []PendingMonitorAlert
+	for rows.Next() {
+		var item PendingMonitorAlert
+		var lastChecked, lastSuccess, lastFailure *time.Time
+		if err := rows.Scan(&item.ID, &item.Incident.ID, &item.Incident.MonitorID, &item.Incident.Name,
+			&item.Incident.Transition, &item.Incident.ObservedAt, &item.Incident.Error, &item.Incident.StatusCode,
+			&item.CurrentState.MonitorID, &item.CurrentState.Name, &item.CurrentState.URL,
+			&item.CurrentState.ExpectedStatusCode, &item.CurrentState.Status,
+			&item.CurrentState.StatusBeforeMaintenance, &item.CurrentState.ConsecutiveFailures,
+			&lastChecked, &lastSuccess, &lastFailure, &item.CurrentState.LastError,
+			&item.CurrentState.LastObservedStatusCode, &item.CurrentState.UpdatedAt, &item.DueAt); err != nil {
+			return nil, err
+		}
+		item.Incident.ObservedAt = item.Incident.ObservedAt.UTC()
+		item.CurrentState.LastCheckedAt = derefTime(lastChecked)
+		item.CurrentState.LastSuccessAt = derefTime(lastSuccess)
+		item.CurrentState.LastFailureAt = derefTime(lastFailure)
+		item.CurrentState.UpdatedAt = item.CurrentState.UpdatedAt.UTC()
+		item.DueAt = item.DueAt.UTC()
+		pending = append(pending, item)
+	}
+	return pending, rows.Err()
+}
+
+func (s *PostgresStore) ClaimPendingMonitorAlert(ctx context.Context, id int64) (bool, error) {
+	tenantID := TenantFromContext(ctx)
+	result, err := s.pool.Exec(ctx, `UPDATE pending_monitor_alerts p SET status = 'sending'
+		WHERE p.tenant_id = $1 AND p.id = $2 AND p.status = 'pending' AND EXISTS (
+			SELECT 1 FROM monitor_states s
+			WHERE s.tenant_id = p.tenant_id AND s.monitor_id = p.monitor_id AND s.status = p.transition
+		)`, tenantID, id)
+	if err != nil {
+		return false, err
+	}
+	return result.RowsAffected() == 1, nil
+}
+
+func (s *PostgresStore) RecordPendingMonitorAlertDelivery(ctx context.Context, id int64, notifications []AlertNotification, deliveredAt time.Time) error {
+	tenantID := TenantFromContext(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var monitorID, transition, status string
+	if err := tx.QueryRow(ctx, `SELECT monitor_id, transition, status FROM pending_monitor_alerts
+		WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, id).Scan(&monitorID, &transition, &status); err != nil {
+		return err
+	}
+	if status == "delivered" {
+		return nil
+	}
+	if status != "sending" {
+		return fmt.Errorf("pending monitor alert %d is %q, expected sending", id, status)
+	}
+	for _, notification := range notifications {
+		attemptNumber := notification.AttemptNumber
+		if attemptNumber == 0 {
+			attemptNumber = 1
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO alert_notifications
+			(tenant_id, incident_id, monitor_id, provider, attempted_at, attempt_number, success, error, next_retry_at, retry_exhausted)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`, tenantID, notification.IncidentID,
+			notification.MonitorID, notification.Provider, notification.AttemptedAt.UTC(), attemptNumber,
+			notification.Success, notification.Error, postgresNullableTime(notification.NextRetryAt), notification.RetryExhausted); err != nil {
+			return fmt.Errorf("insert alert notification: %w", err)
+		}
+	}
+	result, err := tx.Exec(ctx, `UPDATE pending_monitor_alerts SET status = 'delivered', delivered_at = $1
+		WHERE tenant_id = $2 AND id = $3 AND status = 'sending'`, deliveredAt.UTC(), tenantID, id)
+	if err != nil {
+		return err
+	}
+	if result.RowsAffected() != 1 {
+		return fmt.Errorf("pending monitor alert %d was not claimed", id)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO monitor_alert_states
+		(tenant_id, monitor_id, last_notified_status, updated_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT(tenant_id, monitor_id) DO UPDATE SET
+		last_notified_status = EXCLUDED.last_notified_status, updated_at = EXCLUDED.updated_at`, tenantID, monitorID, transition, deliveredAt.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *PostgresStore) CompletePendingMonitorAlert(ctx context.Context, id int64, deliveredAt time.Time) error {
+	tenantID := TenantFromContext(ctx)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var monitorID, transition string
+	if err := tx.QueryRow(ctx, `SELECT monitor_id, transition FROM pending_monitor_alerts
+		WHERE tenant_id = $1 AND id = $2 FOR UPDATE`, tenantID, id).Scan(&monitorID, &transition); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE pending_monitor_alerts SET status = 'delivered', delivered_at = $1
+		WHERE tenant_id = $2 AND id = $3`, deliveredAt.UTC(), tenantID, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO monitor_alert_states
+		(tenant_id, monitor_id, last_notified_status, updated_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT(tenant_id, monitor_id) DO UPDATE SET
+		last_notified_status = EXCLUDED.last_notified_status, updated_at = EXCLUDED.updated_at`, tenantID, monitorID, transition, deliveredAt.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) ListAlertNotifications(ctx context.Context, limit int) ([]AlertNotification, error) {
@@ -1496,12 +1802,33 @@ func (s *PostgresStore) ListMaintenanceWindows(ctx context.Context, filter Maint
 
 func (s *PostgresStore) DeleteStatesExcept(ctx context.Context, monitorIDs []string) error {
 	tenantID := TenantFromContext(ctx)
-	if len(monitorIDs) == 0 {
-		_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states WHERE tenant_id = $1`, tenantID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	_, err := s.pool.Exec(ctx, `DELETE FROM monitor_states WHERE tenant_id = $1 AND NOT (monitor_id = ANY($2))`, tenantID, monitorIDs)
-	return err
+	defer tx.Rollback(ctx)
+	if len(monitorIDs) == 0 {
+		for _, query := range []string{
+			`UPDATE pending_monitor_alerts SET status = 'cancelled' WHERE tenant_id = $1 AND status = 'pending'`,
+			`DELETE FROM monitor_alert_states WHERE tenant_id = $1`,
+			`DELETE FROM monitor_states WHERE tenant_id = $1`,
+		} {
+			if _, err := tx.Exec(ctx, query, tenantID); err != nil {
+				return err
+			}
+		}
+		return tx.Commit(ctx)
+	}
+	for _, query := range []string{
+		`UPDATE pending_monitor_alerts SET status = 'cancelled' WHERE tenant_id = $1 AND status = 'pending' AND NOT (monitor_id = ANY($2))`,
+		`DELETE FROM monitor_alert_states WHERE tenant_id = $1 AND NOT (monitor_id = ANY($2))`,
+		`DELETE FROM monitor_states WHERE tenant_id = $1 AND NOT (monitor_id = ANY($2))`,
+	} {
+		if _, err := tx.Exec(ctx, query, tenantID, monitorIDs); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *PostgresStore) PruneProbeResults(ctx context.Context, retention time.Duration, now time.Time) error {
@@ -1567,6 +1894,7 @@ func postgresCompactRawOutcomeRuns(ctx context.Context, tx pgx.Tx, tenantID stri
 			AND checked_at < $2
 			AND maintenance_window_id IS NULL
 			AND observer_suppressed = FALSE
+			AND connectivity_suppressed = FALSE
 		ORDER BY monitor_id ASC, checked_at ASC, id ASC`, tenantID, cutoff)
 	if err != nil {
 		return err
@@ -1626,13 +1954,13 @@ func postgresRollupRawProbeResults(ctx context.Context, tx pgx.Tx, tenantID stri
 		(tenant_id, monitor_id, bucket_start, total_checks, successful_checks, maintenance_checks, maintenance_failed_checks,
 			observer_suppressed_checks, first_reportable_at, last_reportable_at)
 		SELECT $1, monitor_id, ` + bucketExpr + ` AS bucket_start,
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN 1 ELSE 0 END), 0)::int,
-			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND ok THEN 1 ELSE 0 END), 0)::int,
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN 1 ELSE 0 END), 0)::int,
+			COALESCE(SUM(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE AND ok THEN 1 ELSE 0 END), 0)::int,
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL THEN 1 ELSE 0 END), 0)::int,
 			COALESCE(SUM(CASE WHEN maintenance_window_id IS NOT NULL AND NOT ok THEN 1 ELSE 0 END), 0)::int,
 			COALESCE(SUM(CASE WHEN observer_suppressed = TRUE THEN 1 ELSE 0 END), 0)::int,
-			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END),
-			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE THEN checked_at ELSE NULL END)
+			MIN(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN checked_at ELSE NULL END),
+			MAX(CASE WHEN maintenance_window_id IS NULL AND observer_suppressed = FALSE AND connectivity_suppressed = FALSE THEN checked_at ELSE NULL END)
 		FROM probe_results
 		WHERE tenant_id = $1
 			AND checked_at < $2
@@ -1743,7 +2071,8 @@ func scanPostgresFailedProbeResult(row pgx.Row) (ProbeResult, error) {
 	err := row.Scan(
 		&result.MonitorID, &checkedAt, &result.OK, &result.ObservedStatusCode,
 		&result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount,
-		&result.Error, &maintenanceWindowID, &result.ObserverSuppressed,
+		&result.Error, &maintenanceWindowID, &result.ObserverSuppressed, &result.ConnectivitySuppressed,
+		&result.FailureKind, &result.SuppressionReason,
 	)
 	if err != nil {
 		return ProbeResult{}, err

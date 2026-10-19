@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"upag/internal/config"
@@ -14,8 +16,12 @@ import (
 )
 
 const (
-	MonitorID = "__observer__"
-	Name      = "Observer Connectivity"
+	MonitorID                = "__observer__"
+	Name                     = "Observer Connectivity"
+	TransferTargetID         = "cloudflare-100kb"
+	TransferTargetName       = "Cloudflare 100 KB transfer"
+	TransferURL              = "https://speed.cloudflare.com/__down?bytes=100000"
+	transferBytes      int64 = 100000
 )
 
 type CheckResult struct {
@@ -25,18 +31,87 @@ type CheckResult struct {
 }
 
 func Check(ctx context.Context, cfg config.ObserverConfig, previous storage.ObserverState, previousKnown bool, now time.Time) CheckResult {
-	results := make([]storage.ObserverSentinelResult, 0, len(cfg.Sentinels))
+	results := make([]storage.ObserverSentinelResult, len(cfg.Sentinels))
+	var wg sync.WaitGroup
+	for index, sentinel := range cfg.Sentinels {
+		wg.Add(1)
+		go func(index int, sentinel config.SentinelConfig) {
+			defer wg.Done()
+			results[index] = checkSentinel(ctx, cfg.Timeout.Duration, sentinel, now)
+		}(index, sentinel)
+	}
+	wg.Wait()
 	successes := 0
-	for _, sentinel := range cfg.Sentinels {
-		result := checkSentinel(ctx, cfg.Timeout.Duration, sentinel, now)
+	for _, result := range results {
 		if result.OK {
 			successes++
 		}
-		results = append(results, result)
 	}
 	healthy := successes >= cfg.RequiredSuccesses
 	next, transition := Evaluate(previous, previousKnown, healthy, results, cfg.FailureThreshold, cfg.RecoveryThreshold, now)
 	return CheckResult{State: next, SentinelResults: results, IncidentTransition: transition}
+}
+
+func CheckTransfer(ctx context.Context, cfg config.TransferCheckConfig, source string, monitorID string, now time.Time) storage.ConnectivitySample {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	timeout := cfg.Timeout.Duration
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	started := time.Now()
+	sample := storage.ConnectivitySample{
+		Kind: "transfer", Source: source, TargetID: TransferTargetID, TargetName: TransferTargetName,
+		URL: TransferURL, MonitorID: monitorID, ExpectedStatusCode: http.StatusOK, CheckedAt: now,
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(requestCtx, http.MethodGet, TransferURL, nil)
+	if err != nil {
+		sample.Error = err.Error()
+		sample.Slow = true
+		sample.ResponseTimeMS = time.Since(started).Milliseconds()
+		return sample
+	}
+	req.Header.Set("User-Agent", "upag/0.1 observer-transfer")
+	client := &http.Client{
+		Timeout:       timeout,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+		Transport:     &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DisableCompression: true},
+	}
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
+	sample.LatencyMS = time.Since(started).Milliseconds()
+	if err != nil {
+		sample.Error = err.Error()
+		sample.ResponseTimeMS = time.Since(started).Milliseconds()
+		sample.Slow = true
+		return sample
+	}
+	defer resp.Body.Close()
+	sample.ObservedStatusCode = resp.StatusCode
+	if resp.StatusCode != http.StatusOK {
+		sample.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", http.StatusOK, resp.StatusCode)
+		sample.ResponseTimeMS = time.Since(started).Milliseconds()
+		return sample
+	}
+	bytesRead, readErr := io.Copy(io.Discard, io.LimitReader(resp.Body, transferBytes+1))
+	sample.BytesRead = bytesRead
+	sample.ResponseTimeMS = time.Since(started).Milliseconds()
+	if readErr != nil {
+		sample.Error = fmt.Sprintf("read transfer response: %v", readErr)
+		sample.Slow = true
+		return sample
+	}
+	if bytesRead != transferBytes {
+		sample.Error = fmt.Sprintf("expected %d bytes, received %d", transferBytes, bytesRead)
+		sample.Slow = true
+		return sample
+	}
+	sample.OK = true
+	sample.Slow = time.Since(started) > cfg.SlowThreshold.Duration
+	return sample
 }
 
 func Evaluate(previous storage.ObserverState, previousKnown bool, healthy bool, results []storage.ObserverSentinelResult, failureThreshold int, recoveryThreshold int, now time.Time) (storage.ObserverState, string) {
@@ -110,6 +185,7 @@ func checkSentinel(ctx context.Context, timeout time.Duration, sentinel config.S
 	defer client.CloseIdleConnections()
 	resp, err := client.Do(req)
 	result.LatencyMS = time.Since(start).Milliseconds()
+	result.ResponseTimeMS = result.LatencyMS
 	if err != nil {
 		result.Error = err.Error()
 		return result

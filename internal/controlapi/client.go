@@ -144,6 +144,13 @@ func (c *Client) Failures(ctx context.Context, limit int, since time.Time) (Fail
 	return response, err
 }
 
+func (c *Client) ObserverStats(ctx context.Context, limit int, since time.Time) (ObserverStatsResponse, error) {
+	query := listQuery(limit, since)
+	var response ObserverStatsResponse
+	err := c.do(ctx, http.MethodGet, "/v1/observer-stats", query, nil, &response)
+	return response, err
+}
+
 func (c *Client) Maintenance(ctx context.Context, monitorID string, includeAll bool) (MaintenanceResponse, error) {
 	query := url.Values{}
 	if monitorID != "" {

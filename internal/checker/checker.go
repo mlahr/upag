@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -19,6 +20,7 @@ import (
 
 type Result struct {
 	OK                 bool
+	FailureKind        FailureKind
 	ObservedStatusCode int
 	FinalURL           string
 	RedirectsFollowed  int
@@ -26,6 +28,23 @@ type Result struct {
 	ResponseTime       time.Duration
 	Error              string
 	CheckedAt          time.Time
+}
+
+type FailureKind string
+
+const (
+	FailureTimeout         FailureKind = "timeout"
+	FailureTransport       FailureKind = "transport"
+	FailureStatusCode      FailureKind = "status_code"
+	FailureBodyRead        FailureKind = "body_read"
+	FailureBodyAssertion   FailureKind = "body_assertion"
+	FailureRedirectTarget  FailureKind = "redirect_target"
+	FailureMaxResponseTime FailureKind = "max_response_time"
+	FailureInvalidRequest  FailureKind = "invalid_request"
+)
+
+func IsConnectivitySuppressible(kind FailureKind) bool {
+	return kind == FailureTimeout || kind == FailureMaxResponseTime
 }
 
 const maxResponseBodyBytes int64 = 10 << 20
@@ -40,6 +59,7 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, monitor.URL, nil)
 	if err != nil {
 		result.Error = err.Error()
+		result.FailureKind = FailureInvalidRequest
 		return result
 	}
 	req.Header.Set("User-Agent", "upag/0.1")
@@ -73,13 +93,16 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	recordFinalResponse(&result, resp)
 	if err != nil {
 		result.Error = err.Error()
+		result.FailureKind = transportFailureKind(err)
 		return result
 	}
 	defer resp.Body.Close()
 
 	result.ObservedStatusCode = resp.StatusCode
-	if resp.StatusCode != monitor.ExpectedStatusCode && monitor.MaxResponseTime.Duration == 0 {
+	if resp.StatusCode != monitor.ExpectedStatusCode {
 		result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
+		result.FailureKind = FailureStatusCode
+		result.ResponseTime = time.Since(start)
 		return result
 	}
 
@@ -90,18 +113,19 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 		result.ResponseTime = time.Since(start)
 		if err != nil {
 			result.Error = fmt.Sprintf("read response body: %v", err)
+			result.FailureKind = transportFailureKind(err)
+			if result.FailureKind != FailureTimeout {
+				result.FailureKind = FailureBodyRead
+			}
 			return result
 		}
 		bodyBytes = body
 		bodyText = string(body)
 	}
 
-	if resp.StatusCode != monitor.ExpectedStatusCode {
-		result.Error = fmt.Sprintf("expected HTTP status %d, observed HTTP status %d", monitor.ExpectedStatusCode, resp.StatusCode)
-		return result
-	}
 	if err := assertRedirectTarget(monitor.RedirectTarget, redirectsFollowed, resp); err != nil {
 		result.Error = err.Error()
+		result.FailureKind = FailureRedirectTarget
 		return result
 	}
 
@@ -113,28 +137,43 @@ func Check(ctx context.Context, monitor config.MonitorConfig) Result {
 	for _, s := range monitor.ResponseBody.MustContain {
 		if !strings.Contains(bodyText, s) {
 			result.Error = fmt.Sprintf("response body does not contain required string %q", s)
+			result.FailureKind = FailureBodyAssertion
 			return result
 		}
 	}
 	for _, s := range monitor.ResponseBody.MustNotContain {
 		if strings.Contains(bodyText, s) {
 			result.Error = fmt.Sprintf("response body contains forbidden string %q", s)
+			result.FailureKind = FailureBodyAssertion
 			return result
 		}
 	}
 	if len(monitor.ResponseBody.Command) != 0 {
 		if err := runResponseBodyCommand(ctx, monitor.ResponseBody, bodyBytes); err != nil {
 			result.Error = err.Error()
+			result.FailureKind = FailureBodyAssertion
 			return result
 		}
 	}
 	if monitor.MaxResponseTime.Duration > 0 && result.ResponseTime > monitor.MaxResponseTime.Duration {
 		result.Error = fmt.Sprintf("response time %s exceeded maximum %s", result.ResponseTime, monitor.MaxResponseTime.Duration)
+		result.FailureKind = FailureMaxResponseTime
 		return result
 	}
 
 	result.OK = true
 	return result
+}
+
+func transportFailureKind(err error) FailureKind {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return FailureTimeout
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return FailureTimeout
+	}
+	return FailureTransport
 }
 
 func recordFinalResponse(result *Result, resp *http.Response) {

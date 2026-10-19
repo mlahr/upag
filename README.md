@@ -254,6 +254,9 @@ alerts:
   notification_retries:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
+  transition_delay:
+    down: 2m
+    up: 2m
 
 http:
   address: 127.0.0.1
@@ -566,7 +569,8 @@ upag --remote https://host-b.example --token "$UPAG_TOKEN" maintenance add \
 `UPAG_REMOTE`, `UPAG_TOKEN`, and `UPAG_REMOTE_TIMEOUT` provide defaults. The
 request timeout defaults to `1m`. Use `--local` to ignore those environment
 variables for one invocation. Remote-capable commands are `status`, `check`,
-`monitors`, `uptime`, `incidents`, `intervals`, `failures`, and `maintenance`;
+`monitors`, `uptime`, `incidents`, `intervals`, `failures`, `observer-stats`,
+and `maintenance`;
 every other command is local-only. The `uptime` command uses authenticated
 `GET /v1/uptime`; the daemon performs the tenant-scoped recovery-streak
 aggregation and supplies the generation timestamp used for elapsed durations.
@@ -622,6 +626,14 @@ token to subsequent requests.
 - `probe_hourly_rollups.retention`: hourly rollup retention. Defaults to `1y`.
 - `probe_daily_rollups.retention`: daily rollup retention. Defaults to
   `forever`.
+- `connectivity_samples.retention`: sentinel and Cloudflare transfer sample
+  retention. Defaults to `30d`.
+
+Monitor state and incidents update as soon as a transition is recorded.
+`alerts.transition_delay.down` and `.up` delay the matching messages
+separately; both default to zero. If a monitor returns to its last notified
+state before the delay expires, UPAG cancels the pending message. Observer
+connectivity messages are sent immediately.
 
 Migrate an existing SQLite database into a PostgreSQL/Supabase-backed config:
 
@@ -670,7 +682,33 @@ observer:
       name: Edge connectivity
       url: https://example.com/health
       expected_status_code: 200
+  transfer_check:
+    enabled: true
+    interval: 15m
+    incident_interval: 30s
+    timeout: 5s
+    slow_threshold: 3s
+    consecutive_slow_results: 2
 ```
+
+The optional transfer check downloads a fixed 100 KB response from Cloudflare.
+It is diagnostic only and does not add a vote to the sentinel quorum. When the
+configured number of consecutive transfer samples is slow or fails, UPAG
+suppresses monitor request timeouts and `max_response_time` failures while the
+sentinel quorum is healthy. Wrong status codes, body checks, redirect checks,
+and other failure types still update monitor state. One fast transfer sample
+clears the degraded signal. The check is disabled when omitted.
+
+Transfer samples are shared across monitors. Scheduled samples run every 15
+minutes; monitor failures can request one additional sample every 30 seconds.
+All sentinel and transfer samples are retained for 30 days by default. Run
+`upag observer-stats --since 7d` to see timing percentiles, failures, slow
+samples, and whether samples were scheduled or triggered by a monitor failure.
+After a full seven-day sample window and at least 20 successful transfer
+samples, the report suggests a slow limit based on 1.5 times the successful
+transfer P95, rounded up to 500 ms. The suggestion is advisory and does not
+change configuration. The authenticated
+read-only endpoint is `GET /v1/observer-stats?since=<RFC3339 timestamp>`.
 
 Observer transitions create incidents with monitor ID `__observer__` and
 transitions `OBSERVER_DOWN` or `OBSERVER_UP`. They use the same alert providers
@@ -837,15 +875,16 @@ upag monitors
 upag uptime
 upag incidents --limit 50
 upag failures --limit 20 --since 24h
+upag observer-stats --since 7d
 upag intervals --monitor homepage --limit 20 --since 24h
 ```
 
-`--since` on `incidents`, `failures`, and `intervals` accepts either an
-RFC3339 timestamp or a positive Go duration. Duration values use Go
+`--since` on `incidents`, `failures`, `intervals`, and `observer-stats` accepts
+either an RFC3339 timestamp or a positive duration. Duration values use Go
 `time.ParseDuration` syntax: a sequence of decimal numbers with units `ns`,
 `us` or `µs`, `ms`, `s`, `m`, and `h`, such as `30m`, `1.5h`, or `24h`.
-Calendar units such as `d`, `w`, `mo`, and `y` are not supported; use hour
-equivalents such as `168h` for seven days.
+The `d` suffix is also supported for 24-hour days, such as `7d`. Other calendar
+units such as `w`, `mo`, and `y` are not supported.
 
 `intervals` applies uncancelled maintenance windows to the reportable status
 timeline at their exact configured boundaries. Covered portions are printed as

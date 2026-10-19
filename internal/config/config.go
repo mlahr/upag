@@ -37,7 +37,13 @@ type HTTPAuthConfig struct {
 
 type AlertsConfig struct {
 	NotificationRetries NotificationRetriesConfig `yaml:"notification_retries"`
+	TransitionDelay     TransitionDelayConfig     `yaml:"transition_delay"`
 	Providers           AlertProvidersConfig      `yaml:"providers"`
+}
+
+type TransitionDelayConfig struct {
+	Down Duration `yaml:"down"`
+	Up   Duration `yaml:"up"`
 }
 
 type NotificationRetriesConfig struct {
@@ -77,28 +83,40 @@ type TelegramConfig struct {
 }
 
 type ObserverConfig struct {
-	Enabled           bool             `yaml:"enabled"`
-	Interval          Duration         `yaml:"interval"`
-	Timeout           Duration         `yaml:"timeout"`
-	FailureThreshold  int              `yaml:"failure_threshold"`
-	RecoveryThreshold int              `yaml:"recovery_threshold"`
-	RequiredSuccesses int              `yaml:"required_successes"`
-	Sentinels         []SentinelConfig `yaml:"sentinels"`
+	Enabled           bool                `yaml:"enabled"`
+	Interval          Duration            `yaml:"interval"`
+	Timeout           Duration            `yaml:"timeout"`
+	FailureThreshold  int                 `yaml:"failure_threshold"`
+	RecoveryThreshold int                 `yaml:"recovery_threshold"`
+	RequiredSuccesses int                 `yaml:"required_successes"`
+	Sentinels         []SentinelConfig    `yaml:"sentinels"`
+	TransferCheck     TransferCheckConfig `yaml:"transfer_check"`
 	enabledSet        bool
 }
 
+type TransferCheckConfig struct {
+	Enabled                bool     `yaml:"enabled"`
+	Interval               Duration `yaml:"interval"`
+	IncidentInterval       Duration `yaml:"incident_interval"`
+	Timeout                Duration `yaml:"timeout"`
+	SlowThreshold          Duration `yaml:"slow_threshold"`
+	ConsecutiveSlowResults int      `yaml:"consecutive_slow_results"`
+}
+
 type StorageConfig struct {
-	Backend               string          `yaml:"backend"`
-	SQLite                SQLiteConfig    `yaml:"sqlite"`
-	Postgres              PostgresConfig  `yaml:"postgres"`
-	ProbeResults          RetentionConfig `yaml:"probe_results"`
-	ProbeMinuteRollups    RetentionConfig `yaml:"probe_minute_rollups"`
-	ProbeHourlyRollups    RetentionConfig `yaml:"probe_hourly_rollups"`
-	ProbeDailyRollups     RetentionConfig `yaml:"probe_daily_rollups"`
-	probeResultsSet       bool
-	probeMinuteRollupsSet bool
-	probeHourlyRollupsSet bool
-	probeDailyRollupsSet  bool
+	Backend                string          `yaml:"backend"`
+	SQLite                 SQLiteConfig    `yaml:"sqlite"`
+	Postgres               PostgresConfig  `yaml:"postgres"`
+	ProbeResults           RetentionConfig `yaml:"probe_results"`
+	ConnectivitySamples    RetentionConfig `yaml:"connectivity_samples"`
+	ProbeMinuteRollups     RetentionConfig `yaml:"probe_minute_rollups"`
+	ProbeHourlyRollups     RetentionConfig `yaml:"probe_hourly_rollups"`
+	ProbeDailyRollups      RetentionConfig `yaml:"probe_daily_rollups"`
+	probeResultsSet        bool
+	connectivitySamplesSet bool
+	probeMinuteRollupsSet  bool
+	probeHourlyRollupsSet  bool
+	probeDailyRollupsSet   bool
 }
 
 type SQLiteConfig struct {
@@ -251,13 +269,14 @@ func (d *Defaults) UnmarshalYAML(value *yaml.Node) error {
 
 func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
 	raw := struct {
-		Backend            string           `yaml:"backend"`
-		SQLite             SQLiteConfig     `yaml:"sqlite"`
-		Postgres           PostgresConfig   `yaml:"postgres"`
-		ProbeResults       *RetentionConfig `yaml:"probe_results"`
-		ProbeMinuteRollups *RetentionConfig `yaml:"probe_minute_rollups"`
-		ProbeHourlyRollups *RetentionConfig `yaml:"probe_hourly_rollups"`
-		ProbeDailyRollups  *RetentionConfig `yaml:"probe_daily_rollups"`
+		Backend             string           `yaml:"backend"`
+		SQLite              SQLiteConfig     `yaml:"sqlite"`
+		Postgres            PostgresConfig   `yaml:"postgres"`
+		ProbeResults        *RetentionConfig `yaml:"probe_results"`
+		ConnectivitySamples *RetentionConfig `yaml:"connectivity_samples"`
+		ProbeMinuteRollups  *RetentionConfig `yaml:"probe_minute_rollups"`
+		ProbeHourlyRollups  *RetentionConfig `yaml:"probe_hourly_rollups"`
+		ProbeDailyRollups   *RetentionConfig `yaml:"probe_daily_rollups"`
 	}{}
 	if err := value.Decode(&raw); err != nil {
 		return err
@@ -268,6 +287,10 @@ func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
 	if raw.ProbeResults != nil {
 		s.ProbeResults = *raw.ProbeResults
 		s.probeResultsSet = true
+	}
+	if raw.ConnectivitySamples != nil {
+		s.ConnectivitySamples = *raw.ConnectivitySamples
+		s.connectivitySamplesSet = true
 	}
 	if raw.ProbeMinuteRollups != nil {
 		s.ProbeMinuteRollups = *raw.ProbeMinuteRollups
@@ -286,13 +309,14 @@ func (s *StorageConfig) UnmarshalYAML(value *yaml.Node) error {
 
 func (o *ObserverConfig) UnmarshalYAML(value *yaml.Node) error {
 	raw := struct {
-		Enabled           *bool            `yaml:"enabled"`
-		Interval          Duration         `yaml:"interval"`
-		Timeout           Duration         `yaml:"timeout"`
-		FailureThreshold  int              `yaml:"failure_threshold"`
-		RecoveryThreshold int              `yaml:"recovery_threshold"`
-		RequiredSuccesses int              `yaml:"required_successes"`
-		Sentinels         []SentinelConfig `yaml:"sentinels"`
+		Enabled           *bool               `yaml:"enabled"`
+		Interval          Duration            `yaml:"interval"`
+		Timeout           Duration            `yaml:"timeout"`
+		FailureThreshold  int                 `yaml:"failure_threshold"`
+		RecoveryThreshold int                 `yaml:"recovery_threshold"`
+		RequiredSuccesses int                 `yaml:"required_successes"`
+		Sentinels         []SentinelConfig    `yaml:"sentinels"`
+		TransferCheck     TransferCheckConfig `yaml:"transfer_check"`
 	}{}
 	if err := value.Decode(&raw); err != nil {
 		return err
@@ -307,6 +331,7 @@ func (o *ObserverConfig) UnmarshalYAML(value *yaml.Node) error {
 	o.RecoveryThreshold = raw.RecoveryThreshold
 	o.RequiredSuccesses = raw.RequiredSuccesses
 	o.Sentinels = raw.Sentinels
+	o.TransferCheck = raw.TransferCheck
 	return nil
 }
 
@@ -420,7 +445,15 @@ func validateHTTPAuthConfigSchema(node *yaml.Node, path string) error {
 func validateAlertsConfigSchema(node *yaml.Node, path string) error {
 	return validateMapping(node, path, map[string]schemaValidator{
 		"notification_retries": validateNotificationRetriesSchema,
+		"transition_delay":     validateTransitionDelaySchema,
 		"providers":            validateAlertProvidersSchema,
+	})
+}
+
+func validateTransitionDelaySchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"down": nil,
+		"up":   nil,
 	})
 }
 
@@ -479,6 +512,18 @@ func validateObserverConfigSchema(node *yaml.Node, path string) error {
 		"recovery_threshold": nil,
 		"required_successes": nil,
 		"sentinels":          validateSentinelsSchema,
+		"transfer_check":     validateTransferCheckSchema,
+	})
+}
+
+func validateTransferCheckSchema(node *yaml.Node, path string) error {
+	return validateMapping(node, path, map[string]schemaValidator{
+		"enabled":                  nil,
+		"interval":                 nil,
+		"incident_interval":        nil,
+		"timeout":                  nil,
+		"slow_threshold":           nil,
+		"consecutive_slow_results": validatePositiveInteger,
 	})
 }
 
@@ -541,6 +586,7 @@ func validateStorageConfigSchema(node *yaml.Node, path string) error {
 		"sqlite":               validateSQLiteConfigSchema,
 		"postgres":             validatePostgresConfigSchema,
 		"probe_results":        validateRetentionConfigSchema,
+		"connectivity_samples": validateRetentionConfigSchema,
 		"probe_minute_rollups": validateRetentionConfigSchema,
 		"probe_hourly_rollups": validateRetentionConfigSchema,
 		"probe_daily_rollups":  validateRetentionConfigSchema,
@@ -653,6 +699,9 @@ func (c *Config) ApplyDefaults() {
 	if !c.Storage.probeResultsSet {
 		c.Storage.ProbeResults.Retention.Duration = c.Defaults.HistoryRetention.Duration
 	}
+	if !c.Storage.connectivitySamplesSet {
+		c.Storage.ConnectivitySamples.Retention.Duration = 30 * 24 * time.Hour
+	}
 	if !c.Storage.probeMinuteRollupsSet {
 		c.Storage.ProbeMinuteRollups.Retention.Duration = 30 * 24 * time.Hour
 	}
@@ -703,6 +752,21 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.Observer.RequiredSuccesses == 0 {
 		c.Observer.RequiredSuccesses = 1
+	}
+	if c.Observer.TransferCheck.Interval.Duration == 0 {
+		c.Observer.TransferCheck.Interval.Duration = 15 * time.Minute
+	}
+	if c.Observer.TransferCheck.IncidentInterval.Duration == 0 {
+		c.Observer.TransferCheck.IncidentInterval.Duration = 30 * time.Second
+	}
+	if c.Observer.TransferCheck.Timeout.Duration == 0 {
+		c.Observer.TransferCheck.Timeout.Duration = 5 * time.Second
+	}
+	if c.Observer.TransferCheck.SlowThreshold.Duration == 0 {
+		c.Observer.TransferCheck.SlowThreshold.Duration = 3 * time.Second
+	}
+	if c.Observer.TransferCheck.ConsecutiveSlowResults == 0 {
+		c.Observer.TransferCheck.ConsecutiveSlowResults = 2
 	}
 	if c.Observer.Enabled && len(c.Observer.Sentinels) == 0 {
 		c.Observer.Sentinels = BuiltInObserverSentinels()
@@ -887,6 +951,7 @@ func (c Config) Validate() error {
 		}
 	}
 	validateRetention("storage.probe_results", c.Storage.ProbeResults.Retention)
+	validateRetention("storage.connectivity_samples", c.Storage.ConnectivitySamples.Retention)
 	validateRetention("storage.probe_minute_rollups", c.Storage.ProbeMinuteRollups.Retention)
 	validateRetention("storage.probe_hourly_rollups", c.Storage.ProbeHourlyRollups.Retention)
 	validateRetention("storage.probe_daily_rollups", c.Storage.ProbeDailyRollups.Retention)
@@ -944,6 +1009,32 @@ func (c Config) Validate() error {
 		if c.Observer.RequiredSuccesses > len(c.Observer.Sentinels) {
 			errs = append(errs, errors.New("observer.required_successes must be less than or equal to the number of observer.sentinels"))
 		}
+	}
+	if c.Observer.TransferCheck.Enabled {
+		if !c.Observer.Enabled {
+			errs = append(errs, errors.New("observer.transfer_check.enabled requires observer.enabled"))
+		}
+		if c.Observer.TransferCheck.Interval.Duration <= 0 {
+			errs = append(errs, errors.New("observer.transfer_check.interval must be positive"))
+		}
+		if c.Observer.TransferCheck.IncidentInterval.Duration <= 0 {
+			errs = append(errs, errors.New("observer.transfer_check.incident_interval must be positive"))
+		}
+		if c.Observer.TransferCheck.Timeout.Duration <= 0 {
+			errs = append(errs, errors.New("observer.transfer_check.timeout must be positive"))
+		}
+		if c.Observer.TransferCheck.SlowThreshold.Duration <= 0 {
+			errs = append(errs, errors.New("observer.transfer_check.slow_threshold must be positive"))
+		}
+		if c.Observer.TransferCheck.ConsecutiveSlowResults <= 0 {
+			errs = append(errs, errors.New("observer.transfer_check.consecutive_slow_results must be positive"))
+		}
+	}
+	if c.Alerts.TransitionDelay.Down.Duration < 0 {
+		errs = append(errs, errors.New("alerts.transition_delay.down must be non-negative"))
+	}
+	if c.Alerts.TransitionDelay.Up.Duration < 0 {
+		errs = append(errs, errors.New("alerts.transition_delay.up must be non-negative"))
 	}
 	sentinelIDs := map[string]struct{}{}
 	for i, sentinel := range c.Observer.Sentinels {

@@ -3,10 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"text/tabwriter"
 	"time"
 
+	"upag/internal/controlapi"
 	"upag/internal/storage"
 )
 
@@ -213,15 +215,17 @@ func formatIntervalDuration(interval storage.StatusInterval, now time.Time) stri
 func PrintFailures(w io.Writer, failedProbes []storage.ProbeResult, observerState storage.ObserverState, observerKnown bool, sentinelEvents []storage.ObserverSentinelResult) error {
 	if len(failedProbes) > 0 {
 		if err := printTable(w, func(tw *tabwriter.Writer) error {
-			if _, err := fmt.Fprintln(tw, "TIME\tMONITOR\tSTATUS\tSUPPRESSED\tERROR"); err != nil {
+			if _, err := fmt.Fprintln(tw, "TIME\tMONITOR\tSTATUS\tFAILURE TYPE\tSUPPRESSION\tERROR"); err != nil {
 				return err
 			}
 			for _, p := range failedProbes {
-				suppressed := "no"
+				suppression := "-"
 				if p.ObserverSuppressed {
-					suppressed = "yes"
+					suppression = "observer down"
+				} else if p.ConnectivitySuppressed {
+					suppression = "slow Cloudflare transfer"
 				}
-				if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", formatCLITime(p.CheckedAt), p.MonitorID, p.ObservedStatusCode, suppressed, p.Error); err != nil {
+				if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\t%s\n", formatCLITime(p.CheckedAt), p.MonitorID, p.ObservedStatusCode, formatFailureKind(p.FailureKind), suppression, p.Error); err != nil {
 					return err
 				}
 			}
@@ -260,6 +264,75 @@ func PrintFailures(w io.Writer, failedProbes []storage.ProbeResult, observerStat
 		fmt.Fprintf(w, "\nOBSERVER: %s (%d failures)\n", observerState.Status, observerState.ConsecutiveFailures)
 	}
 
+	return nil
+}
+
+func formatFailureKind(kind string) string {
+	switch kind {
+	case "timeout":
+		return "request timed out"
+	case "transport":
+		return "connection error"
+	case "status_code":
+		return "wrong HTTP status"
+	case "body_read":
+		return "response read error"
+	case "body_assertion":
+		return "response body check"
+	case "redirect_target":
+		return "redirect target check"
+	case "max_response_time":
+		return "response too slow"
+	case "invalid_request":
+		return "invalid request"
+	default:
+		return "-"
+	}
+}
+
+func PrintObserverStats(w io.Writer, response controlapi.ObserverStatsResponse) error {
+	if len(response.Series) == 0 {
+		fmt.Fprintf(w, "No connectivity samples since %s.\n", formatCLITime(response.Since))
+		if response.TransferCheckEnabled {
+			fmt.Fprintf(w, "Cloudflare transfer slow limit: %dms; confirmation: %d consecutive slow or failed samples.\n", response.CurrentSlowLimitMS, response.ConsecutiveSlowResults)
+		}
+		return nil
+	}
+	fmt.Fprintf(w, "Connectivity samples since %s (generated %s)\n", formatCLITime(response.Since), formatCLITime(response.GeneratedAt))
+	if response.TransferCheckEnabled {
+		fmt.Fprintf(w, "Cloudflare transfer: timeout %dms, slow limit %dms, confirmation %d consecutive slow or failed samples.\n", response.TransferTimeoutMS, response.CurrentSlowLimitMS, response.ConsecutiveSlowResults)
+	}
+	if err := printTable(w, func(tw *tabwriter.Writer) error {
+		if _, err := fmt.Fprintln(tw, "KIND\tTARGET\tSAMPLES\tOK\tFAILED\tSLOW\tAVG\tP50\tP95\tMAX\tSOURCES"); err != nil {
+			return err
+		}
+		for _, series := range response.Series {
+			target := series.TargetName
+			if target == "" {
+				target = series.TargetID
+			}
+			sources := make([]string, 0, len(series.SourceCounts))
+			for source, count := range series.SourceCounts {
+				sources = append(sources, fmt.Sprintf("%s:%d", source, count))
+			}
+			sort.Strings(sources)
+			if _, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%dms\t%dms\t%dms\t%dms\t%s\n",
+				series.Kind, target, series.Samples, series.SuccessfulSamples, series.FailedSamples,
+				series.SlowSamples, series.AverageMS, series.P50MS, series.P95MS, series.MaxMS, strings.Join(sources, ",")); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	for _, series := range response.Series {
+		if series.RecommendedSlowLimitMS > 0 {
+			fmt.Fprintf(w, "\nCloudflare slow limit suggestion: %dms. %s\n", series.RecommendedSlowLimitMS, series.Recommendation)
+		} else if series.Recommendation != "" {
+			fmt.Fprintf(w, "\nCloudflare slow limit: %s\n", series.Recommendation)
+		}
+	}
 	return nil
 }
 

@@ -47,6 +47,7 @@ type Runtime struct {
 	BearerToken       string
 	Monitors          []config.MonitorConfig
 	FailureThresholds storage.FailureThresholds
+	TransferCheck     config.TransferCheckConfig
 }
 
 type RuntimeProvider func() Runtime
@@ -152,16 +153,19 @@ type IntervalsResponse struct {
 }
 
 type ProbeFailure struct {
-	MonitorID           string    `json:"monitor_id"`
-	CheckedAt           time.Time `json:"checked_at"`
-	OK                  bool      `json:"ok"`
-	ObservedStatusCode  int       `json:"observed_status_code"`
-	LatencyMS           int64     `json:"latency_ms"`
-	ResponseTimeMS      int64     `json:"response_time_ms"`
-	AttemptCount        int       `json:"attempt_count"`
-	Error               string    `json:"error"`
-	MaintenanceWindowID int64     `json:"maintenance_window_id"`
-	ObserverSuppressed  bool      `json:"observer_suppressed"`
+	MonitorID              string    `json:"monitor_id"`
+	CheckedAt              time.Time `json:"checked_at"`
+	OK                     bool      `json:"ok"`
+	ObservedStatusCode     int       `json:"observed_status_code"`
+	LatencyMS              int64     `json:"latency_ms"`
+	ResponseTimeMS         int64     `json:"response_time_ms"`
+	AttemptCount           int       `json:"attempt_count"`
+	Error                  string    `json:"error"`
+	MaintenanceWindowID    int64     `json:"maintenance_window_id"`
+	ObserverSuppressed     bool      `json:"observer_suppressed"`
+	ConnectivitySuppressed bool      `json:"connectivity_suppressed"`
+	FailureKind            string    `json:"failure_kind"`
+	SuppressionReason      string    `json:"suppression_reason"`
 }
 
 type ObserverState struct {
@@ -278,6 +282,11 @@ func serveAuthenticated(w http.ResponseWriter, r *http.Request, store Store, run
 			return
 		}
 		serveFailures(w, r, store, runtime)
+	case r.URL.Path == "/v1/observer-stats":
+		if !allowMethod(w, r, http.MethodGet) {
+			return
+		}
+		serveObserverStats(w, r, store, runtime)
 	case r.URL.Path == "/v1/maintenance":
 		if r.Method == http.MethodGet {
 			serveMaintenance(w, r, store, runtime)
@@ -448,6 +457,34 @@ func serveFailures(w http.ResponseWriter, r *http.Request, store Store, runtime 
 		return
 	}
 	writeJSON(w, 200, FailuresResponse{FailedProbes: ProbeFailuresFromStorage(probes), Observer: ObserverStateFromStorage(observer), ObserverKnown: known, SentinelEvents: SentinelEventsFromStorage(events)})
+}
+
+func serveObserverStats(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
+	limit, since, ok := listFilter(w, r, 400000)
+	if !ok {
+		return
+	}
+	if limit > 400000 {
+		limit = 400000
+	}
+	now := time.Now().UTC()
+	if since.IsZero() {
+		since = now.Add(-7 * 24 * time.Hour)
+	}
+	sampleStore, ok := store.(interface {
+		ListConnectivitySamples(context.Context, storage.ConnectivitySampleFilter) ([]storage.ConnectivitySample, error)
+	})
+	if !ok {
+		internalError(w, fmt.Errorf("storage backend does not provide connectivity samples"))
+		return
+	}
+	querySince := ObserverStatsQuerySince(since, now, runtime.TransferCheck)
+	samples, err := sampleStore.ListConnectivitySamples(tenantContext(r, runtime), storage.ConnectivitySampleFilter{Limit: limit, Since: querySince})
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ObserverStatsFromStorage(samples, since, now, runtime.TransferCheck))
 }
 
 func serveMaintenance(w http.ResponseWriter, r *http.Request, store Store, runtime Runtime) {
@@ -671,7 +708,7 @@ func IntervalsFromStorage(rows []storage.StatusInterval) []Interval {
 func ProbeFailuresFromStorage(rows []storage.ProbeResult) []ProbeFailure {
 	out := make([]ProbeFailure, 0, len(rows))
 	for _, v := range rows {
-		out = append(out, ProbeFailure{MonitorID: v.MonitorID, CheckedAt: v.CheckedAt, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, ResponseTimeMS: v.ResponseTimeMS, AttemptCount: v.AttemptCount, Error: v.Error, MaintenanceWindowID: v.MaintenanceWindowID, ObserverSuppressed: v.ObserverSuppressed})
+		out = append(out, ProbeFailure{MonitorID: v.MonitorID, CheckedAt: v.CheckedAt, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, ResponseTimeMS: v.ResponseTimeMS, AttemptCount: v.AttemptCount, Error: v.Error, MaintenanceWindowID: v.MaintenanceWindowID, ObserverSuppressed: v.ObserverSuppressed, ConnectivitySuppressed: v.ConnectivitySuppressed, FailureKind: v.FailureKind, SuppressionReason: v.SuppressionReason})
 	}
 	return out
 }
@@ -699,7 +736,7 @@ func (v Interval) Storage() storage.StatusInterval {
 	return storage.StatusInterval{ID: v.ID, MonitorID: v.MonitorID, Status: v.Status, StartedAt: v.StartedAt, EndedAt: v.EndedAt, Downtime: v.Downtime}
 }
 func (v ProbeFailure) Storage() storage.ProbeResult {
-	return storage.ProbeResult{MonitorID: v.MonitorID, CheckedAt: v.CheckedAt, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, ResponseTimeMS: v.ResponseTimeMS, AttemptCount: v.AttemptCount, Error: v.Error, MaintenanceWindowID: v.MaintenanceWindowID, ObserverSuppressed: v.ObserverSuppressed}
+	return storage.ProbeResult{MonitorID: v.MonitorID, CheckedAt: v.CheckedAt, OK: v.OK, ObservedStatusCode: v.ObservedStatusCode, LatencyMS: v.LatencyMS, ResponseTimeMS: v.ResponseTimeMS, AttemptCount: v.AttemptCount, Error: v.Error, MaintenanceWindowID: v.MaintenanceWindowID, ObserverSuppressed: v.ObserverSuppressed, ConnectivitySuppressed: v.ConnectivitySuppressed, FailureKind: v.FailureKind, SuppressionReason: v.SuppressionReason}
 }
 func (v ObserverState) Storage() storage.ObserverState {
 	return storage.ObserverState{Status: v.Status, ConsecutiveFailures: v.ConsecutiveFailures, ConsecutiveSuccesses: v.ConsecutiveSuccesses, LastCheckedAt: v.LastCheckedAt, LastSuccessAt: v.LastSuccessAt, LastFailureAt: v.LastFailureAt, LastError: v.LastError, UpdatedAt: v.UpdatedAt}

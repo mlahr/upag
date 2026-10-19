@@ -85,6 +85,15 @@ func MigrateSQLiteToPostgres(ctx context.Context, sqlitePath string, postgresDSN
 	if err := copyIncidents(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
+	if err := copyConnectivitySamples(ctx, source.db, tx, tenantID); err != nil {
+		return err
+	}
+	if err := copyMonitorAlertStates(ctx, source.db, tx, tenantID); err != nil {
+		return err
+	}
+	if err := copyPendingMonitorAlerts(ctx, source.db, tx, tenantID); err != nil {
+		return err
+	}
 	if err := copyAlertNotifications(ctx, source.db, tx, tenantID); err != nil {
 		return err
 	}
@@ -150,6 +159,9 @@ func ensurePostgresTargetEmpty(ctx context.Context, target *PostgresStore) error
 		"probe_outcome_runs",
 		"monitor_status_intervals",
 		"monitor_status_interval_backfills",
+		"connectivity_samples",
+		"monitor_alert_states",
+		"pending_monitor_alerts",
 	} {
 		var count int
 		if err := target.pool.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil {
@@ -259,7 +271,7 @@ func copyMaintenanceWindows(ctx context.Context, db *sql.DB, tx postgresTx, tena
 }
 
 func copyProbeResults(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
-	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed FROM probe_results ORDER BY id`)
+	rows, err := db.QueryContext(ctx, `SELECT id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason FROM probe_results ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -268,15 +280,15 @@ func copyProbeResults(ctx context.Context, db *sql.DB, tx postgresTx, tenantID s
 		var id int64
 		var result ProbeResult
 		var checkedAt string
-		var ok, suppressed int
+		var ok, suppressed, connectivitySuppressed int
 		var maintenanceID sql.NullInt64
-		if err := rows.Scan(&id, &result.MonitorID, &checkedAt, &ok, &result.ObservedStatusCode, &result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount, &result.Error, &maintenanceID, &suppressed); err != nil {
+		if err := rows.Scan(&id, &result.MonitorID, &checkedAt, &ok, &result.ObservedStatusCode, &result.LatencyMS, &result.ResponseTimeMS, &result.AttemptCount, &result.Error, &maintenanceID, &suppressed, &connectivitySuppressed, &result.FailureKind, &result.SuppressionReason); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `INSERT INTO probe_results
-			(tenant_id, id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-			tenantID, id, result.MonitorID, parseTime(checkedAt), intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.AttemptCount, result.Error, nullInt64Value(maintenanceID), intBool(suppressed)); err != nil {
+			(tenant_id, id, monitor_id, checked_at, ok, observed_status_code, latency_ms, response_time_ms, attempt_count, error, maintenance_window_id, observer_suppressed, connectivity_suppressed, failure_kind, suppression_reason)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			tenantID, id, result.MonitorID, parseTime(checkedAt), intBool(ok), result.ObservedStatusCode, result.LatencyMS, result.ResponseTimeMS, result.AttemptCount, result.Error, nullInt64Value(maintenanceID), intBool(suppressed), intBool(connectivitySuppressed), result.FailureKind, result.SuppressionReason); err != nil {
 			return err
 		}
 	}
@@ -299,6 +311,79 @@ func copyIncidents(ctx context.Context, db *sql.DB, tx postgresTx, tenantID stri
 			(tenant_id, id, monitor_id, name, transition, observed_at, error, status_code)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
 			tenantID, incident.ID, incident.MonitorID, incident.Name, incident.Transition, parseTime(observedAt), incident.Error, incident.StatusCode); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func copyConnectivitySamples(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
+	rows, err := db.QueryContext(ctx, `SELECT id, kind, source, target_id, target_name, url, monitor_id, ok, slow,
+		expected_status_code, observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at
+		FROM connectivity_samples ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sample ConnectivitySample
+		var checkedAt string
+		var ok, slow int
+		if err := rows.Scan(&sample.ID, &sample.Kind, &sample.Source, &sample.TargetID, &sample.TargetName,
+			&sample.URL, &sample.MonitorID, &ok, &slow, &sample.ExpectedStatusCode, &sample.ObservedStatusCode,
+			&sample.LatencyMS, &sample.ResponseTimeMS, &sample.BytesRead, &sample.Error, &checkedAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO connectivity_samples
+			(tenant_id, id, kind, source, target_id, target_name, url, monitor_id, ok, slow, expected_status_code,
+			 observed_status_code, latency_ms, response_time_ms, bytes_read, error, checked_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)`,
+			tenantID, sample.ID, sample.Kind, sample.Source, sample.TargetID, sample.TargetName, sample.URL,
+			sample.MonitorID, intBool(ok), intBool(slow), sample.ExpectedStatusCode, sample.ObservedStatusCode,
+			sample.LatencyMS, sample.ResponseTimeMS, sample.BytesRead, sample.Error, parseTime(checkedAt)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func copyMonitorAlertStates(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
+	rows, err := db.QueryContext(ctx, `SELECT monitor_id, last_notified_status, updated_at FROM monitor_alert_states ORDER BY monitor_id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var monitorID, status, updatedAt string
+		if err := rows.Scan(&monitorID, &status, &updatedAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO monitor_alert_states
+			(tenant_id, monitor_id, last_notified_status, updated_at) VALUES ($1,$2,$3,$4)`, tenantID, monitorID, status, parseTime(updatedAt)); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
+func copyPendingMonitorAlerts(ctx context.Context, db *sql.DB, tx postgresTx, tenantID string) error {
+	rows, err := db.QueryContext(ctx, `SELECT id, incident_id, monitor_id, transition, due_at, status, created_at, delivered_at
+		FROM pending_monitor_alerts ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, incidentID int64
+		var monitorID, transition, dueAt, status, createdAt string
+		var deliveredAt sql.NullString
+		if err := rows.Scan(&id, &incidentID, &monitorID, &transition, &dueAt, &status, &createdAt, &deliveredAt); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `INSERT INTO pending_monitor_alerts
+			(tenant_id, id, incident_id, monitor_id, transition, due_at, status, created_at, delivered_at)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`, tenantID, id, incidentID, monitorID, transition,
+			parseTime(dueAt), status, parseTime(createdAt), postgresNullableTime(parseNullTime(deliveredAt))); err != nil {
 			return err
 		}
 	}
@@ -423,7 +508,7 @@ func copyMonitorStatusIntervalBackfill(ctx context.Context, db *sql.DB, tx postg
 }
 
 func resetPostgresSequences(ctx context.Context, tx postgresTx) error {
-	for _, table := range []string{"probe_results", "incidents", "alert_notifications", "maintenance_windows", "probe_outcome_runs", "monitor_status_intervals"} {
+	for _, table := range []string{"probe_results", "incidents", "alert_notifications", "maintenance_windows", "probe_outcome_runs", "monitor_status_intervals", "connectivity_samples", "pending_monitor_alerts"} {
 		if _, err := tx.Exec(ctx, `SELECT setval(pg_get_serial_sequence($1, 'id'), COALESCE((SELECT MAX(id) FROM `+table+`), 1), (SELECT COUNT(*) > 0 FROM `+table+`))`, table); err != nil {
 			return err
 		}

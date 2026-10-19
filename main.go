@@ -143,6 +143,8 @@ func run(args []string) error {
 		return runIntervals(args[1:], remote, global.JSON)
 	case "failures":
 		return runFailures(args[1:], remote, global.JSON)
+	case "observer-stats":
+		return runObserverStats(args[1:], remote, global.JSON)
 	case "maintenance":
 		return runMaintenance(args[1:], remote, global.JSON)
 	case "storage":
@@ -343,7 +345,7 @@ func (e *maintenanceAddBatchError) Error() string {
 
 func remoteCapableCommand(command string) bool {
 	switch command {
-	case "status", "check", "monitors", "uptime", "incidents", "intervals", "failures", "maintenance":
+	case "status", "check", "monitors", "uptime", "incidents", "intervals", "failures", "observer-stats", "maintenance":
 		return true
 	default:
 		return false
@@ -352,7 +354,7 @@ func remoteCapableCommand(command string) bool {
 
 func knownCommand(command string) bool {
 	switch command {
-	case "run", "start", "stop", "status", "restart", "config", "check", "monitors", "uptime", "incidents", "intervals", "failures", "maintenance", "storage":
+	case "run", "start", "stop", "status", "restart", "config", "check", "monitors", "uptime", "incidents", "intervals", "failures", "observer-stats", "maintenance", "storage":
 		return true
 	default:
 		return false
@@ -1048,6 +1050,68 @@ func runFailures(args []string, remote *controlapi.Client, jsonOutput bool) erro
 	return cli.PrintFailures(os.Stdout, failedProbes, observerState, observerKnown, sentinelEvents)
 }
 
+func runObserverStats(args []string, remote *controlapi.Client, jsonOutput bool) error {
+	fs := newCommandFlagSet("observer-stats", jsonOutput)
+	configPath := fs.String("config", defaults.StandaloneConfigPath, "path to YAML configuration")
+	limit := fs.Int("limit", 400000, "maximum number of connectivity samples")
+	sinceRaw := fs.String("since", "7d", "only include samples since an RFC3339 timestamp or positive duration (default 7d)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	since, err := parseCLISince(*sinceRaw, "--since", time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if since.IsZero() {
+		since = time.Now().UTC().Add(-7 * 24 * time.Hour)
+	}
+	if *limit <= 0 {
+		return fmt.Errorf("observer-stats --limit must be positive")
+	}
+	if *limit > 400000 {
+		*limit = 400000
+	}
+	if remote != nil {
+		if defaults.FlagWasSet(fs, "config") {
+			return fmt.Errorf("observer-stats --config cannot be used with --remote")
+		}
+		response, err := remote.ObserverStats(context.Background(), *limit, since)
+		if err != nil {
+			return err
+		}
+		if jsonOutput {
+			return cli.PrintJSON(os.Stdout, response)
+		}
+		return cli.PrintObserverStats(os.Stdout, response)
+	}
+	if err := defaults.ApplyPaths(fs,
+		defaults.PathTarget{FlagName: "config", Value: configPath, Default: func(d defaults.Paths) string { return d.ConfigPath }},
+	); err != nil {
+		return err
+	}
+	cfg, err := config.LoadFile(*configPath)
+	if err != nil {
+		return err
+	}
+	ctx := storage.WithTenant(context.Background(), cfg.TenantID)
+	store, err := storage.OpenBackend(ctx, cfg.Storage)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	generatedAt := time.Now().UTC()
+	querySince := controlapi.ObserverStatsQuerySince(since, generatedAt, cfg.Observer.TransferCheck)
+	samples, err := store.ListConnectivitySamples(ctx, storage.ConnectivitySampleFilter{Limit: *limit, Since: querySince})
+	if err != nil {
+		return err
+	}
+	response := controlapi.ObserverStatsFromStorage(samples, since, generatedAt, cfg.Observer.TransferCheck)
+	if jsonOutput {
+		return cli.PrintJSON(os.Stdout, response)
+	}
+	return cli.PrintObserverStats(os.Stdout, response)
+}
+
 func runMaintenance(args []string, remote *controlapi.Client, jsonOutput bool) error {
 	if len(args) == 0 {
 		return maintenanceUsage()
@@ -1550,14 +1614,28 @@ func parseCLISince(raw string, flagName string, now time.Time) (time.Time, error
 	if parsed, err := time.Parse(time.RFC3339Nano, raw); err == nil {
 		return parsed.UTC(), nil
 	}
-	duration, err := time.ParseDuration(raw)
+	duration, err := parseCLIDuration(raw)
 	if err != nil {
-		return time.Time{}, fmt.Errorf("%s must be RFC3339 timestamp or positive duration: %w", flagName, err)
+		return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp or positive duration (for example 7d): %w", flagName, err)
 	}
 	if duration <= 0 {
 		return time.Time{}, fmt.Errorf("%s duration must be positive", flagName)
 	}
 	return now.UTC().Add(-duration), nil
+}
+
+func parseCLIDuration(raw string) (time.Duration, error) {
+	if !strings.HasSuffix(raw, "d") {
+		return time.ParseDuration(raw)
+	}
+	hours, err := time.ParseDuration(strings.TrimSuffix(raw, "d") + "h")
+	if err != nil {
+		return 0, err
+	}
+	if hours > time.Duration(1<<63-1)/24 || hours < time.Duration(-1<<63)/24 {
+		return 0, fmt.Errorf("duration %q is out of range", raw)
+	}
+	return hours * 24, nil
 }
 
 func auditActor(explicit string) (string, error) {
@@ -1605,6 +1683,7 @@ Monitoring commands:
   incidents    List recorded incidents
   intervals    List monitor status intervals
   failures     List failed probes and observer failures
+  observer-stats  Show sentinel and transfer timing samples
   maintenance  Add, cancel, or list maintenance windows
 
 Storage commands:
@@ -1623,5 +1702,5 @@ Global options:
 }
 
 func usage() error {
-	return fmt.Errorf("usage: upag [global options] <run|start|stop|status|restart|config|check|monitors|uptime|incidents|intervals|failures|maintenance|storage> [flags]; run 'upag --help' for details")
+	return fmt.Errorf("usage: upag [global options] <run|start|stop|status|restart|config|check|monitors|uptime|incidents|intervals|failures|observer-stats|maintenance|storage> [flags]; run 'upag --help' for details")
 }

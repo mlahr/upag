@@ -24,6 +24,9 @@ alerts:
   notification_retries:
     max_attempts: 3
     backoff: [1m, 5m, 15m]
+  transition_delay:
+    down: 2m
+    up: 2m
 
 http:
   # Optional status listener. Use port 0 to disable.
@@ -42,6 +45,14 @@ observer:
   failure_threshold: 3
   recovery_threshold: 1
   required_successes: 1
+  # Diagnostic download; it does not vote in the sentinel quorum.
+  transfer_check:
+    enabled: true
+    interval: 15m
+    incident_interval: 30s
+    timeout: 5s
+    slow_threshold: 3s
+    consecutive_slow_results: 2
   # Leave sentinels omitted or empty to use built-in public connectivity checks.
   # sentinels:
   #   - id: edge
@@ -69,6 +80,8 @@ storage:
   #   dsn: postgres://user:password@host:5432/postgres?sslmode=require
   probe_results:
     retention: 24h
+  connectivity_samples:
+    retention: 30d
   probe_minute_rollups:
     retention: 30d
   probe_hourly_rollups:
