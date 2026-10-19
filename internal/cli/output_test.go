@@ -136,8 +136,8 @@ func TestPrintFailures(t *testing.T) {
 	if !contains(output, "pdfdancer-api") {
 		t.Fatal("missing pdfdancer-api")
 	}
-	if !contains(output, "yes") {
-		t.Fatal("missing suppressed=yes")
+	if !contains(output, "observer down") {
+		t.Fatal("missing observer-down suppression reason")
 	}
 	if !contains(output, "gstatic") {
 		t.Fatal("missing gstatic sentinel")
